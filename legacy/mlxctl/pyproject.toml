@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "mlxctl"
 version = "0.1.0"
 description = "Manage local MLX inference servers"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Ivan D Vasin" }]
