@@ -124,9 +124,9 @@ supervisor starts only when a command needs it and exits after becoming idle.
 
 The exact plist, directories, environment variables, permissions, and control
 behavior are defined in the
-[`mlxctl` deployment contract](docs/deployment-contract.md). The author's
-chezmoi-managed deployment implements that contract, but it is not required
-for foreground operation.
+[`mlxctl` deployment contract](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/deployment-contract.md).
+The author's chezmoi-managed deployment implements that contract, but it is not
+required for foreground operation.
 
 ## Use the CLI
 
@@ -203,9 +203,10 @@ client remains active. A later CLI command can activate it again through
 launchd.
 
 For the exact filesystem and control interfaces shared with deployment tooling,
-see [`docs/deployment-contract.md`](docs/deployment-contract.md). For the
-server APIs used by readiness and metrics, see
-[`docs/research/mlx-server-apis.md`](docs/research/mlx-server-apis.md).
+see
+[`docs/deployment-contract.md`](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/deployment-contract.md).
+For the server APIs used by readiness and metrics, see
+[`docs/research/mlx-server-apis.md`](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/research/mlx-server-apis.md).
 
 ## Develop mlxctl
 
@@ -224,4 +225,5 @@ change.
 
 ## License
 
-`mlxctl` is available under the [MIT License](LICENSE).
+`mlxctl` is available under the
+[MIT License](https://github.com/nisavid/systools/blob/main/tools/mlxctl/LICENSE).
