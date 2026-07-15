@@ -23,8 +23,8 @@ dependencies = [
 ]
 
 [project.scripts]
-mlxctl = "mlxctl.cli:main"
-mlxd = "mlxctl.daemon:main"
+mlxctl = "mlxctl.entrypoints:cli_main"
+mlxd = "mlxctl.entrypoints:daemon_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlxctl"]
