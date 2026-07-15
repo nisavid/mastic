@@ -335,7 +335,7 @@ class LocalOperationBackend:
         name = request.name
         if name == "model.search":
             query = str(request.parameters.get("query", ""))
-            mode = str(request.parameters.get("mode", "curated"))
+            mode = str(request.parameters.get("source", "curated"))
             limit = int(request.parameters.get("limit", 20))
             return _result(
                 name,
@@ -625,10 +625,11 @@ class LocalOperationBackend:
         if callable(execute):
             return execute(name, parameters)
         if name == "model.install":
+            repository = str(parameters["repository"])
             return _plain(
                 self._model_supply.install(
-                    alias=str(parameters["alias"]),
-                    repo_id=str(parameters["repository"]),
+                    alias=str(parameters.get("alias") or repository.rsplit("/", 1)[-1]),
+                    repo_id=repository,
                     revision=str(parameters.get("revision", "main")),
                     offline=bool(parameters.get("offline", False)),
                 )

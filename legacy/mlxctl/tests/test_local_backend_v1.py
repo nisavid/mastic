@@ -140,6 +140,14 @@ class _ModelSupply:
         return VerificationResult("complete", "cache-completeness", ())
 
 
+class _DirectInstallSupply(_ModelSupply):
+    execute = None
+
+    def install(self, **parameters):
+        self.calls.append(("install", parameters))
+        return {"alias": parameters["alias"]}
+
+
 class LocalOperationBackendTests(unittest.TestCase):
     def _backend(self, root: Path, config: str = _CONFIG, **ports):
         config_path = root / "config.toml"
@@ -236,6 +244,31 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["items"], [])
             self.assertEqual(result["evidence"], ["no-metrics-observed"])
             self.assertEqual(metrics.calls, [("all", None)])
+
+    def test_model_search_uses_the_cli_source_and_install_derives_alias(self) -> None:
+        with TemporaryDirectory() as directory:
+            supply = _DirectInstallSupply()
+            backend, _ = self._backend(Path(directory), model_supply=supply)
+
+            backend.prepare(
+                OperationRequest(
+                    "model.search",
+                    {"query": "Qwen", "source": "broad", "limit": 3},
+                )
+            ).execute()
+            backend.prepare(
+                OperationRequest(
+                    "model.install",
+                    {
+                        "repository": "mlx-community/Qwen-OptiQ",
+                        "revision": "a" * 40,
+                    },
+                )
+            ).execute()
+
+            self.assertIn(("search", "Qwen", "broad", 3), supply.calls)
+            install = next(call for call in supply.calls if call[0] == "install")
+            self.assertEqual(install[1]["alias"], "Qwen-OptiQ")
 
     def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
         with TemporaryDirectory() as directory:
