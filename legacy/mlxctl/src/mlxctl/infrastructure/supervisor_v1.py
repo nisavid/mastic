@@ -82,6 +82,15 @@ class ServiceTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceDrainStatus:
+    """Result of preventing new work and waiting for one route to become idle."""
+
+    service: str
+    route: str
+    state: str = "drained"
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorStatus:
     """Read-only Supervisor observation."""
 
@@ -461,6 +470,30 @@ class Supervisor:
             self._persist_run_locked(run)
             self._finish_operation_locked(operation_id, "stopped")
             return ServiceTransition(operation_id, run.status)
+
+    def drain_service(self, name: str) -> ServiceDrainStatus:
+        """Reject new work for one route and wait boundedly for active work."""
+
+        service = self._desired_state.service(name)
+        if service is None:
+            raise ServiceNotFoundError(name)
+        route = self._gateway_route(service)
+        with self._lock:
+            run = self._runs.get(name)
+            endpoint = (
+                f"http://127.0.0.1:{run.status.upstream_port}"
+                if run is not None and run.status.upstream_port is not None
+                else None
+            )
+            self._gateway.set_route(route, "unavailable", endpoint)
+        deadline = self._clock.monotonic() + self._drain_timeout
+        while self._gateway.is_busy(route):
+            if self._clock.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Inference Service {name!r} is still serving an active request"
+                )
+            self._clock.sleep(self._readiness_poll_interval)
+        return ServiceDrainStatus(name, route)
 
     def restart_service(self, name: str) -> ServiceTransition:
         """Create a new Service Run after a bounded stop of the previous run."""

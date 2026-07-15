@@ -58,6 +58,10 @@ class FakeSupervisor:
         self.calls.append(("start_service", resource))
         return {"service": resource, "state": "ready"}
 
+    def drain_service(self, resource):
+        self.calls.append(("drain_service", resource))
+        return {"service": resource, "state": "drained"}
+
 
 class FakeClientAdapter:
     def __init__(self) -> None:
@@ -121,11 +125,16 @@ class OperationPortTests(unittest.TestCase):
         port = SupervisorOperationPort(supervisor)  # type: ignore[arg-type]
 
         started = port.execute("service.start", {"resource": "coding"})
+        drained = port.execute("service.drain", {"resource": "coding"})
         stopped = port.execute("supervisor.stop", {})
 
         self.assertEqual(started, {"service": "coding", "state": "ready"})
+        self.assertEqual(drained, {"service": "coding", "state": "drained"})
         self.assertEqual(stopped["state"], "stopped")
-        self.assertEqual(supervisor.calls, [("start_service", "coding"), ("stop",)])
+        self.assertEqual(
+            supervisor.calls,
+            [("start_service", "coding"), ("drain_service", "coding"), ("stop",)],
+        )
 
     def test_client_port_uses_one_preview_apply_test_remove_contract(self) -> None:
         adapter = FakeClientAdapter()

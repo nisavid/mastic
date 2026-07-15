@@ -90,6 +90,8 @@ class SupervisorOperationPort:
             value = self._supervisor.restart()
         elif operation == "service.start":
             value = self._supervisor.start_service(resource)
+        elif operation == "service.drain":
+            value = self._supervisor.drain_service(resource)
         elif operation == "service.stop":
             value = self._supervisor.stop_service(resource)
         elif operation == "service.restart":

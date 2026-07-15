@@ -336,6 +336,40 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(stopped.state, "stopped")
         self.assertFalse(self.gateway.running)
         self.assertIn(("drain", 2), self.gateway.calls)
+
+    def test_service_drain_rejects_new_route_work_and_waits_for_idle(self) -> None:
+        supervisor = self.supervisor
+        supervisor.start_service("coding")
+        route = "coding"
+        self.gateway.busy_services.add(route)
+        original_sleep = self.clock.sleep
+
+        def become_idle(seconds: float) -> None:
+            self.gateway.busy_services.discard(route)
+            original_sleep(seconds)
+
+        self.clock.sleep = become_idle  # type: ignore[method-assign]
+        drained = supervisor.drain_service("coding")
+
+        self.assertEqual(drained.state, "drained")
+        self.assertEqual(drained.route, route)
+        self.assertEqual(self.gateway.routes[route][0], "unavailable")
+
+    def test_service_drain_times_out_without_stopping_a_busy_process(self) -> None:
+        supervisor = self.supervisor
+        transition = supervisor.start_service("coding")
+        self.gateway.busy_services.add("coding")
+
+        with self.assertRaisesRegex(RuntimeError, "active request"):
+            supervisor.drain_service("coding")
+
+        self.assertEqual(
+            supervisor.service_status("coding").state, ServiceRunState.READY
+        )
+        self.assertEqual(
+            self.processes.processes[transition.run.pid].terminate_calls,
+            0,  # type: ignore[index]
+        )
         self.assertTrue(self.store.operation_items)
         operation_ids = set(self.store.operation_items)
         self.assertTrue(
