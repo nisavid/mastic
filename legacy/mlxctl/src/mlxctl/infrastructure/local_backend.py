@@ -543,6 +543,8 @@ class LocalOperationBackend:
             )
         if name == "config.diff":
             text = request.parameters.get("text")
+            if text is None and request.parameters.get("source") is not None:
+                text = _read_config_source(str(request.parameters["source"]))
             candidate = (
                 tomlkit.parse(str(text)) if text is not None else snapshot.document
             )
@@ -717,7 +719,10 @@ class LocalOperationBackend:
         name = request.name
         parameters = request.parameters
         if name == "config.import":
-            return _plain(self._config_store.import_text(str(parameters["text"])))
+            text = parameters.get("text")
+            if text is None:
+                text = _read_config_source(str(parameters["source"]))
+            return _plain(self._config_store.import_text(str(text)))
         if name == "config.restore":
             return _plain(self._config_store.restore(str(parameters["revision"])))
         if name == "model.trust":
@@ -832,6 +837,26 @@ def _not_found(noun: str, resource: str) -> ApplicationError:
         f"{noun} {resource!r} is not configured",
         next_actions=(f"list {noun.lower()} resources",),
     )
+
+
+def _read_config_source(source: str, *, max_bytes: int = 1024 * 1024) -> str:
+    path = Path(source).expanduser()
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise ApplicationError(
+            "config_source_missing", f"config source is absent: {source}"
+        ) from error
+    if path.is_symlink() or not path.is_file():
+        raise ApplicationError(
+            "config_source_unsafe", "config source must be a regular non-symlink file"
+        )
+    if metadata.st_size > max_bytes:
+        raise ApplicationError(
+            "config_source_too_large",
+            f"config source exceeds the {max_bytes}-byte limit",
+        )
+    return path.read_text(encoding="utf-8")
 
 
 def _result(operation: str, **value: object) -> Mapping[str, object]:

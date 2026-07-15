@@ -119,7 +119,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.app.focused.id, "parameter-service")
             labels = "\n".join(str(label.content) for label in self.app.query(Label))
             self.assertIn("Service · Argument · required", labels)
-            self.assertIn("Model Alias · Option --model-alias · optional", labels)
+            self.assertIn("Model Alias · Option --model-alias · required", labels)
 
             await self.app.open_operation("runtime.install")
             runtime = self.app.query_one("#parameter-runtime", Select)

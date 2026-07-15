@@ -82,6 +82,17 @@ class OperationCatalogueTests(unittest.TestCase):
         self.assertEqual(search.parameters[0].name, "query")
         self.assertEqual(search.parameters[1].accepted, ("curated", "broad", "local"))
         self.assertEqual(self.catalogue["status"].parameters, ())
+        service = self.catalogue["service.create"]
+        required_options = {
+            parameter.name
+            for parameter in service.parameters
+            if parameter.required and parameter.kind is ParameterKind.OPTION
+        }
+        self.assertEqual(required_options, {"model_alias", "runtime"})
+        self.assertEqual(
+            self.catalogue["client.configure"].parameters[0].accepted,
+            ("codex", "hindsight"),
+        )
 
     def test_cli_and_tui_capabilities_are_derived_from_same_entries(self) -> None:
         for operation in self.catalogue.values():

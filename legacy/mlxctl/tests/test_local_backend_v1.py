@@ -304,6 +304,22 @@ class LocalOperationBackendTests(unittest.TestCase):
             install = next(call for call in supply.calls if call[0] == "install")
             self.assertEqual(install[1]["alias"], "Qwen-OptiQ")
 
+    def test_config_import_reads_a_bounded_explicit_source(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend, _ = self._backend(root)
+            source = root / "candidate.toml"
+            source.write_text(_CONFIG.replace("port = 8766", "port = 9000"))
+
+            result = backend.prepare(
+                OperationRequest(
+                    "config.import",
+                    {"source": str(source), "confirmed": True},
+                )
+            ).execute()
+
+            self.assertEqual(result["resource"]["value"]["gateway"]["port"], 9000)
+
     def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
         with TemporaryDirectory() as directory:
             supervisor = _Port()

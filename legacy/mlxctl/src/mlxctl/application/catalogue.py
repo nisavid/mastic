@@ -253,6 +253,7 @@ def _option(
     value_type: str = "string",
     accepted: tuple[str, ...] = (),
     flag: str | None = None,
+    required: bool = False,
 ) -> Parameter:
     return Parameter(
         name=name,
@@ -261,6 +262,7 @@ def _option(
         value_type=value_type,
         accepted=accepted,
         flag=flag or "--" + name.replace("_", "-"),
+        required=required,
     )
 
 
@@ -304,6 +306,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "resource", "Optional resource identity to filter.", required=False
             ),
         )
+    if name == "gateway.configure":
+        return (
+            _option("host", "Literal loopback bind address."),
+            _option("port", "Stable Gateway port.", value_type="integer"),
+        )
     if name == "runtime.install":
         return (
             _argument(
@@ -323,7 +330,26 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 resource_help["runtime"],
                 accepted=("mlx_lm", "mlx_vlm", "optiq"),
             ),
-            _option("path", "Existing runtime environment to probe and adopt."),
+            _option(
+                "path",
+                "Existing runtime environment to probe and adopt.",
+                required=True,
+            ),
+        )
+    if name == "runtime.update":
+        return (
+            _argument("resource", resource_help["runtime"]),
+            _option(
+                "channel", "Target installation channel.", accepted=("tested", "custom")
+            ),
+            _option("version", "Exact custom target version."),
+        )
+    if name == "runtime.rollback":
+        return (
+            _argument("resource", resource_help["runtime"]),
+            _option(
+                "target", "Previously retained Runtime Installation ID.", required=True
+            ),
         )
     if name.startswith("runtime.") and name not in {
         "runtime.list",
@@ -354,6 +380,37 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "offline", "Require already-cached exact content.", value_type="boolean"
             ),
         )
+    if name in {"model.update", "model.rollback"}:
+        return (
+            _argument("resource", resource_help["model"]),
+            _option(
+                "revision",
+                "Exact target commit SHA or reference to resolve.",
+                required=True,
+            ),
+            _option(
+                "offline", "Require already-cached exact content.", value_type="boolean"
+            ),
+        )
+    if name == "model.trust":
+        return (
+            _argument("resource", resource_help["model"]),
+            _option(
+                "runtime",
+                "Exact Runtime Installation receiving the grant.",
+                required=True,
+            ),
+            _option(
+                "accepted_risks",
+                "Comma-separated revision-scoped risks explicitly accepted.",
+                required=True,
+            ),
+        )
+    if name == "model.cache.move":
+        return (
+            _argument("resource", "Cached Revision identity."),
+            _option("destination", "Existing target cache directory.", required=True),
+        )
     if name.startswith("model.cache.") and name != "model.cache.list":
         return (
             _argument(
@@ -366,12 +423,34 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
     if name == "service.create":
         return (
             _argument("service", "New Inference Service name."),
-            _option("model_alias", "Model Alias selected by this service."),
-            _option("runtime", "Exact Runtime Installation ID."),
+            _option(
+                "model_alias", "Model Alias selected by this service.", required=True
+            ),
+            _option("runtime", "Exact Runtime Installation ID.", required=True),
             _option("route", "Stable Gateway route; defaults to the service name."),
+            _option(
+                "activation",
+                "Activation policy.",
+                accepted=("manual", "supervisor"),
+            ),
             _option(
                 "pinned",
                 "Never auto-stop this service under memory pressure.",
+                value_type="boolean",
+            ),
+        )
+    if name == "service.edit":
+        return (
+            _argument("resource", resource_help["service"]),
+            _option("model_alias", "Replacement Model Alias."),
+            _option("runtime", "Replacement Runtime Installation ID."),
+            _option("route", "Replacement stable Gateway route."),
+            _option(
+                "activation", "Activation policy.", accepted=("manual", "supervisor")
+            ),
+            _option(
+                "pinned",
+                "Pin against automatic pressure eviction.",
                 value_type="boolean",
             ),
         )
@@ -381,8 +460,21 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         return (_argument("resource", resource_help["operation"]),)
     if name == "client.configure":
         return (
-            _argument("client", "Client Integration name."),
-            _option("service", "Inference Service route the client should use."),
+            _argument(
+                "client", "Client Integration name.", accepted=("codex", "hindsight")
+            ),
+            _option(
+                "service",
+                "Inference Service route the client should use.",
+                required=True,
+            ),
+            _option("profile", "Hindsight profile name when configuring Hindsight."),
+            _option("context_window", "Client context window.", value_type="integer"),
+        )
+    if name == "client.test":
+        return (
+            _argument("resource", resource_help["client"]),
+            _option("profile", "Sampling profile to exercise."),
         )
     if name.startswith("client.") and name != "client.list":
         return (_argument("resource", resource_help["client"]),)
@@ -396,4 +488,6 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "revision", "Configuration revision from `mlxctl config history`."
             ),
         )
+    if name == "config.diff":
+        return (_option("source", "TOML file to compare with current desired state."),)
     return ()
