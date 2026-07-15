@@ -47,6 +47,18 @@ class ApplicationManager:
         def handle(request: OperationRequest) -> OperationResult:
             operation = self._catalogue[request.name]
             prepared = self._backend.prepare(request)
+            if (
+                operation.confirmation
+                and request.parameters.get("confirmed") is not True
+            ):
+                raise ApplicationError(
+                    "confirmation_required",
+                    f"{request.name} requires review and explicit confirmation",
+                    next_actions=(
+                        f"mlxctl {request.name.replace('.', ' ')} --help",
+                        "rerun with --yes after reviewing the complete plan",
+                    ),
+                )
             if prepared.requires_supervisor:
                 if operation.supervisor is SupervisorRequirement.NEVER_START:
                     raise ApplicationError(

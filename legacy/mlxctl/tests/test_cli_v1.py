@@ -108,11 +108,22 @@ class CliV1Tests(unittest.TestCase):
 
     def test_model_cache_is_a_real_nested_command_group(self) -> None:
         result = self.runner.invoke(
-            self.app, ["model", "cache", "evict", "qwen-exact", "--json"]
+            self.app,
+            ["model", "cache", "evict", "qwen-exact", "--yes", "--json"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.dispatcher.requests[-1].name, "model.cache.evict")
+        self.assertTrue(self.dispatcher.requests[-1].parameters["confirmed"])
+
+    def test_destructive_command_requires_prompt_or_explicit_yes(self) -> None:
+        denied = self.runner.invoke(
+            self.app,
+            ["model", "cache", "evict", "qwen-exact", "--json"],
+        )
+
+        self.assertNotEqual(denied.exit_code, 0)
+        self.assertFalse(self.dispatcher.requests)
 
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])

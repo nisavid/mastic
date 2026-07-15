@@ -117,12 +117,22 @@ def _add_command(
         json_output = bool(values.pop("json_output"))
         json_lines = bool(values.pop("json_lines"))
         plain = bool(values.pop("plain"))
+        confirmed = bool(values.pop("yes", False))
         parameters = {
             key: value
             for key, value in values.items()
             if value is not None and value is not False
         }
         _validate_accepted(operation.parameters, parameters)
+        if operation.confirmation:
+            if not confirmed:
+                if (
+                    json_output
+                    or json_lines
+                    or not typer.confirm(f"Apply {operation.name} with {parameters}?")
+                ):
+                    raise typer.Abort()
+            parameters["confirmed"] = True
         _invoke(
             dispatcher,
             operation.name,
@@ -134,12 +144,31 @@ def _add_command(
 
     command.__name__ = "command_" + operation.name.replace(".", "_")
     command.__doc__ = help_text
-    command.__signature__ = _command_signature(operation.parameters)  # type: ignore[attr-defined]
+    command.__signature__ = _command_signature(  # type: ignore[attr-defined]
+        operation.parameters, confirmation=operation.confirmation
+    )
     app.command(command_name, help=help_text)(command)
 
 
-def _command_signature(parameters: tuple[Parameter, ...]) -> Signature:
+def _command_signature(
+    parameters: tuple[Parameter, ...], *, confirmation: bool
+) -> Signature:
     result = [_signature_parameter(parameter) for parameter in parameters]
+    if confirmation and not any(parameter.name == "yes" for parameter in parameters):
+        result.append(
+            SignatureParameter(
+                "yes",
+                SignatureParameter.POSITIONAL_OR_KEYWORD,
+                default=False,
+                annotation=Annotated[
+                    bool,
+                    typer.Option(
+                        "--yes",
+                        help="Confirm the complete mutation plan noninteractively.",
+                    ),
+                ],
+            )
+        )
     result.extend(
         (
             SignatureParameter(

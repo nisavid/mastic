@@ -43,10 +43,19 @@ class ApplicationManagerTests(unittest.TestCase):
         ApplicationManager(self.catalogue, self.backend).register(self.dispatcher)
 
     def test_registers_every_cli_and_tui_operation(self) -> None:
-        for name in self.catalogue:
+        for name, operation in self.catalogue.items():
             with self.subTest(operation=name):
-                result = self.dispatcher.execute(OperationRequest(name))
+                parameters = {"confirmed": True} if operation.confirmation else {}
+                result = self.dispatcher.execute(OperationRequest(name, parameters))
                 self.assertEqual(result.operation, name)
+
+    def test_confirmation_is_enforced_below_both_interfaces(self) -> None:
+        with self.assertRaises(ApplicationError) as raised:
+            self.dispatcher.execute(
+                OperationRequest("model.cache.evict", {"resource": "cached"})
+            )
+
+        self.assertEqual(raised.exception.code, "confirmation_required")
 
     def test_service_start_can_visibly_activate_supervisor(self) -> None:
         self.backend.require.add("service.start")
@@ -59,7 +68,9 @@ class ApplicationManagerTests(unittest.TestCase):
         self.assertEqual(self.activator.calls, 1)
 
     def test_local_config_mutation_does_not_start_supervisor(self) -> None:
-        result = self.dispatcher.execute(OperationRequest("config.restore"))
+        result = self.dispatcher.execute(
+            OperationRequest("config.restore", {"confirmed": True})
+        )
 
         self.assertFalse(result.supervisor_started)
         self.assertEqual(self.activator.calls, 0)
