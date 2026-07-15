@@ -53,7 +53,7 @@ class LaunchdSupervisorActivator:
         self._socket_path = Path(socket_path)
         self._timeout = timeout_seconds
         self._poll = poll_interval
-        self._socket_ready = socket_ready or _private_socket_ready
+        self._socket_ready = socket_ready or private_socket_ready
         self._monotonic = monotonic
         self._sleep = sleep
 
@@ -194,7 +194,7 @@ class StateMetricsSource:
         )
 
 
-def _private_socket_ready(path: Path) -> bool:
+def private_socket_ready(path: Path) -> bool:
     try:
         metadata = path.lstat()
     except FileNotFoundError:

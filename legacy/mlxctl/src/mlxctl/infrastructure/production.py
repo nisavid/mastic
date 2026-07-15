@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +24,10 @@ from mlxctl.infrastructure.control_client import UnixControlClient
 from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mlxctl.infrastructure.gateway_runtime import GatewayRuntime
 from mlxctl.infrastructure.gateway_credential import GatewayCredential
-from mlxctl.infrastructure.host_integration import LaunchdSupervisorActivator
+from mlxctl.infrastructure.host_integration import (
+    LaunchdSupervisorActivator,
+    private_socket_ready,
+)
 from mlxctl.infrastructure.launchd import LaunchdAdapter
 from mlxctl.infrastructure.model_intelligence import (
     HuggingFaceModelRepository,
@@ -190,16 +192,76 @@ class _ActivatingOperationOwner:
 class _LocalSupervisorOwner:
     """Forward lifecycle work without starting a Supervisor just to stop it."""
 
-    def __init__(self, remote: OperationOwner, launchd: LaunchdAdapter) -> None:
+    def __init__(
+        self,
+        remote: OperationOwner,
+        launchd: LaunchdAdapter,
+        control_socket: Path,
+        state_store: OperationalStateStore,
+        config_store: ConfigStore[MlxctlConfig],
+        *,
+        clock: Callable[[], int] | None = None,
+    ) -> None:
         self._remote = remote
         self._launchd = launchd
+        self._control_socket = control_socket
+        self._state_store = state_store
+        self._config_store = config_store
+        self._clock = clock or SystemClock().time_ns
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
-        if operation == "supervisor.stop" and not self._launchd.status().running:
+        if operation == "supervisor.stop":
+            if self._launchd.status().running or private_socket_ready(
+                self._control_socket
+            ):
+                return self._remote.execute(operation, parameters)
+            self._reconcile_stopped()
             return {"state": "stopped", "already_stopped": True}
         return self._remote.execute(operation, parameters)
+
+    def _reconcile_stopped(self) -> None:
+        config = (
+            self._config_store.load().value
+            if self._config_store.exists
+            else validate_config({"schema_version": 1})
+        )
+        self._state_store.put_snapshot(
+            {
+                "kind": "supervisor",
+                "id": "supervisor",
+                "version": self._clock(),
+                "state": "stopped",
+                "pressure": "unknown",
+            }
+        )
+        self._state_store.put_snapshot(
+            {
+                "kind": "gateway",
+                "id": "gateway",
+                "version": self._clock(),
+                "state": "stopped",
+                "host": config.gateway.host,
+                "port": config.gateway.port,
+            }
+        )
+        latest_runs: dict[str, Mapping[str, object]] = {}
+        for run in self._state_store.snapshots("service_run"):
+            service = str(run.get("service", run.get("service_name", "")))
+            if service:
+                latest_runs[service] = run
+        for service, run in latest_runs.items():
+            self._state_store.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": str(run["id"]),
+                    "version": self._clock(),
+                    "service": service,
+                    "run_id": str(run.get("run_id", "unknown")),
+                    "state": "stopped",
+                }
+            )
 
 
 class _DispatcherOwner:
@@ -249,12 +311,9 @@ class _GatewayMutationGuard:
         return self._dispatcher.execute(request)
 
     def _check(self, request: OperationRequest) -> None:
-        socket_running = False
-        if self._control_socket is not None:
-            try:
-                socket_running = stat.S_ISSOCK(self._control_socket.lstat().st_mode)
-            except FileNotFoundError:
-                pass
+        socket_running = self._control_socket is not None and private_socket_ready(
+            self._control_socket
+        )
         if request.name == "gateway.configure" and (
             self._launchd.status().running or socket_running
         ):
@@ -367,7 +426,9 @@ def compose_local(
         activator=activator,
         runtime_supply=remote,
         model_supply=model,
-        supervisor=_LocalSupervisorOwner(remote, launchd),
+        supervisor=_LocalSupervisorOwner(
+            remote, launchd, paths.control_socket, state_store, config_store
+        ),
         setup=setup,
         clients=client,
         config_store=config_store,

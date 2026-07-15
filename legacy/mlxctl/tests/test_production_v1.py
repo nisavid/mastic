@@ -15,6 +15,7 @@ from unittest.mock import patch
 from mlxctl.application.config_schema import validate_config
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.application.setup import SetupPreflight
+from mlxctl.infrastructure.config_store import ConfigStore
 from mlxctl.infrastructure.model_supply import CacheInventory, CachedRevision
 from mlxctl.infrastructure.gateway_credential import GatewayCredential
 from mlxctl.infrastructure.paths_v1 import MlxctlPaths
@@ -133,22 +134,118 @@ class ProductionCompositionTests(unittest.TestCase):
     def test_local_supervisor_stop_is_idempotent_without_remote_activation(
         self,
     ) -> None:
-        remote = _Port({"state": "stopping"})
-        owner = _LocalSupervisorOwner(remote, _Launchd(False))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote = _Port({"state": "stopping"})
+            owner = _LocalSupervisorOwner(
+                remote,
+                _Launchd(False),
+                root / "mlxd.sock",
+                OperationalStateStore(root / "state.db"),
+                ConfigStore(root / "config.toml", validate_config),
+            )
 
-        result = owner.execute("supervisor.stop", {})
+            result = owner.execute("supervisor.stop", {})
 
         self.assertEqual(result, {"state": "stopped", "already_stopped": True})
         self.assertEqual(remote.calls, [])
 
     def test_local_supervisor_stop_forwards_when_launchd_is_running(self) -> None:
-        remote = _Port({"state": "stopping"})
-        owner = _LocalSupervisorOwner(remote, _Launchd(True))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote = _Port({"state": "stopping"})
+            owner = _LocalSupervisorOwner(
+                remote,
+                _Launchd(True),
+                root / "mlxd.sock",
+                OperationalStateStore(root / "state.db"),
+                ConfigStore(root / "config.toml", validate_config),
+            )
 
-        result = owner.execute("supervisor.stop", {})
+            result = owner.execute("supervisor.stop", {})
 
         self.assertEqual(result, {"state": "stopping"})
         self.assertEqual(remote.calls, [("supervisor.stop", {})])
+
+    def test_local_supervisor_stop_forwards_to_foreground_socket_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "mlxd.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(str(path))
+            remote = _Port({"state": "stopping"})
+            owner = _LocalSupervisorOwner(
+                remote,
+                _Launchd(False),
+                path,
+                OperationalStateStore(root / "state.db"),
+                ConfigStore(root / "config.toml", validate_config),
+            )
+
+            result = owner.execute("supervisor.stop", {})
+
+        self.assertEqual(result, {"state": "stopping"})
+        self.assertEqual(remote.calls, [("supervisor.stop", {})])
+
+    def test_inactive_supervisor_stop_reconciles_stale_running_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = OperationalStateStore(root / "state.db")
+            config = ConfigStore(root / "config.toml", validate_config)
+            config.import_text(
+                "schema_version = 1\n[gateway]\nhost = '127.0.0.1'\nport = 9876\n"
+            )
+            state.put_snapshot(
+                {
+                    "kind": "supervisor",
+                    "id": "supervisor",
+                    "version": 1,
+                    "state": "running",
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "gateway",
+                    "id": "gateway",
+                    "version": 2,
+                    "state": "running",
+                    "host": "127.0.0.1",
+                    "port": 9876,
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "coding/run-1",
+                    "version": 3,
+                    "service": "coding",
+                    "run_id": "run-1",
+                    "state": "ready",
+                    "pid": 123,
+                }
+            )
+            versions = iter(range(10, 20))
+            owner = _LocalSupervisorOwner(
+                _Port(),
+                _Launchd(False),
+                root / "mlxd.sock",
+                state,
+                config,
+                clock=lambda: next(versions),
+            )
+
+            owner.execute("supervisor.stop", {})
+
+            self.assertEqual(
+                state.snapshot("supervisor", "supervisor")["state"], "stopped"
+            )
+            gateway = state.snapshot("gateway", "gateway")
+            self.assertEqual(gateway["state"], "stopped")
+            self.assertEqual(gateway["port"], 9876)
+            service = state.snapshot("service_run", "coding/run-1")
+            self.assertEqual(service["state"], "stopped")
+            self.assertNotIn("pid", service)
 
     def test_running_gateway_endpoint_edit_fails_before_preview_or_execution(
         self,
