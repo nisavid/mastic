@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from inspect import Parameter as SignatureParameter
+from inspect import Signature
 from typing import Annotated, Protocol
 
 import typer
 from rich.console import Console
 from rich.pretty import Pretty
 
-from mlxctl.application.catalogue import Operation
+from mlxctl.application.catalogue import Operation, Parameter, ParameterKind
 from mlxctl.application.dispatch import (
     ApplicationError,
     OperationRequest,
@@ -32,27 +34,6 @@ _GROUPS = (
     "operation",
     "client",
     "config",
-)
-_NO_RESOURCE = frozenset(
-    {
-        "runtime.list",
-        "runtime.available",
-        "model.search",
-        "model.list",
-        "model.cache.list",
-        "service.list",
-        "service.create",
-        "operation.list",
-        "client.list",
-        "config.path",
-        "config.show",
-        "config.validate",
-        "config.diff",
-        "config.history",
-        "config.export",
-        "config.import",
-        "config.restore",
-    }
 )
 
 
@@ -82,7 +63,7 @@ def build_cli(
             raise typer.Exit(tui_launcher())
 
     for name in _ROOT_COMMANDS:
-        _add_command(app, name, catalogue[name], dispatcher, requires_resource=False)
+        _add_command(app, name, catalogue[name], dispatcher)
 
     @app.command("tui", help=catalogue["tui"].summary)
     def tui() -> None:
@@ -115,17 +96,7 @@ def build_cli(
         group_app = groups.get(group)
         if group_app is None:
             continue
-        requires_resource = operation_name not in _NO_RESOURCE and group not in {
-            "supervisor",
-            "gateway",
-        }
-        _add_command(
-            group_app,
-            command,
-            operation,
-            dispatcher,
-            requires_resource=requires_resource,
-        )
+        _add_command(group_app, command, operation, dispatcher)
     return app
 
 
@@ -134,8 +105,6 @@ def _add_command(
     command_name: str,
     operation: Operation,
     dispatcher: Dispatcher,
-    *,
-    requires_resource: bool,
 ) -> None:
     help_text = operation.summary
     if operation.name == "status":
@@ -144,64 +113,115 @@ def _add_command(
             "and memory-pressure overview."
         )
 
-    if requires_resource:
-
-        def command(
-            resource: Annotated[
-                str,
-                typer.Argument(
-                    help=(
-                        "Named resource. Use the corresponding list or available "
-                        "command to discover accepted values."
-                    ),
-                ),
-            ],
-            json_output: Annotated[
-                bool, typer.Option("--json", help="Emit deterministic versioned JSON.")
-            ] = False,
-            json_lines: Annotated[
-                bool,
-                typer.Option("--json-lines", help="Emit events as versioned NDJSON."),
-            ] = False,
-            plain: Annotated[
-                bool, typer.Option("--plain", help="Disable terminal decoration.")
-            ] = False,
-        ) -> None:
-            _invoke(
-                dispatcher,
-                operation.name,
-                {"resource": resource},
-                json_output=json_output,
-                json_lines=json_lines,
-                plain=plain,
-            )
-
-    else:
-
-        def command(
-            json_output: Annotated[
-                bool, typer.Option("--json", help="Emit deterministic versioned JSON.")
-            ] = False,
-            json_lines: Annotated[
-                bool,
-                typer.Option("--json-lines", help="Emit events as versioned NDJSON."),
-            ] = False,
-            plain: Annotated[
-                bool, typer.Option("--plain", help="Disable terminal decoration.")
-            ] = False,
-        ) -> None:
-            _invoke(
-                dispatcher,
-                operation.name,
-                {},
-                json_output=json_output,
-                json_lines=json_lines,
-                plain=plain,
-            )
+    def command(**values: object) -> None:
+        json_output = bool(values.pop("json_output"))
+        json_lines = bool(values.pop("json_lines"))
+        plain = bool(values.pop("plain"))
+        parameters = {
+            key: value
+            for key, value in values.items()
+            if value is not None and value is not False
+        }
+        _validate_accepted(operation.parameters, parameters)
+        _invoke(
+            dispatcher,
+            operation.name,
+            parameters,
+            json_output=json_output,
+            json_lines=json_lines,
+            plain=plain,
+        )
 
     command.__name__ = "command_" + operation.name.replace(".", "_")
     command.__doc__ = help_text
+    command.__signature__ = _command_signature(operation.parameters)  # type: ignore[attr-defined]
     app.command(command_name, help=help_text)(command)
+
+
+def _command_signature(parameters: tuple[Parameter, ...]) -> Signature:
+    result = [_signature_parameter(parameter) for parameter in parameters]
+    result.extend(
+        (
+            SignatureParameter(
+                "json_output",
+                SignatureParameter.POSITIONAL_OR_KEYWORD,
+                default=False,
+                annotation=Annotated[
+                    bool,
+                    typer.Option("--json", help="Emit deterministic versioned JSON."),
+                ],
+            ),
+            SignatureParameter(
+                "json_lines",
+                SignatureParameter.POSITIONAL_OR_KEYWORD,
+                default=False,
+                annotation=Annotated[
+                    bool,
+                    typer.Option(
+                        "--json-lines", help="Emit events as versioned NDJSON."
+                    ),
+                ],
+            ),
+            SignatureParameter(
+                "plain",
+                SignatureParameter.POSITIONAL_OR_KEYWORD,
+                default=False,
+                annotation=Annotated[
+                    bool,
+                    typer.Option("--plain", help="Disable terminal decoration."),
+                ],
+            ),
+        )
+    )
+    return Signature(result)
+
+
+def _signature_parameter(parameter: Parameter) -> SignatureParameter:
+    accepted = (
+        f" Accepted values: {', '.join(parameter.accepted)}."
+        if parameter.accepted
+        else ""
+    )
+    help_text = parameter.help + accepted
+    if parameter.value_type == "boolean":
+        value_type: object = bool
+        default: object = False
+    elif parameter.value_type == "integer":
+        value_type = int | None
+        default = None
+    else:
+        value_type = str if parameter.required else str | None
+        default = SignatureParameter.empty if parameter.required else None
+    if parameter.kind is ParameterKind.ARGUMENT:
+        annotation = Annotated[value_type, typer.Argument(help=help_text)]
+    else:
+        annotation = Annotated[
+            value_type,
+            typer.Option(parameter.flag or "--" + parameter.name, help=help_text),
+        ]
+    return SignatureParameter(
+        parameter.name,
+        SignatureParameter.POSITIONAL_OR_KEYWORD,
+        default=default,
+        annotation=annotation,
+    )
+
+
+def _validate_accepted(
+    specifications: tuple[Parameter, ...], values: Mapping[str, object]
+) -> None:
+    for specification in specifications:
+        value = values.get(specification.name)
+        if (
+            value is not None
+            and specification.accepted
+            and value not in specification.accepted
+        ):
+            accepted = ", ".join(specification.accepted)
+            raise typer.BadParameter(
+                f"{specification.name} must be one of: {accepted}",
+                param_hint=specification.flag or specification.name.upper(),
+            )
 
 
 def _invoke(

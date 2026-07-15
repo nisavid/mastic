@@ -19,6 +19,22 @@ class SupervisorRequirement(StrEnum):
     REQUIRED = "required"
 
 
+class ParameterKind(StrEnum):
+    ARGUMENT = "argument"
+    OPTION = "option"
+
+
+@dataclass(frozen=True, slots=True)
+class Parameter:
+    name: str
+    kind: ParameterKind
+    help: str
+    required: bool = False
+    value_type: str = "string"
+    accepted: tuple[str, ...] = ()
+    flag: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Operation:
     name: str
@@ -28,6 +44,7 @@ class Operation:
     confirmation: bool = False
     examples: tuple[str, ...] = ()
     output_modes: frozenset[str] = frozenset({"human", "plain", "json"})
+    parameters: tuple[Parameter, ...] = ()
     cli: bool = True
     tui: bool = True
 
@@ -192,6 +209,7 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
                 confirmation=kind is OperationKind.MUTATION and name not in _NO_CONFIRM,
                 examples=(_example(name),),
                 output_modes=frozenset({"human", "plain", "json", "json-lines"}),
+                parameters=_parameters(name),
             )
     return MappingProxyType(operations)
 
@@ -210,3 +228,172 @@ def _summary(name: str) -> str:
 
 def _example(name: str) -> str:
     return "mlxctl " + name.replace(".", " ")
+
+
+def _argument(
+    name: str,
+    help: str,
+    *,
+    required: bool = True,
+    accepted: tuple[str, ...] = (),
+) -> Parameter:
+    return Parameter(
+        name=name,
+        kind=ParameterKind.ARGUMENT,
+        help=help,
+        required=required,
+        accepted=accepted,
+    )
+
+
+def _option(
+    name: str,
+    help: str,
+    *,
+    value_type: str = "string",
+    accepted: tuple[str, ...] = (),
+    flag: str | None = None,
+) -> Parameter:
+    return Parameter(
+        name=name,
+        kind=ParameterKind.OPTION,
+        help=help,
+        value_type=value_type,
+        accepted=accepted,
+        flag=flag or "--" + name.replace("_", "-"),
+    )
+
+
+def _parameters(name: str) -> tuple[Parameter, ...]:
+    resource_help = {
+        "runtime": "Runtime Definition or Installation ID; discover values with `mlxctl runtime available` or `runtime list`.",
+        "model": "Model repository, installation, alias, or exact revision; discover values with `mlxctl model search` or `model list`.",
+        "service": "Inference Service name; discover values with `mlxctl service list`.",
+        "operation": "Durable operation ID; discover values with `mlxctl operation list`.",
+        "client": "Client Integration name; discover values with `mlxctl client list`.",
+    }
+    if name == "setup":
+        return (
+            _option(
+                "profile",
+                "Setup profile to preselect; the complete plan remains editable.",
+                accepted=("recommended", "expert"),
+            ),
+            _option(
+                "offline",
+                "Use only installed definitions, local evidence, and cached bytes.",
+                value_type="boolean",
+            ),
+            _option(
+                "yes",
+                "Apply an exact noninteractive plan after all required values are supplied.",
+                value_type="boolean",
+            ),
+        )
+    if name == "doctor":
+        return (
+            _option(
+                "fix",
+                "Preview and apply the selected safe repairs.",
+                value_type="boolean",
+            ),
+        )
+    if name in {"logs", "metrics"}:
+        return (
+            _argument(
+                "resource", "Optional resource identity to filter.", required=False
+            ),
+        )
+    if name == "runtime.install":
+        return (
+            _argument(
+                "runtime",
+                resource_help["runtime"],
+                accepted=("mlx_lm", "mlx_vlm", "optiq"),
+            ),
+            _option(
+                "version", "Exact custom upstream version; omit for the tested channel."
+            ),
+            _option("channel", "Installation channel.", accepted=("tested", "custom")),
+        )
+    if name == "runtime.adopt":
+        return (
+            _argument(
+                "runtime",
+                resource_help["runtime"],
+                accepted=("mlx_lm", "mlx_vlm", "optiq"),
+            ),
+            _option("path", "Existing runtime environment to probe and adopt."),
+        )
+    if name.startswith("runtime.") and name not in {
+        "runtime.list",
+        "runtime.available",
+    }:
+        return (_argument("resource", resource_help["runtime"]),)
+    if name == "model.search":
+        return (
+            _argument(
+                "query", "Repository or model text to search for.", required=False
+            ),
+            _option(
+                "source", "Candidate source.", accepted=("curated", "broad", "local")
+            ),
+            _option("limit", "Maximum candidates to return.", value_type="integer"),
+        )
+    if name == "model.install":
+        return (
+            _argument(
+                "repository", "Hugging Face repository ID or declared local model path."
+            ),
+            _option(
+                "revision",
+                "Exact commit SHA or reference to resolve before confirmation.",
+            ),
+            _option("alias", "Stable Model Alias to create."),
+            _option(
+                "offline", "Require already-cached exact content.", value_type="boolean"
+            ),
+        )
+    if name.startswith("model.cache.") and name != "model.cache.list":
+        return (
+            _argument(
+                "resource",
+                "Cached Revision identity; discover values with `mlxctl model cache list`.",
+            ),
+        )
+    if name.startswith("model.") and name not in {"model.list", "model.search"}:
+        return (_argument("resource", resource_help["model"]),)
+    if name == "service.create":
+        return (
+            _argument("service", "New Inference Service name."),
+            _option("model_alias", "Model Alias selected by this service."),
+            _option("runtime", "Exact Runtime Installation ID."),
+            _option("route", "Stable Gateway route; defaults to the service name."),
+            _option(
+                "pinned",
+                "Never auto-stop this service under memory pressure.",
+                value_type="boolean",
+            ),
+        )
+    if name.startswith("service.") and name != "service.list":
+        return (_argument("resource", resource_help["service"]),)
+    if name.startswith("operation.") and name != "operation.list":
+        return (_argument("resource", resource_help["operation"]),)
+    if name == "client.configure":
+        return (
+            _argument("client", "Client Integration name."),
+            _option("service", "Inference Service route the client should use."),
+        )
+    if name.startswith("client.") and name != "client.list":
+        return (_argument("resource", resource_help["client"]),)
+    if name == "config.import":
+        return (
+            _argument("source", "TOML file to validate and preview before import."),
+        )
+    if name == "config.restore":
+        return (
+            _argument(
+                "revision", "Configuration revision from `mlxctl config history`."
+            ),
+        )
+    return ()

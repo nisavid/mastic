@@ -79,6 +79,33 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(payload["operation"], "service.stop")
         self.assertEqual(payload["parameters"]["resource"], "coding")
 
+    def test_help_and_dispatch_expose_operation_specific_values(self) -> None:
+        help_result = self.runner.invoke(self.app, ["runtime", "install", "--help"])
+        self.assertEqual(help_result.exit_code, 0, help_result.output)
+        self.assertIn("RUNTIME", help_result.output)
+        self.assertIn("mlx_lm", help_result.output)
+        self.assertIn("mlx_vlm", help_result.output)
+        self.assertIn("optiq", help_result.output)
+
+        result = self.runner.invoke(
+            self.app,
+            [
+                "model",
+                "search",
+                "Qwen",
+                "--source",
+                "curated",
+                "--limit",
+                "8",
+                "--json",
+            ],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            dict(self.dispatcher.requests[-1].parameters),
+            {"query": "Qwen", "source": "curated", "limit": 8},
+        )
+
     def test_model_cache_is_a_real_nested_command_group(self) -> None:
         result = self.runner.invoke(
             self.app, ["model", "cache", "evict", "qwen-exact", "--json"]

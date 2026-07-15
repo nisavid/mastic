@@ -2,6 +2,7 @@ import unittest
 
 from mlxctl.application.catalogue import (
     OperationKind,
+    ParameterKind,
     SupervisorRequirement,
     build_operation_catalogue,
 )
@@ -69,6 +70,18 @@ class OperationCatalogueTests(unittest.TestCase):
         self.assertIn("exact revision", install.summary.lower())
         self.assertTrue(install.examples)
         self.assertIn("json", install.output_modes)
+
+    def test_parameters_explain_accepted_values_and_discovery(self) -> None:
+        install = self.catalogue["runtime.install"]
+        self.assertEqual(install.parameters[0].kind, ParameterKind.ARGUMENT)
+        self.assertEqual(
+            install.parameters[0].accepted,
+            ("mlx_lm", "mlx_vlm", "optiq"),
+        )
+        search = self.catalogue["model.search"]
+        self.assertEqual(search.parameters[0].name, "query")
+        self.assertEqual(search.parameters[1].accepted, ("curated", "broad", "local"))
+        self.assertEqual(self.catalogue["status"].parameters, ())
 
     def test_cli_and_tui_capabilities_are_derived_from_same_entries(self) -> None:
         for operation in self.catalogue.values():
