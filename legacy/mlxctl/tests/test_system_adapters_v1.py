@@ -313,6 +313,32 @@ class HostPolicyAdapterTests(unittest.TestCase):
 
 
 class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
+    def test_launch_resolves_current_physical_supply_at_execution_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+            runtimes = {}
+            models = {}
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations=lambda: runtimes,
+                model_installations=lambda: models,
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+            )
+            runtimes[runtime.installation_id] = runtime
+            models["qwen-exact"] = model
+
+            prepared = supply.prepare_launch(
+                config.services["coding"], "127.0.0.1", 49152
+            )
+
+            self.assertEqual(prepared.argv[0], runtime.launcher[0])
+
     def test_launch_uses_configured_installation_and_exact_cached_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

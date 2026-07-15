@@ -289,14 +289,16 @@ class ExactRuntimeLaunchSupply:
         self,
         *,
         load_config: Callable[[], MlxctlConfig],
-        runtime_installations: Mapping[str, SuppliedRuntimeInstallation],
-        model_installations: Mapping[str, SuppliedModelInstallation],
+        runtime_installations: Mapping[str, SuppliedRuntimeInstallation]
+        | Callable[[], Mapping[str, SuppliedRuntimeInstallation]],
+        model_installations: Mapping[str, SuppliedModelInstallation]
+        | Callable[[], Mapping[str, SuppliedModelInstallation]],
         launch_builder: RuntimeLaunchBuilder,
         environment: Mapping[str, str] | None = None,
     ) -> None:
         self._load_config = load_config
-        self._runtime_installations = dict(runtime_installations)
-        self._model_installations = dict(model_installations)
+        self._runtime_installations = runtime_installations
+        self._model_installations = model_installations
         self._launch_builder = launch_builder
         self._environment = dict(environment or {})
 
@@ -313,7 +315,9 @@ class ExactRuntimeLaunchSupply:
                 f"service '{service.name}' differs from current desired state"
             )
         configured_runtime = config.runtimes.get(service.runtime_installation)
-        runtime = self._runtime_installations.get(service.runtime_installation)
+        runtime = self._current(self._runtime_installations).get(
+            service.runtime_installation
+        )
         if configured_runtime is None or runtime is None:
             raise CapabilityValidationError(
                 f"runtime installation '{service.runtime_installation}' is unavailable"
@@ -326,7 +330,7 @@ class ExactRuntimeLaunchSupply:
                 f"model alias '{service.model_alias}' is unavailable"
             )
         configured_model = config.models.get(alias.installation_name)
-        model = self._model_installations.get(alias.installation_name)
+        model = self._current(self._model_installations).get(alias.installation_name)
         if configured_model is None or model is None:
             raise CapabilityValidationError(
                 f"model installation '{alias.installation_name}' is not cached"
@@ -351,6 +355,10 @@ class ExactRuntimeLaunchSupply:
             required_capabilities=required_capabilities,
             observed_capabilities=runtime.capabilities,
         )
+
+    @staticmethod
+    def _current(supply):
+        return supply() if callable(supply) else supply
 
     @staticmethod
     def _validate_runtime(configured, runtime: SuppliedRuntimeInstallation) -> None:
