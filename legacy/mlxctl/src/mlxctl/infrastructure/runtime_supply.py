@@ -101,6 +101,100 @@ class SubprocessCommandRunner:
         subprocess.run(argv, check=True, shell=False)
 
 
+class SubprocessRuntimeProbe:
+    """Probe version and help output inside one exact runtime environment."""
+
+    def __init__(
+        self,
+        *,
+        run: Callable[..., object] = subprocess.run,
+        timeout_seconds: float = 15.0,
+        max_output_bytes: int = 1024 * 1024,
+    ) -> None:
+        if timeout_seconds <= 0 or max_output_bytes <= 0:
+            raise ValueError("runtime probe bounds must be positive")
+        self._run = run
+        self._timeout = timeout_seconds
+        self._max_output = max_output_bytes
+
+    def probe(self, definition: RuntimeDefinition, root: Path) -> RuntimeProbeResult:
+        resolved_root = root.expanduser().resolve(strict=True)
+        python = (resolved_root / "bin/python").resolve(strict=True)
+        python.relative_to(resolved_root)
+        if not python.is_file():
+            raise RuntimeSupplyError("runtime Python launcher is unavailable")
+        version_command = (
+            str(python),
+            "-c",
+            "import importlib.metadata; "
+            f"print(importlib.metadata.version({definition.package!r}))",
+        )
+        version_result = self._execute(version_command)
+        if getattr(version_result, "returncode", 1) != 0:
+            raise RuntimeSupplyError(
+                f"runtime version probe failed: {self._detail(version_result)}"
+            )
+        version = str(getattr(version_result, "stdout", "")).strip()
+        if not version or len(version) > 128 or "\x00" in version:
+            raise RuntimeSupplyError("runtime version probe returned invalid output")
+
+        if definition.key in {"mlx_lm", "mlx_vlm"}:
+            launcher_relative = ("bin/python", "-m", definition.launcher[0])
+        else:
+            console = (resolved_root / "bin" / definition.launcher[0]).resolve(
+                strict=True
+            )
+            console.relative_to(resolved_root)
+            if not console.is_file():
+                raise RuntimeSupplyError("runtime console launcher is unavailable")
+            launcher_relative = (
+                f"bin/{definition.launcher[0]}",
+                *definition.launcher[1:],
+            )
+        help_command = (
+            str(resolved_root / launcher_relative[0]),
+            *launcher_relative[1:],
+            "--help",
+        )
+        help_result = self._execute(help_command)
+        if getattr(help_result, "returncode", 1) != 0:
+            raise RuntimeSupplyError(
+                f"runtime help probe failed: {self._detail(help_result)}"
+            )
+        output = (
+            str(getattr(help_result, "stdout", ""))
+            + "\n"
+            + str(getattr(help_result, "stderr", ""))
+        )
+        if len(output.encode()) > self._max_output:
+            raise RuntimeSupplyError("runtime help probe output exceeds the size limit")
+        return RuntimeProbeResult(
+            version=version,
+            launcher_relative=launcher_relative,
+            supported_flags=frozenset(
+                re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", output)
+            ),
+        )
+
+    def _execute(self, argv: tuple[str, ...]):
+        try:
+            return self._run(
+                argv,
+                check=False,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeSupplyError("runtime probe command failed") from error
+
+    @staticmethod
+    def _detail(result: object) -> str:
+        detail = str(getattr(result, "stderr", "")).strip()
+        return detail[-1000:] or "command returned a nonzero status"
+
+
 @dataclass(frozen=True)
 class RuntimeCatalogue:
     """Discoverable definitions plus an injected set of tested bundles."""

@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 from mlxctl.infrastructure.runtime_supply import (
     RuntimeCatalogue,
@@ -9,6 +10,7 @@ from mlxctl.infrastructure.runtime_supply import (
     RuntimeInstallation,
     RuntimeManager,
     RuntimeProbeResult,
+    SubprocessRuntimeProbe,
     RuntimeLaunchBuilder,
     TestedRuntimeBundle,
     UnsupportedLaunchOption,
@@ -138,6 +140,55 @@ class RuntimeCatalogueTests(unittest.TestCase):
                 port=49152,
                 options={"max_context": 32768},
             )
+
+
+class SubprocessRuntimeProbeTests(unittest.TestCase):
+    def test_probes_module_runtime_version_launcher_and_exact_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            calls = []
+
+            def run(argv, **options):
+                calls.append((tuple(argv), options))
+                if "importlib.metadata" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout="0.31.3\n", stderr="")
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="usage: server [--model MODEL] [--host HOST] [--port PORT]",
+                    stderr="",
+                )
+
+            definition = RuntimeCatalogue.load_builtin().definition("mlx_lm")
+            result = SubprocessRuntimeProbe(run=run).probe(definition, root)
+
+            self.assertEqual(result.version, "0.31.3")
+            self.assertEqual(
+                result.launcher_relative,
+                ("bin/python", "-m", "mlx_lm.server"),
+            )
+            self.assertEqual(
+                result.supported_flags, frozenset({"--model", "--host", "--port"})
+            )
+            self.assertTrue(all(options["shell"] is False for _, options in calls))
+
+    def test_probes_optiq_console_script_and_rejects_failed_help(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin/python").touch()
+            (root / "bin/optiq").touch()
+
+            def run(argv, **_options):
+                if "importlib.metadata" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
+                return SimpleNamespace(returncode=2, stdout="", stderr="broken")
+
+            definition = RuntimeCatalogue.load_builtin().definition("optiq")
+            with self.assertRaisesRegex(ValueError, "help probe failed"):
+                SubprocessRuntimeProbe(run=run).probe(definition, root)
 
 
 class RuntimeManagerTests(unittest.TestCase):
