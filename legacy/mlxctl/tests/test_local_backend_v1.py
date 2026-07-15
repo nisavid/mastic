@@ -290,6 +290,72 @@ class LocalOperationBackendTests(unittest.TestCase):
             chat = next(item for item in result["items"] if item["name"] == "chat")
             self.assertIsNone(chat["run"])
 
+    def test_diagnostic_queries_have_distinct_user_facing_results(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(Path(directory))
+            state.put_snapshot(
+                {
+                    "kind": "supervisor",
+                    "id": "supervisor",
+                    "version": 1,
+                    "state": "running",
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "gateway",
+                    "id": "gateway",
+                    "version": 1,
+                    "state": "running",
+                    "port": 9999,
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "run-1",
+                    "version": 1,
+                    "service": "coding",
+                    "state": "unhealthy",
+                }
+            )
+            state.put_operation({"id": "job-1", "status": "running"})
+
+            status = backend.prepare(OperationRequest("status")).execute()
+            check = backend.prepare(OperationRequest("check")).execute()
+            doctor = backend.prepare(OperationRequest("doctor")).execute()
+            supervisor = backend.prepare(
+                OperationRequest("supervisor.inspect")
+            ).execute()
+            gateway_status = backend.prepare(
+                OperationRequest("gateway.status")
+            ).execute()
+            gateway_inspect = backend.prepare(
+                OperationRequest("gateway.inspect")
+            ).execute()
+            routes = backend.prepare(OperationRequest("gateway.routes")).execute()
+            runtime = backend.prepare(OperationRequest("runtime.doctor")).execute()
+            service = backend.prepare(
+                OperationRequest("service.check", {"resource": "coding"})
+            ).execute()
+
+            self.assertNotIn("checks", status)
+            self.assertEqual(check["checks"][0]["name"], "supervisor")
+            self.assertFalse(doctor["healthy"])
+            self.assertEqual(
+                {issue["code"] for issue in doctor["issues"]},
+                {"gateway_drift", "service_unhealthy"},
+            )
+            self.assertEqual(supervisor["operations"][0]["id"], "job-1")
+            self.assertEqual(gateway_status["route_count"], 2)
+            self.assertNotIn("routes", gateway_status)
+            self.assertEqual(len(gateway_inspect["routes"]), 2)
+            self.assertEqual(
+                {item["service"] for item in routes["items"]}, {"chat", "coding"}
+            )
+            self.assertEqual(runtime["items"][0]["state"], "missing")
+            self.assertEqual(service["checks"][2]["state"], "unavailable")
+
     def test_strict_resource_lookup_reports_unknown_service(self) -> None:
         with TemporaryDirectory() as directory:
             backend, _ = self._backend(Path(directory))
@@ -658,7 +724,6 @@ class LocalOperationBackendTests(unittest.TestCase):
             "service.stop",
             "service.restart",
             "service.remove",
-            "operation.cancel",
         }
         with TemporaryDirectory() as directory:
             backend, state = self._backend(

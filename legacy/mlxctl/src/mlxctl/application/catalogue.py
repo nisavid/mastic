@@ -99,7 +99,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "metrics",
         "check",
     ),
-    "operation": ("list", "inspect", "cancel"),
+    "operation": ("list", "inspect"),
     "client": ("list", "inspect", "configure", "test", "remove"),
     "config": (
         "path",
@@ -166,7 +166,6 @@ _NO_CONFIRM = frozenset(
         "service.start",
         "service.stop",
         "service.restart",
-        "operation.cancel",
         "client.test",
     }
 )

@@ -55,7 +55,6 @@ _SUPERVISOR_MUTATIONS = frozenset(
         "service.start",
         "service.stop",
         "service.restart",
-        "operation.cancel",
     }
 )
 _RUNTIME_MUTATIONS = frozenset(
@@ -283,6 +282,35 @@ class LocalOperationBackend:
             next_actions.append("mlxctl supervisor start")
         if failed:
             next_actions.append("mlxctl doctor")
+        details: dict[str, object] = {}
+        if name == "check":
+            details["checks"] = [
+                {
+                    "name": "supervisor",
+                    "state": str(supervisor.get("state", "stopped")),
+                },
+                {
+                    "name": "gateway",
+                    "state": str(gateway.get("state", "stopped")),
+                },
+                *(
+                    {
+                        "name": f"service:{item['name']}",
+                        "state": str((item["run"] or {}).get("state", "stopped")),
+                    }
+                    for item in services
+                ),
+            ]
+        elif name == "doctor":
+            issues = self._diagnostic_issues(config, supervisor, gateway, services)
+            details["issues"] = issues
+            details["healthy"] = not issues
+            next_actions.extend(
+                action
+                for issue in issues
+                for action in issue.get("next_actions", [])
+                if action not in next_actions
+            )
         return _result(
             name,
             state=state,
@@ -295,12 +323,18 @@ class LocalOperationBackend:
             failed_services=failed,
             evidence=["desired-state", "operational-state"],
             next_actions=next_actions,
+            **details,
         )
 
     def _supervisor_query(self, name: str) -> Mapping[str, object]:
         if name == "supervisor.logs":
             return self._telemetry("logs", "supervisor", None, operation=name)
         snapshot = self._latest("supervisor", "supervisor") or {"state": "stopped"}
+        details = (
+            {"operations": list(self._state_store.operations())}
+            if name == "supervisor.inspect"
+            else {}
+        )
         return _result(
             name,
             state=str(snapshot.get("state", "unknown")),
@@ -309,6 +343,7 @@ class LocalOperationBackend:
             next_actions=["mlxctl supervisor start"]
             if snapshot.get("state") == "stopped"
             else [],
+            **details,
         )
 
     def _gateway_query(self, name: str, config: MlxctlConfig) -> Mapping[str, object]:
@@ -321,6 +356,22 @@ class LocalOperationBackend:
             {"route": str(service.route), "service": service_name}
             for service_name, service in sorted(config.services.items())
         ]
+        if name == "gateway.routes":
+            return _result(
+                name,
+                items=routes,
+                evidence=["desired-state", "operational-state"],
+                next_actions=[],
+            )
+        if name == "gateway.status":
+            return _result(
+                name,
+                state=str(snapshot.get("state", "stopped")),
+                endpoint={"host": config.gateway.host, "port": config.gateway.port},
+                route_count=len(routes),
+                evidence=["desired-state", "operational-state"],
+                next_actions=[],
+            )
         return _result(
             name,
             state=str(snapshot.get("state", "stopped")),
@@ -344,10 +395,34 @@ class LocalOperationBackend:
             return _result(
                 name, items=items, evidence=["built-in-catalogue"], next_actions=[]
             )
-        if name in {"runtime.list", "runtime.doctor"}:
+        if name == "runtime.list":
             items = [_plain(item) for _, item in sorted(config.runtimes.items())]
             return _result(
                 name, items=items, evidence=["desired-state"], next_actions=[]
+            )
+        if name == "runtime.doctor":
+            items = [
+                {
+                    "installation_id": key,
+                    "root": item.root,
+                    "root_exists": Path(item.root).is_dir(),
+                    "launcher": item.launcher[0],
+                    "launcher_exists": Path(item.launcher[0]).is_file(),
+                    "state": (
+                        "ready"
+                        if Path(item.root).is_dir() and Path(item.launcher[0]).is_file()
+                        else "missing"
+                    ),
+                }
+                for key, item in sorted(config.runtimes.items())
+            ]
+            return _result(
+                name,
+                items=items,
+                evidence=["desired-state", "local-filesystem"],
+                next_actions=["mlxctl runtime install --help"]
+                if any(item["state"] == "missing" for item in items)
+                else [],
             )
         resource = _resource(
             request, set(config.runtimes) | set(definitions), "Runtime"
@@ -514,6 +589,16 @@ class LocalOperationBackend:
             item for item in self._service_items(config) if item["name"] == resource
         )
         state = str((item["run"] or {}).get("state", "stopped"))
+        details = {}
+        if request.name == "service.check":
+            details["checks"] = [
+                {"name": "desired-state", "state": "valid"},
+                {"name": "service-run", "state": state},
+                {
+                    "name": "gateway-route",
+                    "state": "ready" if state == "ready" else "unavailable",
+                },
+            ]
         return _result(
             request.name,
             state=state,
@@ -522,7 +607,46 @@ class LocalOperationBackend:
             next_actions=[f"mlxctl service start {resource}"]
             if state == "stopped"
             else [],
+            **details,
         )
+
+    def _diagnostic_issues(
+        self,
+        config: MlxctlConfig,
+        supervisor: Mapping[str, object],
+        gateway: Mapping[str, object],
+        services: Sequence[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        issues: list[dict[str, object]] = []
+        if supervisor.get("state") == "failed":
+            issues.append(
+                {
+                    "code": "supervisor_failed",
+                    "message": "The Supervisor reported a failed state.",
+                    "next_actions": ["mlxctl supervisor logs"],
+                }
+            )
+        gateway_port = gateway.get("port")
+        if gateway.get("state") == "running" and gateway_port != config.gateway.port:
+            issues.append(
+                {
+                    "code": "gateway_drift",
+                    "message": "The running Gateway endpoint differs from desired state.",
+                    "next_actions": ["mlxctl gateway restart"],
+                }
+            )
+        for item in services:
+            run = item.get("run")
+            if isinstance(run, Mapping) and run.get("state") in {"failed", "unhealthy"}:
+                name = str(item.get("name", "unknown"))
+                issues.append(
+                    {
+                        "code": "service_unhealthy",
+                        "message": f"Inference Service {name!r} is unhealthy.",
+                        "next_actions": [f"mlxctl service logs {name}"],
+                    }
+                )
+        return issues
 
     def _operation_query(self, request: OperationRequest) -> Mapping[str, object]:
         if request.name == "operation.list":

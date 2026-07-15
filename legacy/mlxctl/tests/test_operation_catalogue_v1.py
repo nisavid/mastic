@@ -107,6 +107,7 @@ class OperationCatalogueTests(unittest.TestCase):
         self.assertEqual(self.catalogue["doctor"].parameters, ())
         self.assertNotIn("operation.resume", self.catalogue)
         self.assertNotIn("operation.follow", self.catalogue)
+        self.assertNotIn("operation.cancel", self.catalogue)
         setup = {
             parameter.name: parameter
             for parameter in self.catalogue["setup"].parameters
