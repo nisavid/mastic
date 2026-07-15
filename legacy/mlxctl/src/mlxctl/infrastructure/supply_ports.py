@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from dataclasses import asdict, dataclass, replace
@@ -44,6 +45,250 @@ class SupplyPortError(ValueError):
 
 class ModelSecurityPolicyError(SupplyPortError):
     """Exact-revision model security evidence is absent or disqualifying."""
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptedSnapshotObservation:
+    """Stable, side-effect-free identity for an externally owned snapshot."""
+
+    path: str
+    device: int
+    inode: int
+    mtime_ns: int
+    file_count: int
+    size_bytes: int
+    fingerprint: str
+
+
+def inspect_adopted_snapshot(
+    path: str | Path,
+    *,
+    forbidden_roots: tuple[str | Path, ...] = (),
+    cached_roots: tuple[str | Path, ...] = (),
+) -> AdoptedSnapshotObservation:
+    """Inspect a private exact snapshot without following links or reading content."""
+
+    root = Path(path)
+    if not root.is_absolute() or ".." in root.parts:
+        raise SupplyPortError("adopted model path must be absolute and traversal-free")
+    try:
+        resolved_root = root.resolve(strict=True)
+        root_stat = root.lstat()
+    except OSError as error:
+        raise SupplyPortError(f"adopted model path is unavailable: {root}") from error
+    root = resolved_root
+    for owned_root in forbidden_roots:
+        if _paths_overlap(root, Path(owned_root)):
+            raise SupplyPortError(
+                "adopted model path overlaps mlxctl-owned data; move the snapshot "
+                "outside mlxctl config, state, data, and log roots"
+            )
+    for cached_root in cached_roots:
+        if _paths_overlap(root, Path(cached_root)):
+            raise SupplyPortError(
+                "adopted model path overlaps the managed Hugging Face cache; "
+                "use model install for cached revisions or move the snapshot first"
+            )
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise SupplyPortError("adopted model path must be a non-symlink directory")
+    if root_stat.st_uid != os.getuid():
+        raise SupplyPortError(
+            "adopted model directory must be owned by the current user"
+        )
+
+    records: list[tuple[str, int, int, int, int]] = []
+    total = 0
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as error:
+            raise SupplyPortError(
+                f"adopted model directory cannot be inspected: {directory}"
+            ) from error
+        for entry in entries:
+            entry_path = Path(entry.path)
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise SupplyPortError(
+                    f"adopted model entry cannot be inspected: {entry_path}"
+                ) from error
+            relative = entry_path.relative_to(root).as_posix()
+            if metadata.st_uid != os.getuid():
+                raise SupplyPortError(
+                    f"adopted model entry has the wrong owner: {relative}"
+                )
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SupplyPortError(
+                    f"adopted model snapshots cannot contain symlinks: {relative}"
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                stack.append(entry_path)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise SupplyPortError(
+                    f"adopted model snapshots require regular files: {relative}"
+                )
+            records.append(
+                (
+                    relative,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    metadata.st_dev,
+                    metadata.st_ino,
+                )
+            )
+            total += metadata.st_size
+    payload = json.dumps(
+        {
+            "device": root_stat.st_dev,
+            "inode": root_stat.st_ino,
+            "mtime_ns": root_stat.st_mtime_ns,
+            "records": sorted(records),
+            "size_bytes": total,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    fingerprint = hashlib.sha256(payload).hexdigest()
+    return AdoptedSnapshotObservation(
+        str(root),
+        root_stat.st_dev,
+        root_stat.st_ino,
+        root_stat.st_mtime_ns,
+        len(records),
+        total,
+        fingerprint,
+    )
+
+
+def verify_adopted_snapshot(
+    path: str | Path, assessment: Mapping[str, object]
+) -> VerificationResult:
+    """Verify external bytes against the exact Hub manifest in an assessment."""
+
+    observation = inspect_adopted_snapshot(path)
+    root = Path(observation.path)
+    manifest = assessment.get("repository_files")
+    if not isinstance(manifest, (tuple, list)) or not manifest:
+        raise ModelSecurityPolicyError(
+            "exact-revision repository manifest is absent from security evidence"
+        )
+    expected: dict[str, Mapping[str, object]] = {}
+    for item in manifest:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            raise ModelSecurityPolicyError(
+                "exact-revision repository manifest is invalid"
+            )
+        relative = str(item["path"])
+        parts = Path(relative).parts
+        if not relative or relative.startswith("/") or ".." in parts:
+            raise ModelSecurityPolicyError(
+                "repository manifest contains an unsafe path"
+            )
+        if relative in expected:
+            raise ModelSecurityPolicyError(
+                "exact-revision repository manifest contains a duplicate path"
+            )
+        size = item.get("size")
+        if size is not None and (type(size) is not int or size < 0):
+            raise ModelSecurityPolicyError(
+                "exact-revision repository manifest contains an invalid file size"
+            )
+        lfs_sha256 = item.get("lfs_sha256")
+        blob_id = item.get("blob_id")
+        if lfs_sha256 is not None:
+            if (
+                not isinstance(lfs_sha256, str)
+                or re.fullmatch(r"[0-9a-fA-F]{64}", lfs_sha256) is None
+            ):
+                raise ModelSecurityPolicyError(
+                    "exact-revision repository manifest contains an invalid SHA-256 digest"
+                )
+        elif blob_id is not None:
+            if (
+                not isinstance(blob_id, str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", blob_id) is None
+            ):
+                raise ModelSecurityPolicyError(
+                    "exact-revision repository manifest contains an invalid Git blob digest"
+                )
+        else:
+            raise ModelSecurityPolicyError(
+                "exact-revision repository manifest lacks a content digest"
+            )
+        expected[relative] = item
+    actual = {
+        item.relative_to(root).as_posix(): item
+        for item in root.rglob("*")
+        if item.is_file()
+        and not item.relative_to(root).as_posix().startswith(".cache/huggingface/")
+    }
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    issues = [
+        *(f"missing:{item}" for item in missing),
+        *(f"unexpected:{item}" for item in extra),
+    ]
+    for relative in sorted(set(expected) & set(actual)):
+        item = actual[relative]
+        evidence = expected[relative]
+        size = evidence.get("size")
+        if type(size) is int and item.stat().st_size != size:
+            issues.append(f"size-mismatch:{relative}")
+            continue
+        lfs_sha256 = evidence.get("lfs_sha256")
+        blob_id = evidence.get("blob_id")
+        if isinstance(lfs_sha256, str):
+            if _file_digest(item, "sha256") != lfs_sha256.casefold():
+                issues.append(f"digest-mismatch:{relative}")
+        elif isinstance(blob_id, str):
+            digest = _git_blob_digest(item)
+            if digest != blob_id.casefold():
+                issues.append(f"digest-mismatch:{relative}")
+    if issues:
+        return VerificationResult("incomplete", "hub-exact-manifest", tuple(issues))
+    return VerificationResult("verified", "hub-exact-manifest", ())
+
+
+def _file_digest(path: Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    )
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        os.close(descriptor)
+        raise SupplyPortError("adopted model file identity changed during verification")
+    with os.fdopen(descriptor, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_blob_digest(path: Path) -> str:
+    metadata = path.lstat()
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {metadata.st_size}\0".encode())
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+    )
+    observed = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or observed.st_size != metadata.st_size
+        or observed.st_ino != metadata.st_ino
+        or observed.st_dev != metadata.st_dev
+    ):
+        os.close(descriptor)
+        raise SupplyPortError("adopted model file identity changed during verification")
+    with os.fdopen(descriptor, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class SecurityEvidenceStore(Protocol):
@@ -640,11 +885,15 @@ class ModelSupplyPort:
         security: ExactRevisionModelSecurity,
         *,
         cache_mover: CacheMover | None = None,
+        adoption_forbidden_roots: tuple[str | Path, ...] = (),
     ) -> None:
         self._supply = supply
         self._config_store = config_store
         self._security = security
         self._cache_mover = cache_mover or VerifiedCacheMover()
+        self._adoption_forbidden_roots = tuple(
+            Path(path) for path in adoption_forbidden_roots
+        )
 
     def search(self, query: str, *, mode: str = "curated", limit: int = 20):
         return self._supply.search(query, mode=mode, limit=limit)
@@ -652,11 +901,23 @@ class ModelSupplyPort:
     def inventory(self):
         return self._supply.inventory()
 
+    def inspect_adoption(self, path: str) -> AdoptedSnapshotObservation:
+        return inspect_adopted_snapshot(
+            path,
+            forbidden_roots=self._adoption_forbidden_roots,
+            cached_roots=tuple(
+                revision.snapshot_path
+                for revision in self._supply.inventory().revisions
+            ),
+        )
+
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
         if operation == "model.install":
             return self._install(parameters)
+        if operation == "model.adopt":
+            return self._adopt(parameters)
         if operation == "model.repair":
             return self._repair(parameters)
         if operation == "model.update":
@@ -670,6 +931,60 @@ class ModelSupplyPort:
         if operation == "model.cache.prune":
             return self._prune(parameters)
         raise SupplyPortError(f"unsupported model operation: {operation}")
+
+    def _adopt(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
+        repository = _required(parameters, "repository")
+        revision = _required(parameters, "revision")
+        if re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
+            raise SupplyPortError("revision must be an exact 40-character commit SHA")
+        path = _required(parameters, "path")
+        observation = self.inspect_adoption(path)
+        expected_fingerprint = parameters.get("snapshot_fingerprint")
+        if not isinstance(expected_fingerprint, str):
+            raise SupplyPortError("adoption requires its reviewed snapshot fingerprint")
+        if observation.fingerprint != expected_fingerprint:
+            raise SupplyPortError(
+                "adopted snapshot identity changed after preview; review it again"
+            )
+        alias = str(
+            parameters.get("alias") or repository.rstrip("/").rsplit("/", 1)[-1]
+        )
+        config = self._config_store.load().value
+        runtimes = _model_runtime_observations(config, alias)
+        assessment = self._security.inspect(repository, revision, runtimes=runtimes)
+        verification = verify_adopted_snapshot(observation.path, assessment)
+        security = self._security.record_verification(assessment, verification)
+        self._security.require_compatible(
+            security, tuple(item.installation_id for item in runtimes)
+        )
+        installation_name = f"{alias}-{revision[:12]}"
+        self._persist_adopted_model(
+            installation_name,
+            alias,
+            repository,
+            revision,
+            observation.path,
+        )
+        return {
+            "installation_id": installation_name,
+            "installation_name": installation_name,
+            "alias": alias,
+            "repository": repository,
+            "revision": revision,
+            "snapshot_path": observation.path,
+            "provenance": "external-adopted",
+            "verification": asdict(verification),
+            "security": _security_summary(security),
+            "plan": {
+                "operation": "adopt",
+                "steps": [
+                    "verify the exact external snapshot against Hub evidence",
+                    f"persist Model Installation {installation_name}",
+                    f"point Model Alias {alias} to {installation_name}",
+                    "leave externally owned bytes unchanged",
+                ],
+            },
+        }
 
     def _install(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         repository = _required(parameters, "repository")
@@ -695,12 +1010,17 @@ class ModelSupplyPort:
         )
         self._persist_model(result, installation_name, alias)
         payload = _model_result(result, installation_name)
-        payload["security"] = dict(security)
+        payload["security"] = _security_summary(security)
         return payload
 
     def _repair(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         config = self._config_store.load().value
         installation_name, alias = _resolve_model(config, _resource(parameters))
+        if config.models[installation_name].provenance == "adopted":
+            raise SupplyPortError(
+                "adopted model bytes are externally owned; repair them with their "
+                "owner and run model verify"
+            )
         installation = self._supplied_installation(installation_name)
         runtimes = _model_runtime_observations(config, alias)
         assessment = self._security.inspect(
@@ -716,7 +1036,7 @@ class ModelSupplyPort:
         return {
             "installation_name": installation.installation_id,
             "verification": asdict(verification),
-            "security": dict(security),
+            "security": _security_summary(security),
         }
 
     def _update(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
@@ -741,7 +1061,7 @@ class ModelSupplyPort:
         )
         self._persist_model(result, target_name, alias)
         payload = _model_result(result, target_name)
-        payload["security"] = dict(security)
+        payload["security"] = _security_summary(security)
         payload["previous_installation"] = installation_name
         payload["plan"] = {
             "operation": "update",
@@ -807,7 +1127,7 @@ class ModelSupplyPort:
             runtimes=runtimes,
         )
         assessment = self._security.record_verification(
-            assessment, self._supply.verify(supplied_target)
+            assessment, self.verify_installation(supplied_target)
         )
         self._security.require_compatible(
             assessment, tuple(item.installation_id for item in runtimes)
@@ -896,10 +1216,62 @@ class ModelSupplyPort:
 
         _edit_config(self._config_store, mutation)
 
+    def _persist_adopted_model(
+        self,
+        installation_name: str,
+        alias: str,
+        repository: str,
+        revision: str,
+        path: str,
+    ) -> None:
+        def mutation(document) -> None:
+            models = document.setdefault("models", tomlkit.table())
+            model = tomlkit.table()
+            model["repository"] = repository
+            model["revision"] = revision
+            model["provenance"] = "adopted"
+            model["path"] = path
+            models[installation_name] = model
+            aliases = document.setdefault("aliases", tomlkit.table())
+            alias_table = tomlkit.table()
+            alias_table["installation"] = installation_name
+            aliases[alias] = alias_table
+
+        _edit_config(self._config_store, mutation)
+
+    def verify_installation(
+        self, installation: SuppliedModelInstallation
+    ) -> VerificationResult:
+        if installation.provenance.source == "external-adopted":
+            assessment = self._security.require(
+                installation.revision.repo_id, installation.revision.commit_sha
+            )
+            return verify_adopted_snapshot(installation.snapshot_path, assessment)
+        return self._supply.verify(installation)
+
     def _supplied_installation(self, resource: str) -> SuppliedModelInstallation:
         config = self._config_store.load().value
         installation_name, _alias = _resolve_model(config, resource)
         desired = config.models[installation_name]
+        if desired.provenance == "adopted":
+            assert desired.path is not None
+            revision = SuppliedModelRevision(
+                desired.revision.repository,
+                desired.revision.revision,
+                desired.revision.revision,
+                "desired-state",
+            )
+            return SuppliedModelInstallation(
+                installation_name,
+                revision,
+                revision.revision_id,
+                Path(desired.path),
+                ModelProvenance(
+                    desired.revision.revision,
+                    desired.revision.revision,
+                    "external-adopted",
+                ),
+            )
         cached = next(
             (
                 item
@@ -931,7 +1303,9 @@ class ModelSupplyPort:
     def _supplied_installations(self) -> tuple[SuppliedModelInstallation, ...]:
         config = self._config_store.load().value
         return tuple(
-            self._supplied_installation(name) for name in sorted(config.models)
+            self._supplied_installation(name)
+            for name in sorted(config.models)
+            if config.models[name].provenance == "cached"
         )
 
     def _cached_revision(self, resource: str) -> CachedRevision:
@@ -1160,6 +1534,17 @@ def _content_manifest(root: Path) -> tuple[tuple[str, int, str], ...]:
     return tuple(records)
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    try:
+        resolved_left = left.resolve(strict=False)
+        resolved_right = right.resolve(strict=False)
+    except OSError as error:
+        raise SupplyPortError("model ownership boundary cannot be resolved") from error
+    return resolved_left.is_relative_to(
+        resolved_right
+    ) or resolved_right.is_relative_to(resolved_left)
+
+
 def _security_assessment(report: ModelIntelligenceReport) -> dict[str, object]:
     signals = [
         {
@@ -1187,6 +1572,18 @@ def _security_assessment(report: ModelIntelligenceReport) -> dict[str, object]:
         overridable.append("repository_code")
     if any(item.name == "remote_code_mapping" for item in report.trust_signals):
         overridable.append("remote_code")
+    repository_files = [
+        {
+            "path": item.path,
+            "size": item.size,
+            "blob_id": item.blob_id,
+            "lfs_sha256": item.lfs_sha256,
+        }
+        for item in getattr(report, "repository_files", ())
+    ]
+    repository_manifest_sha256 = hashlib.sha256(
+        json.dumps(repository_files, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
     return {
         "policy_version": 1,
         "repository": report.identity.repo_id,
@@ -1205,12 +1602,75 @@ def _security_assessment(report: ModelIntelligenceReport) -> dict[str, object]:
             }
             for item in getattr(report, "compatibility", ())
         ],
+        "repository_file_count": len(repository_files),
+        "repository_manifest_sha256": repository_manifest_sha256,
+        "repository_files": repository_files,
         "verification": {
             "status": "pending",
             "evidence": "not-yet-verified",
             "issues": [],
         },
     }
+
+
+def _security_summary(assessment: Mapping[str, object]) -> dict[str, object]:
+    """Return bounded outward evidence while the full manifest stays persisted."""
+
+    verification = assessment.get("verification")
+    verification = verification if isinstance(verification, Mapping) else {}
+    issues = verification.get("issues", ())
+    issues = issues if isinstance(issues, (tuple, list)) else ()
+    signals = assessment.get("signals", ())
+    signals = signals if isinstance(signals, (tuple, list)) else ()
+    compatibility = assessment.get("compatibility", ())
+    compatibility = compatibility if isinstance(compatibility, (tuple, list)) else ()
+    return {
+        "policy_version": assessment.get("policy_version"),
+        "repository": _bounded_text(assessment.get("repository")),
+        "revision": _bounded_text(assessment.get("revision")),
+        "hard_blockers": _bounded_text_items(assessment.get("hard_blockers", ())),
+        "overridable_risks": _bounded_text_items(
+            assessment.get("overridable_risks", ())
+        ),
+        "signal_count": len(signals),
+        "signals": _bounded_records(signals),
+        "compatibility_count": len(compatibility),
+        "compatibility": _bounded_records(compatibility),
+        "repository_file_count": assessment.get("repository_file_count", 0),
+        "repository_manifest_sha256": _bounded_text(
+            assessment.get("repository_manifest_sha256")
+        ),
+        "verification": {
+            "status": _bounded_text(verification.get("status")),
+            "evidence": _bounded_text(verification.get("evidence")),
+            "issue_count": len(issues),
+            "issues": [_bounded_text(item) for item in issues[:64]],
+        },
+    }
+
+
+def _bounded_records(items: tuple[object, ...] | list[object]) -> list[object]:
+    records = []
+    for item in items[:64]:
+        if isinstance(item, Mapping):
+            records.append(
+                {str(key): _bounded_text(value) for key, value in item.items()}
+            )
+        else:
+            records.append(_bounded_text(item))
+    return records
+
+
+def _bounded_text_items(value: object) -> list[str | None]:
+    if not isinstance(value, (tuple, list)):
+        return []
+    return [_bounded_text(item) for item in value[:64]]
+
+
+def _bounded_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)[:512]
 
 
 def _assessment_with_verification(

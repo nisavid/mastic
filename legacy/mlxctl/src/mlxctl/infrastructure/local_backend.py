@@ -72,6 +72,7 @@ _RUNTIME_MUTATIONS = frozenset(
 _MODEL_LONG_MUTATIONS = frozenset(
     {
         "model.install",
+        "model.adopt",
         "model.repair",
         "model.update",
         "model.rollback",
@@ -113,6 +114,7 @@ class LocalOperationBackend:
         setup: OperationPort,
         clients: OperationPort,
         config_path: str | Path,
+        gateway_credential_path: str | Path | None = None,
         model_intelligence=None,
     ) -> None:
         self._catalogue = catalogue
@@ -127,6 +129,11 @@ class LocalOperationBackend:
         self._setup = setup
         self._clients = clients
         self._config_path = Path(config_path)
+        self._gateway_credential_path = (
+            Path(gateway_credential_path)
+            if gateway_credential_path is not None
+            else None
+        )
         self._model_intelligence = model_intelligence
 
     def prepare(self, request: OperationRequest) -> PreparedOperation:
@@ -213,6 +220,14 @@ class LocalOperationBackend:
                     offline=bool(parameters.get("offline", False)),
                 )
                 resolved["target"] = _plain(revision)
+        elif request.name == "model.adopt":
+            inspect_adoption = getattr(self._model_supply, "inspect_adoption", None)
+            if not callable(inspect_adoption):
+                raise ApplicationError(
+                    "operation_unavailable",
+                    "model adoption inspection is unavailable",
+                )
+            resolved["target"] = _plain(inspect_adoption(str(parameters["path"])))
         elif request.name == "model.update":
             resource = str(parameters["resource"])
             installation_name = self._model_installation_name(resource, config)
@@ -483,6 +498,15 @@ class LocalOperationBackend:
             state=str(snapshot.get("state", "stopped")),
             endpoint={"host": config.gateway.host, "port": config.gateway.port},
             routes=routes,
+            credential=(
+                {
+                    "scheme": "Bearer",
+                    "path": str(self._gateway_credential_path),
+                    "instructions": "Configure clients with mlxctl client configure; do not copy the token into desired state.",
+                }
+                if self._gateway_credential_path is not None
+                else None
+            ),
             resource=snapshot,
             evidence=["desired-state", "operational-state"],
             next_actions=[],
@@ -562,8 +586,10 @@ class LocalOperationBackend:
             revision = str(request.parameters.get("revision", "main"))
             if selected in config.aliases:
                 selected = config.aliases[selected].installation_name
+            configured_installation = None
             if selected in config.models:
-                installed = config.models[selected]
+                configured_installation = config.models[selected]
+                installed = configured_installation
                 repository = installed.revision.repository
                 revision = installed.revision.revision
             else:
@@ -585,10 +611,28 @@ class LocalOperationBackend:
                 context_tokens=int(request.parameters.get("context_tokens", 32768)),
                 concurrency=int(request.parameters.get("concurrency", 1)),
             )
+            resource = _plain_model_intelligence_report(report)
+            evidence = ["exact-hub-metadata", "local-machine-inventory"]
+            if (
+                configured_installation is not None
+                and configured_installation.provenance == "adopted"
+            ):
+                assert configured_installation.path is not None
+                inspect_adoption = getattr(self._model_supply, "inspect_adoption", None)
+                snapshot = (
+                    _plain(inspect_adoption(configured_installation.path))
+                    if callable(inspect_adoption)
+                    else {"path": configured_installation.path}
+                )
+                resource["installation"] = {
+                    "provenance": "external-adopted",
+                    "snapshot": snapshot,
+                }
+                evidence.append("external-adopted-snapshot")
             return _result(
                 name,
-                resource=_plain(report),
-                evidence=["exact-hub-metadata", "local-machine-inventory"],
+                resource=resource,
+                evidence=evidence,
                 next_actions=[],
             )
         if name == "model.search":
@@ -898,6 +942,8 @@ class LocalOperationBackend:
                 target.get("commit_sha"), str
             ):
                 parameters["revision"] = target["commit_sha"]
+            elif name == "model.adopt" and isinstance(target.get("fingerprint"), str):
+                parameters["snapshot_fingerprint"] = target["fingerprint"]
             elif name == "runtime.install":
                 if isinstance(target.get("installation"), str):
                     parameters["bundle_id"] = target["installation"]
@@ -1020,6 +1066,25 @@ class LocalOperationBackend:
         self, installation_name: str, config: MlxctlConfig
     ) -> SuppliedModelInstallation:
         desired = config.models[installation_name]
+        if desired.provenance == "adopted":
+            assert desired.path is not None
+            revision = ModelRevision(
+                repo_id=desired.revision.repository,
+                commit_sha=desired.revision.revision,
+                requested_revision=desired.revision.revision,
+                evidence="desired-state",
+            )
+            return SuppliedModelInstallation(
+                installation_id=installation_name,
+                revision=revision,
+                cached_revision_id=revision.revision_id,
+                snapshot_path=Path(desired.path),
+                provenance=ModelProvenance(
+                    requested_revision=desired.revision.revision,
+                    resolved_sha=desired.revision.revision,
+                    source="external-adopted",
+                ),
+            )
         cached = next(
             (
                 item
@@ -1260,6 +1325,27 @@ def _plan_fingerprint(plan: Mapping[str, object]) -> str:
         _plain(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _plain_model_intelligence_report(report: object) -> dict[str, object]:
+    resource = _plain(report)
+    if not isinstance(resource, Mapping):
+        raise ApplicationError(
+            "invalid_model_report", "model intelligence returned an invalid report"
+        )
+    result = dict(resource)
+    repository_files = result.pop("repository_files", ())
+    if not isinstance(repository_files, (tuple, list)):
+        raise ApplicationError(
+            "invalid_model_report",
+            "model intelligence returned an invalid repository manifest",
+        )
+    canonical = json.dumps(
+        repository_files, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    result["repository_file_count"] = len(repository_files)
+    result["repository_manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return result
 
 
 def _plain(value: object) -> object:

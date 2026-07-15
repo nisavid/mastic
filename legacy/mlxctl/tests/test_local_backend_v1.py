@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,6 +7,7 @@ from mlxctl.application.catalogue import OperationKind, build_operation_catalogu
 from mlxctl.application.config_schema import validate_config
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.infrastructure.config_store import ConfigStore
+from mlxctl.infrastructure.control_protocol import MAX_FRAME_BYTES
 from mlxctl.infrastructure.local_backend import LocalOperationBackend
 from mlxctl.infrastructure.model_supply import (
     CacheInventory,
@@ -153,6 +155,15 @@ class _ModelSupply:
     def resolve(self, repo_id, revision, *, offline=False):
         self.calls.append(("resolve", repo_id, revision, offline))
         return ModelRevision(repo_id, "c" * 40, revision, "hub-observed")
+
+    def inspect_adoption(self, path):
+        self.calls.append(("inspect_adoption", path))
+        return {
+            "path": path,
+            "file_count": 2,
+            "size_bytes": 42,
+            "fingerprint": "f" * 64,
+        }
 
     def inventory(self):
         return CacheInventory(
@@ -453,6 +464,37 @@ class LocalOperationBackendTests(unittest.TestCase):
             )
             self.assertEqual(execution[1]["revision"], "c" * 40)
 
+    def test_model_adopt_binds_execution_to_previewed_snapshot_fingerprint(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            supply = _ModelSupply()
+            backend, _ = self._backend(Path(directory), model_supply=supply)
+            request = OperationRequest(
+                "model.adopt",
+                {
+                    "repository": "mlx-community/Qwen-OptiQ",
+                    "revision": "a" * 40,
+                    "path": "/Volumes/models/qwen",
+                },
+            )
+            preview = backend.prepare(request).events[-1]
+
+            backend.prepare(
+                OperationRequest(
+                    "model.adopt",
+                    {
+                        **dict(request.parameters),
+                        "confirmed": True,
+                        "plan_fingerprint": preview["plan_fingerprint"],
+                    },
+                )
+            ).execute()
+
+            execution = next(call for call in supply.calls if call[0] == "model.adopt")
+            self.assertEqual(execution[1]["snapshot_fingerprint"], "f" * 64)
+            self.assertEqual(execution[1]["path"], "/Volumes/models/qwen")
+
     def test_model_trust_is_exact_revision_and_runtime_scoped(self) -> None:
         with TemporaryDirectory() as directory:
             backend, state = self._backend(Path(directory))
@@ -509,6 +551,41 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(intelligence.calls[0][0], "mlx-community/New-OptiQ")
             self.assertEqual(intelligence.calls[0][2]["context_tokens"], 65536)
             self.assertEqual(result["resource"]["identity"]["commit_sha"], "b" * 40)
+
+    def test_model_inspect_summarizes_large_repository_manifest(self) -> None:
+        class LargeManifestIntelligence(_ModelIntelligence):
+            def inspect(self, repository, revision, **scenario):
+                report = super().inspect(repository, revision, **scenario)
+                report["repository_files"] = [
+                    {
+                        "path": f"{'nested-' * 30}{index:05}.bin",
+                        "size": index,
+                        "blob_id": "a" * 40,
+                    }
+                    for index in range(5_000)
+                ]
+                return report
+
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(
+                Path(directory), model_intelligence=LargeManifestIntelligence()
+            )
+
+            result = backend.prepare(
+                OperationRequest(
+                    "model.inspect",
+                    {"repository": "owner/large", "revision": "main"},
+                )
+            ).execute()
+
+            resource = result["resource"]
+            self.assertEqual(resource["repository_file_count"], 5_000)
+            self.assertEqual(len(resource["repository_manifest_sha256"]), 64)
+            self.assertNotIn("repository_files", resource)
+            self.assertLess(
+                len(json.dumps(result, separators=(",", ":")).encode()),
+                MAX_FRAME_BYTES,
+            )
 
     def test_config_import_reads_a_bounded_explicit_source(self) -> None:
         with TemporaryDirectory() as directory:
@@ -625,6 +702,59 @@ class LocalOperationBackendTests(unittest.TestCase):
             shown = backend.prepare(OperationRequest("config.show")).execute()
             self.assertEqual(shown["resource"]["models"], {})
             self.assertEqual(shown["resource"]["aliases"], {})
+
+    def test_model_uninstall_only_unregisters_adopted_external_bytes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "external"
+            snapshot.mkdir()
+            marker = snapshot / "weights.safetensors"
+            marker.write_bytes(b"externally owned")
+            config = _MODEL_ONLY_CONFIG.replace(
+                'revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+                'revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+                f'provenance = "adopted"\npath = "{snapshot}"',
+            )
+            backend, _ = self._backend(root, config=config)
+
+            backend.prepare(
+                OperationRequest("model.uninstall", {"resource": "coding"})
+            ).execute()
+
+            self.assertEqual(marker.read_bytes(), b"externally owned")
+            shown = backend.prepare(OperationRequest("config.show")).execute()
+            self.assertEqual(shown["resource"]["models"], {})
+
+    def test_model_inspect_reports_the_adopted_external_snapshot(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "external"
+            snapshot.mkdir()
+            config = _MODEL_ONLY_CONFIG.replace(
+                'revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+                'revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+                f'provenance = "adopted"\npath = "{snapshot}"',
+            )
+            backend, _ = self._backend(
+                root,
+                config=config,
+                model_supply=_ModelSupply(),
+                model_intelligence=_ModelIntelligence(),
+            )
+
+            result = backend.prepare(
+                OperationRequest("model.inspect", {"resource": "coding"})
+            ).execute()
+
+            self.assertEqual(
+                result["resource"]["installation"]["provenance"],
+                "external-adopted",
+            )
+            self.assertEqual(
+                result["resource"]["installation"]["snapshot"]["path"],
+                str(snapshot),
+            )
+            self.assertIn("external-adopted-snapshot", result["evidence"])
 
     def test_service_create_uses_the_public_service_argument(self) -> None:
         with TemporaryDirectory() as directory:
@@ -816,6 +946,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             "runtime.remove",
             "runtime.prune",
             "model.install",
+            "model.adopt",
             "model.repair",
             "model.update",
             "model.rollback",
@@ -870,6 +1001,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 "alias": "coding",
                 "repository": "mlx-community/Qwen-OptiQ",
                 "revision": "a" * 40,
+                "path": "/tmp/external-model",
             }
         if name.startswith("service."):
             return {"resource": "coding"}

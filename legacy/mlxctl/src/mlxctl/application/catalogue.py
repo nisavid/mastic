@@ -78,6 +78,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "list",
         "inspect",
         "install",
+        "adopt",
         "verify",
         "repair",
         "update",
@@ -250,6 +251,7 @@ def _summary(name: str) -> str:
         "model.list": "List configured Model Installations and their stable aliases.",
         "model.inspect": "Inspect model identity, capabilities, trust signals, and Mac fit.",
         "model.install": "Resolve, cache, verify, and name one exact revision of a model.",
+        "model.adopt": "Verify and register an externally owned exact model snapshot.",
         "model.verify": "Verify one installed Model Revision against its cached bytes.",
         "model.repair": "Repair missing or incomplete bytes for an exact Model Revision.",
         "model.update": "Install an exact newer revision beside the current installation.",
@@ -519,6 +521,21 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             _option(
                 "offline", "Require already-cached exact content.", value_type="boolean"
             ),
+        )
+    if name == "model.adopt":
+        return (
+            _argument("repository", "Exact Hugging Face repository ID."),
+            _option(
+                "revision",
+                "Exact 40-character commit SHA.",
+                required=True,
+            ),
+            _option(
+                "path",
+                "Absolute path to the existing exact snapshot directory.",
+                required=True,
+            ),
+            _option("alias", "Stable Model Alias to create."),
         )
     if name == "model.update":
         return (

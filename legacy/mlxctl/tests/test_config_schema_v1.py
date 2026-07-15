@@ -61,6 +61,8 @@ class ConfigSchemaV1Tests(unittest.TestCase):
         self.assertEqual(config.runtimes["optiq@0.2.18"].definition, "optiq")
         self.assertIn("mtp", config.runtimes["optiq@0.2.18"].capabilities)
         self.assertEqual(config.models["qwen-exact"].revision.revision[:8], "70a3aa32")
+        self.assertEqual(config.models["qwen-exact"].provenance, "cached")
+        self.assertIsNone(config.models["qwen-exact"].path)
         self.assertEqual(config.aliases["qwen-optiq"].installation_name, "qwen-exact")
         self.assertTrue(config.services["coding"].pinned)
         self.assertEqual(config.services["coding"].route, "coding")
@@ -111,6 +113,20 @@ route = "coding"
                         'model_alias = "qwen-optiq"', 'model_alias = "missing"'
                     )
                 )
+            )
+
+    def test_adopted_model_requires_an_absolute_external_path(self) -> None:
+        adopted = VALID.replace(
+            'revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"',
+            'revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"\n'
+            'provenance = "adopted"\npath = "/Volumes/models/qwen"',
+        )
+        model = validate_config(tomlkit.parse(adopted)).models["qwen-exact"]
+        self.assertEqual(model.provenance, "adopted")
+        self.assertEqual(model.path, "/Volumes/models/qwen")
+        with self.assertRaisesRegex(ConfigSchemaError, "absolute"):
+            validate_config(
+                tomlkit.parse(adopted.replace("/Volumes/models/qwen", "qwen"))
             )
 
     def test_rejects_unsupported_client_kind_and_invalid_sampling(self) -> None:

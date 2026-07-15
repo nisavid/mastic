@@ -29,6 +29,10 @@ class MlxctlPaths:
         return self.state_dir / "mlxd.sock"
 
     @property
+    def gateway_credential(self) -> Path:
+        return self.state_dir / "gateway.token"
+
+    @property
     def runtime_dir(self) -> Path:
         return self.data_dir / "runtimes"
 

@@ -74,6 +74,7 @@ def compose_application(
         setup=setup,
         clients=clients,
         config_path=paths.config_file,
+        gateway_credential_path=paths.gateway_credential,
         model_intelligence=model_intelligence,
     )
     ApplicationManager(catalogue, backend).register(dispatcher)

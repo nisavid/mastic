@@ -30,6 +30,7 @@ from mlxctl.infrastructure.client_integrations import (
     SamplingProfile,
 )
 from mlxctl.infrastructure.config_store import ConfigStore
+from mlxctl.infrastructure.gateway_credential import GatewayCredential
 from mlxctl.infrastructure.launchd import LaunchdAdapter
 from mlxctl.infrastructure.model_supply import (
     ModelInstallation,
@@ -164,6 +165,9 @@ class SystemSetupPreflight:
 class GatewayVerificationPort:
     """Send the setup gate through the public Gateway route."""
 
+    def __init__(self, credential: GatewayCredential | None = None) -> None:
+        self._credential = credential
+
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
@@ -178,6 +182,11 @@ class GatewayVerificationPort:
                 "temperature": 0,
                 "max_tokens": 16,
             },
+            headers=(
+                {"authorization": self._credential.authorization_header()}
+                if self._credential is not None
+                else None
+            ),
             timeout=120.0,
             follow_redirects=False,
             trust_env=False,
@@ -197,7 +206,10 @@ def client_port(
     home: Path,
     paths: MlxctlPaths,
     config_store: ConfigStore[MlxctlConfig],
+    *,
+    credential: GatewayCredential | None = None,
 ) -> ClientOperationPort:
+    gateway_credential = credential or GatewayCredential(paths.gateway_credential)
     factory = LocalClientIntegrationFactory(
         codex_config_path=home / ".codex/config.toml",
         hindsight_profiles_dir=home / ".hindsight/profiles",
@@ -249,6 +261,7 @@ def client_port(
             str(profile): sampling_profile(value)
             for profile, value in raw_sampling.items()
         }
+        gateway_credential.load_or_create()
         return ClientConfiguration(
             gateway_endpoint=endpoint,
             service_name=str(service.route),
@@ -276,6 +289,7 @@ def client_port(
                     stored.max_concurrent if stored and stored.max_concurrent else 1,
                 )
             ),
+            credential_path=paths.gateway_credential,
         )
 
     def record(name: str, value: ClientSettings | None) -> None:
@@ -313,14 +327,23 @@ def client_port(
     return ClientOperationPort(
         factory,
         configuration,
-        request=client_request,
+        request=lambda endpoint, route, payload: client_request(
+            endpoint,
+            route,
+            payload,
+            credential=gateway_credential,
+        ),
         settings=settings,
         record=record,
     )
 
 
 def client_request(
-    endpoint: str, route: str, payload: Mapping[str, object]
+    endpoint: str,
+    route: str,
+    payload: Mapping[str, object],
+    *,
+    credential: GatewayCredential | None = None,
 ) -> Mapping[str, object]:
     response = httpx.post(
         endpoint.rstrip("/") + "/chat/completions",
@@ -334,6 +357,11 @@ def client_request(
                 }
             ],
         },
+        headers=(
+            {"authorization": credential.authorization_header()}
+            if credential is not None
+            else None
+        ),
         timeout=120.0,
         follow_redirects=False,
         trust_env=False,
@@ -420,28 +448,42 @@ def configured_model_installations(
     }
     result = {}
     for name, item in config.models.items():
-        cached = cached_revisions.get(
-            (item.revision.repository, item.revision.revision)
-        )
-        if cached is None:
-            continue
         revision = ModelRevision(
             item.revision.repository,
             item.revision.revision,
             item.revision.revision,
             "desired-state",
         )
-        result[name] = ModelInstallation(
-            revision.revision_id,
-            revision,
-            cached.revision_id,
-            cached.snapshot_path,
-            ModelProvenance(
-                item.revision.revision,
-                item.revision.revision,
-                "desired-state",
-            ),
-        )
+        if item.provenance == "adopted":
+            assert item.path is not None
+            result[name] = ModelInstallation(
+                revision.revision_id,
+                revision,
+                revision.revision_id,
+                Path(item.path),
+                ModelProvenance(
+                    item.revision.revision,
+                    item.revision.revision,
+                    "external-adopted",
+                ),
+            )
+        else:
+            cached = cached_revisions.get(
+                (item.revision.repository, item.revision.revision)
+            )
+            if cached is None:
+                continue
+            result[name] = ModelInstallation(
+                revision.revision_id,
+                revision,
+                cached.revision_id,
+                cached.snapshot_path,
+                ModelProvenance(
+                    item.revision.revision,
+                    item.revision.revision,
+                    "desired-state",
+                ),
+            )
     return result
 
 

@@ -2,6 +2,7 @@ import json
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import tomlkit
@@ -81,6 +82,62 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(restored["model_provider"], "existing")
             self.assertNotIn("mlxctl-local", restored["model_providers"])
             self.assertEqual(restored["tui"]["theme"], "catppuccin-mocha")
+
+    def test_gateway_credential_is_exactly_configured_and_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "gateway.token"
+            token = "private-token-value-that-must-never-leak"
+            credential.write_text(token + "\n", encoding="ascii")
+            credential.chmod(0o600)
+            configuration = replace(self.configuration, credential_path=credential)
+
+            codex_path = root / "codex.toml"
+            codex = CodexClientIntegration(
+                codex_path, root / "codex-owner.json", root / "codex-backup"
+            )
+            codex.apply(configuration)
+            document = tomlkit.parse(codex_path.read_text(encoding="utf-8"))
+            auth = document["model_providers"]["mlxctl-local"]["auth"]
+            self.assertEqual(auth["command"], "/bin/cat")
+            self.assertEqual(auth["args"], [str(credential)])
+            self.assertEqual(auth["refresh_interval_ms"], 0)
+            self.assertNotIn(token, codex_path.read_text(encoding="utf-8"))
+
+            hindsight_path = root / "hindsight.env"
+            hindsight_path.write_text(
+                "HINDSIGHT_API_LLM_API_KEY=old-private-token\n",
+                encoding="utf-8",
+            )
+            hindsight = HindsightClientIntegration(
+                hindsight_path,
+                root / "hindsight-owner.json",
+                root / "hindsight-backup",
+            )
+            preview = hindsight.preview(configuration)
+            applied = hindsight.apply(configuration)
+
+            rendered = hindsight_path.read_text(encoding="utf-8")
+            manifest = hindsight.manifest_path.read_text(encoding="utf-8")
+            self.assertIn(f"HINDSIGHT_API_LLM_API_KEY={token}", rendered)
+            self.assertEqual(stat.S_IMODE(hindsight_path.stat().st_mode), 0o600)
+            self.assertNotIn(token, repr(preview))
+            self.assertNotIn(token, repr(applied))
+            self.assertNotIn(token, manifest)
+            self.assertNotIn("old-private-token", manifest)
+            self.assertTrue(
+                all(
+                    change.after == "<redacted>"
+                    for change in applied.changes
+                    if change.path == ("HINDSIGHT_API_LLM_API_KEY",)
+                )
+            )
+
+            hindsight.remove()
+            self.assertIn(
+                "HINDSIGHT_API_LLM_API_KEY=old-private-token",
+                hindsight_path.read_text(encoding="utf-8"),
+            )
 
     def test_codex_precise_removal_does_not_clobber_a_later_user_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

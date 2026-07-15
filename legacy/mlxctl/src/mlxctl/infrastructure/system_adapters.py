@@ -419,7 +419,7 @@ class ExactRuntimeLaunchSupply:
         model = self._current(self._model_installations).get(alias.installation_name)
         if configured_model is None or model is None:
             raise CapabilityValidationError(
-                f"model installation '{alias.installation_name}' is not cached"
+                f"model installation '{alias.installation_name}' is unavailable"
             )
         snapshot = self._validate_model(configured_model, model)
         try:
@@ -516,6 +516,15 @@ class ExactRuntimeLaunchSupply:
         if model.cached_revision_id != revision.revision_id:
             raise CapabilityValidationError("cached model revision identity mismatch")
         try:
+            metadata = model.snapshot_path.expanduser().lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise CapabilityValidationError(
+                    "exact model snapshot must be a non-symlink directory"
+                )
+            if metadata.st_uid != os.getuid():
+                raise CapabilityValidationError(
+                    "exact model snapshot must be owned by the current user"
+                )
             snapshot = model.snapshot_path.expanduser().resolve(strict=True)
         except FileNotFoundError as error:
             raise CapabilityValidationError(

@@ -87,9 +87,18 @@ class CachedRevision:
 class ModelInstallation:
     name: str
     revision: ModelRevision
+    provenance: str = "cached"
+    path: str | None = None
 
     def __post_init__(self) -> None:
         ResourceName(self.name)
+        if self.provenance not in {"cached", "adopted"}:
+            raise ValueError("model provenance must be cached or adopted")
+        if self.provenance == "adopted":
+            if self.path is None or not self.path.startswith("/"):
+                raise ValueError("adopted model path must be absolute")
+        elif self.path is not None:
+            raise ValueError("cached model installations cannot declare a path")
 
 
 @dataclass(frozen=True, slots=True)

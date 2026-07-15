@@ -82,6 +82,48 @@ class FakeUpstreamClient:
 
 
 class GatewayTests(unittest.TestCase):
+    def test_gateway_requires_correct_bearer_for_models_and_inference(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=ChunkStream([b'{"id":"response-1"}']),
+            )
+        )
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            authenticate=lambda value: value == "Bearer private-token",
+        )
+
+        with TestClient(app) as client:
+            missing = client.get("/v1/models")
+            wrong = client.post(
+                "/v1/responses",
+                headers={"authorization": "Bearer wrong"},
+                json={"model": "coding", "input": "hello"},
+            )
+            models = client.get(
+                "/v1/models",
+                headers={"authorization": "Bearer private-token"},
+            )
+            response = client.post(
+                "/v1/responses",
+                headers={"authorization": "Bearer private-token"},
+                json={"model": "coding", "input": "hello"},
+            )
+
+        self.assertEqual((missing.status_code, wrong.status_code), (401, 401))
+        self.assertEqual(missing.json()["error"]["code"], "authentication_required")
+        self.assertEqual(wrong.json()["error"]["code"], "authentication_required")
+        self.assertEqual(models.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("authorization", upstream.requests[0].headers)
+
     def test_bind_validation_accepts_only_literal_loopback_addresses(self) -> None:
         self.assertEqual(validate_loopback_bind("127.0.0.1"), "127.0.0.1")
         self.assertEqual(validate_loopback_bind("::1"), "::1")

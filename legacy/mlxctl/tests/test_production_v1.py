@@ -4,6 +4,7 @@ import asyncio
 import os
 import plistlib
 import socket
+import stat
 import tempfile
 import threading
 import time
@@ -15,6 +16,7 @@ from mlxctl.application.config_schema import validate_config
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.application.setup import SetupPreflight
 from mlxctl.infrastructure.model_supply import CacheInventory, CachedRevision
+from mlxctl.infrastructure.gateway_credential import GatewayCredential
 from mlxctl.infrastructure.paths_v1 import MlxctlPaths
 from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mlxctl.infrastructure.production import (
@@ -195,6 +197,14 @@ class ProductionCompositionTests(unittest.TestCase):
                 (root / "Library/LaunchAgents/io.nisavid.mlxd.plist").exists()
             )
 
+            inspected = production.application.dispatcher.execute(
+                OperationRequest("gateway.inspect")
+            ).value
+            credential = inspected["credential"]
+            self.assertEqual(credential["scheme"], "Bearer")
+            self.assertEqual(credential["path"], str(paths.gateway_credential))
+            self.assertEqual(set(credential), {"scheme", "path", "instructions"})
+
     def test_daemon_graph_composes_without_binding_or_starting_services(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -206,6 +216,38 @@ class ProductionCompositionTests(unittest.TestCase):
 
             self.assertIsInstance(daemon, DaemonService)
             self.assertFalse(paths.control_socket.exists())
+            self.assertTrue(paths.gateway_credential.exists())
+            self.assertEqual(
+                stat.S_IMODE(paths.gateway_credential.stat().st_mode), 0o600
+            )
+
+    def test_production_graphs_reject_adoption_inside_owned_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MlxctlPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            local = compose_local(
+                paths=paths, home=root, executable=Path("/usr/bin/python3")
+            )
+            snapshot = paths.data_dir / "external-snapshot"
+            snapshot.mkdir()
+            (snapshot / "weights.bin").write_bytes(b"externally owned")
+            parameters = {
+                "repository": "owner/model",
+                "revision": "a" * 40,
+                "path": str(snapshot),
+            }
+
+            with self.assertRaisesRegex(Exception, "mlxctl-owned"):
+                local.application.dispatcher.preview(
+                    OperationRequest("model.adopt", parameters)
+                )
+
+            daemon = compose_daemon(paths=paths, home=root)
+            router = daemon._router_factory(lambda: None)
+            with self.assertRaisesRegex(ApplicationError, "mlxctl-owned"):
+                router.execute("model.adopt", parameters)
 
     def test_launchd_definition_is_inactive_and_uses_private_module_target(
         self,
@@ -378,15 +420,24 @@ class ProductionCompositionTests(unittest.TestCase):
             "choices": [{"message": {"content": "mlxctl ready"}}]
         }
 
-        result = GatewayVerificationPort().execute(
-            "verify.request",
-            {
-                "endpoint": "http://127.0.0.1:8766/v1",
-                "model": "coding",
-                "request": "Respond with exactly: mlxctl ready",
-            },
-        )
-        client_request("http://127.0.0.1:8766/v1", "coding", {"messages": []})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = GatewayCredential(root / "gateway.token")
+            token = credential.load_or_create()
+            result = GatewayVerificationPort(credential).execute(
+                "verify.request",
+                {
+                    "endpoint": "http://127.0.0.1:8766/v1",
+                    "model": "coding",
+                    "request": "Respond with exactly: mlxctl ready",
+                },
+            )
+            client_request(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                {"messages": []},
+                credential=credential,
+            )
 
         self.assertEqual(result["text"], "mlxctl ready")
         self.assertEqual(
@@ -395,6 +446,10 @@ class ProductionCompositionTests(unittest.TestCase):
                 "http://127.0.0.1:8766/v1/chat/completions",
                 "http://127.0.0.1:8766/v1/chat/completions",
             ],
+        )
+        self.assertEqual(
+            [call.kwargs["headers"]["authorization"] for call in post.call_args_list],
+            [f"Bearer {token}", f"Bearer {token}"],
         )
         self.assertEqual(
             post.call_args_list[1].kwargs["json"]["messages"][0]["role"], "user"
@@ -439,6 +494,39 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertEqual(set(installations), {"friendly-installation"})
             self.assertEqual(
                 installations["friendly-installation"].installation_id,
+                f"owner/model@{revision}",
+            )
+
+    def test_launch_supply_uses_adopted_external_snapshot_without_cache_entry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            revision = "a" * 40
+            snapshot = Path(directory) / "external"
+            snapshot.mkdir()
+            config = validate_config(
+                {
+                    "schema_version": 1,
+                    "models": {
+                        "adopted": {
+                            "repository": "owner/model",
+                            "revision": revision,
+                            "provenance": "adopted",
+                            "path": str(snapshot),
+                        }
+                    },
+                }
+            )
+            inventory = CacheInventory((), "local-observed", ())
+
+            installations = configured_model_installations(config, inventory)
+
+            self.assertEqual(installations["adopted"].snapshot_path, snapshot)
+            self.assertEqual(
+                installations["adopted"].provenance.source, "external-adopted"
+            )
+            self.assertEqual(
+                installations["adopted"].installation_id,
                 f"owner/model@{revision}",
             )
 

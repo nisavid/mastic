@@ -24,6 +24,7 @@ from mlxctl.infrastructure.config_store import ConfigStore
 from mlxctl.infrastructure.control_client import UnixControlClient
 from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mlxctl.infrastructure.gateway_runtime import GatewayRuntime
+from mlxctl.infrastructure.gateway_credential import GatewayCredential
 from mlxctl.infrastructure.host_integration import LaunchdSupervisorActivator
 from mlxctl.infrastructure.launchd import LaunchdAdapter
 from mlxctl.infrastructure.model_intelligence import (
@@ -69,6 +70,8 @@ from mlxctl.infrastructure.supply_ports import (
     ExactRevisionModelSecurity,
     ModelSupplyPort,
     RuntimeSupplyPort,
+    inspect_adopted_snapshot,
+    verify_adopted_snapshot,
 )
 from mlxctl.infrastructure.supervisor_v1 import Supervisor
 from mlxctl.infrastructure.system_adapters import (
@@ -100,10 +103,13 @@ class _LocalModelSupply:
         supply: ModelSupply,
         remote: OperationOwner,
         security: ExactRevisionModelSecurity,
+        *,
+        adoption_forbidden_roots: tuple[Path, ...] = (),
     ) -> None:
         self._supply = supply
         self._remote = remote
         self._security = security
+        self._adoption_forbidden_roots = adoption_forbidden_roots
 
     def search(self, query: str, *, mode: str = "curated", limit: int = 20):
         return self._supply.search(query, mode=mode, limit=limit)
@@ -114,11 +120,29 @@ class _LocalModelSupply:
     def resolve(self, repo_id: str, revision: str, *, offline: bool = False):
         return self._supply.resolve(repo_id, revision, offline=offline)
 
-    def verify(self, installation: ModelInstallation):
-        assessment = self._security.inspect(
-            installation.revision.repo_id, installation.revision.commit_sha
+    def inspect_adoption(self, path: str):
+        return inspect_adopted_snapshot(
+            path,
+            forbidden_roots=self._adoption_forbidden_roots,
+            cached_roots=tuple(
+                revision.snapshot_path
+                for revision in self._supply.inventory().revisions
+            ),
         )
-        verification = self._supply.verify(installation)
+
+    def verify(self, installation: ModelInstallation):
+        if installation.provenance.source == "external-adopted":
+            assessment = self._security.require(
+                installation.revision.repo_id, installation.revision.commit_sha
+            )
+            verification = verify_adopted_snapshot(
+                installation.snapshot_path, assessment
+            )
+        else:
+            assessment = self._security.inspect(
+                installation.revision.repo_id, installation.revision.commit_sha
+            )
+            verification = self._supply.verify(installation)
         self._security.record_verification(assessment, verification)
         return verification
 
@@ -274,6 +298,7 @@ def compose_local(
     resolved_home = (home or Path.home()).expanduser().resolve()
     paths = paths or resolve_paths(home=resolved_home)
     paths.prepare()
+    credential = GatewayCredential(paths.gateway_credential)
     executable = (executable or Path(sys.executable)).expanduser().resolve()
     launchd = make_launchd(
         executable=executable,
@@ -294,8 +319,18 @@ def compose_local(
         HuggingFaceModelRepository(), PsutilMachineInventory()
     )
     security = ExactRevisionModelSecurity(intelligence, state_store)
-    model = _LocalModelSupply(hub_supply, remote, security)
-    client = client_port(resolved_home, paths, config_store)
+    model = _LocalModelSupply(
+        hub_supply,
+        remote,
+        security,
+        adoption_forbidden_roots=(
+            paths.config_dir,
+            paths.state_dir,
+            paths.data_dir,
+            paths.log_dir,
+        ),
+    )
+    client = client_port(resolved_home, paths, config_store, credential=credential)
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
     setup = SetupOperationPort(
@@ -306,7 +341,7 @@ def compose_local(
         config=config_owner,
         clients=client,
         supervisor=setup_supervisor,
-        verifier=GatewayVerificationPort(),
+        verifier=GatewayVerificationPort(credential),
         evidence=OperationalSetupEvidenceStore(state_store),
         removal_inventory=lambda: removal_inventory(
             paths, launchd, config_store, hub_supply, resolved_home
@@ -355,6 +390,8 @@ def compose_daemon(
     resolved_home = (home or Path.home()).expanduser().resolve()
     paths = paths or resolve_paths(home=resolved_home)
     paths.prepare()
+    credential = GatewayCredential(paths.gateway_credential)
+    credential.load_or_create()
     config_store = ConfigStore(paths.config_file, validate_config)
     state_store = OperationalStateStore(paths.state_db)
     catalogue = RuntimeCatalogue.load_builtin()
@@ -374,7 +411,17 @@ def compose_daemon(
         ModelIntelligence(HuggingFaceModelRepository(), PsutilMachineInventory()),
         state_store,
     )
-    model = ModelSupplyPort(hub_supply, config_store, security)
+    model = ModelSupplyPort(
+        hub_supply,
+        config_store,
+        security,
+        adoption_forbidden_roots=(
+            paths.config_dir,
+            paths.state_dir,
+            paths.data_dir,
+            paths.log_dir,
+        ),
+    )
 
     def load_config() -> MlxctlConfig:
         if not config_store.exists:
@@ -404,6 +451,7 @@ def compose_daemon(
         host=configured.gateway.host,
         port=configured.gateway.port,
         metric_sink=state_store.record_metric,
+        authenticate=credential.authenticate,
     )
     pressure = MacOSMemoryPressure()
     supervisor = Supervisor(
@@ -415,7 +463,7 @@ def compose_daemon(
             launch_builder=RuntimeLaunchBuilder(catalogue),
             trust_grants=lambda: state_store.snapshots("trust"),
             model_security=security,
-            model_verifier=hub_supply.verify,
+            model_verifier=model.verify_installation,
         ),
         state_store=state_store,
         gateway=gateway,

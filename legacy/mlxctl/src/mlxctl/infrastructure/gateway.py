@@ -102,6 +102,7 @@ def create_gateway(
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
     upstream_response_timeout: float = DEFAULT_UPSTREAM_RESPONSE_TIMEOUT,
     activity: GatewayActivity | None = None,
+    authenticate: Callable[[str | None], bool] | None = None,
 ) -> Starlette:
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
@@ -126,6 +127,9 @@ def create_gateway(
             yield {"http_client": client}
 
     async def models(request: Request) -> JSONResponse:
+        denied = _authenticate(request, authenticate)
+        if denied is not None:
+            return denied
         routes = await _await_if_needed(route_resolver.list_routes())
         data = []
         for route in sorted(routes, key=lambda item: item.service):
@@ -144,6 +148,9 @@ def create_gateway(
         return JSONResponse({"object": "list", "data": data})
 
     async def proxy(request: Request) -> JSONResponse | StreamingResponse:
+        denied = _authenticate(request, authenticate)
+        if denied is not None:
+            return denied
         media_type = request.headers.get("content-type", "").partition(";")[0]
         if media_type.strip().lower() != "application/json":
             return _error_response(
@@ -355,6 +362,21 @@ def _origin_is_allowed(origin: str | None) -> bool:
         return ipaddress.ip_address(parsed.hostname).is_loopback
     except ValueError:
         return False
+
+
+def _authenticate(
+    request: Request, authenticate: Callable[[str | None], bool] | None
+) -> JSONResponse | None:
+    if authenticate is None or authenticate(request.headers.get("authorization")):
+        return None
+    response = _error_response(
+        401,
+        "authentication_required",
+        "The Gateway requires its private bearer credential.",
+        action="Configure the client through mlxctl or read the credential location with mlxctl gateway inspect.",
+    )
+    response.headers["www-authenticate"] = "Bearer"
+    return response
 
 
 async def _await_if_needed(value: Any) -> Any:

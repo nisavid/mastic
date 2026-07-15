@@ -1,11 +1,15 @@
+import hashlib
+import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 from mlxctl.application.config_schema import validate_config
 from mlxctl.infrastructure.config_store import ConfigStore
+from mlxctl.infrastructure.control_protocol import MAX_FRAME_BYTES
 from mlxctl.infrastructure.model_supply import (
     CacheDeletionPlan,
     CacheInventory,
@@ -19,6 +23,7 @@ from mlxctl.infrastructure.model_supply import (
 )
 from mlxctl.infrastructure.model_intelligence import (
     EvidenceState,
+    RepositoryFile,
     RuntimeCompatibility,
     TrustSignal,
 )
@@ -30,10 +35,13 @@ from mlxctl.infrastructure.runtime_supply import (
 from mlxctl.infrastructure.supply_ports import (
     CacheMovePlan,
     ExactRevisionModelSecurity,
+    ModelSecurityPolicyError,
     ModelSupplyPort,
     RuntimeSupplyPort,
     SupplyPortError,
     VerifiedCacheMover,
+    inspect_adopted_snapshot,
+    verify_adopted_snapshot,
 )
 
 
@@ -250,6 +258,7 @@ class FakeModelIntelligence:
         self,
         *signals: TrustSignal,
         compatibility: tuple[RuntimeCompatibility, ...] = (),
+        repository_files: tuple[RepositoryFile, ...] = (),
     ) -> None:
         self.signals = signals or (
             TrustSignal(
@@ -261,12 +270,14 @@ class FakeModelIntelligence:
             ),
         )
         self.compatibility = compatibility
+        self.repository_files = repository_files
 
     def inspect(self, repository: str, revision: str, **_options):
         return SimpleNamespace(
             identity=SimpleNamespace(repo_id=repository, commit_sha=revision),
             trust_signals=self.signals,
             compatibility=self.compatibility,
+            repository_files=self.repository_files,
         )
 
 
@@ -654,6 +665,164 @@ route = "coding"
             installed["installation_name"],
         )
 
+    def test_model_adopt_verifies_exact_external_bytes_and_never_owns_them(
+        self,
+    ) -> None:
+        snapshot = self.root / "external-snapshot"
+        snapshot.mkdir()
+        config = b'{"model_type":"qwen"}'
+        weights = b"exact external weights"
+        (snapshot / "config.json").write_bytes(config)
+        (snapshot / "weights.safetensors").write_bytes(weights)
+        (snapshot / ".cache/huggingface").mkdir(parents=True)
+        (snapshot / ".cache/huggingface/download.json").write_text("{}")
+        files = (
+            RepositoryFile(
+                "config.json",
+                len(config),
+                lfs_sha256=hashlib.sha256(config).hexdigest(),
+            ),
+            RepositoryFile(
+                "weights.safetensors",
+                len(weights),
+                lfs_sha256=hashlib.sha256(weights).hexdigest(),
+            ),
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(repository_files=files), self.security_state
+        )
+        supply = FakeModelSupply(self.root / "cache")
+        port = ModelSupplyPort(supply, self.store, security)
+        observation = inspect_adopted_snapshot(snapshot)
+
+        result = port.execute(
+            "model.adopt",
+            {
+                "repository": "owner/external-model",
+                "revision": _SHA_A,
+                "path": str(snapshot),
+                "alias": "external",
+                "snapshot_fingerprint": observation.fingerprint,
+            },
+        )
+
+        desired = self.store.load().value.models[result["installation_name"]]
+        self.assertEqual(desired.provenance, "adopted")
+        self.assertEqual(desired.path, str(snapshot.resolve()))
+        self.assertEqual(result["verification"]["status"], "verified")
+        self.assertEqual(result["provenance"], "external-adopted")
+        supplied = port._supplied_installation(result["installation_name"])
+        self.assertEqual(supplied.snapshot_path, snapshot.resolve())
+        self.assertEqual(supplied.provenance.source, "external-adopted")
+        with self.assertRaisesRegex(SupplyPortError, "externally owned"):
+            port.execute("model.repair", {"resource": "external"})
+        self.assertTrue(snapshot.exists())
+        self.assertEqual(
+            port.execute("model.cache.prune", {"confirmed": True})["plan"][
+                "revision_hashes"
+            ],
+            [],
+        )
+        self.assertTrue(snapshot.exists())
+
+    def test_model_adopt_rejects_changed_missing_and_unsafe_snapshots(self) -> None:
+        snapshot = self.root / "external-snapshot"
+        snapshot.mkdir()
+        payload = b"safe"
+        file = snapshot / "config.json"
+        file.write_bytes(payload)
+        files = (
+            RepositoryFile(
+                "config.json",
+                len(payload),
+                lfs_sha256=hashlib.sha256(payload).hexdigest(),
+            ),
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(repository_files=files), self.security_state
+        )
+        port = ModelSupplyPort(
+            FakeModelSupply(self.root / "cache"), self.store, security
+        )
+        fingerprint = inspect_adopted_snapshot(snapshot).fingerprint
+        file.write_bytes(b"changed")
+        with self.assertRaisesRegex(SupplyPortError, "identity changed"):
+            port.execute(
+                "model.adopt",
+                {
+                    "repository": "owner/model",
+                    "revision": _SHA_A,
+                    "path": str(snapshot),
+                    "snapshot_fingerprint": fingerprint,
+                },
+            )
+        file.unlink()
+        file.symlink_to(snapshot / "missing")
+        with self.assertRaisesRegex(SupplyPortError, "symlinks"):
+            inspect_adopted_snapshot(snapshot)
+        file.unlink()
+        file.write_bytes(payload)
+        with patch("mlxctl.infrastructure.supply_ports.os.getuid", return_value=999999):
+            with self.assertRaisesRegex(SupplyPortError, "owned"):
+                inspect_adopted_snapshot(snapshot)
+        (snapshot / "unexpected.txt").write_text("not in the exact manifest")
+        fingerprint = inspect_adopted_snapshot(snapshot).fingerprint
+        with self.assertRaisesRegex(SupplyPortError, "integrity_mismatch"):
+            port.execute(
+                "model.adopt",
+                {
+                    "repository": "owner/model",
+                    "revision": _SHA_A,
+                    "path": str(snapshot),
+                    "snapshot_fingerprint": fingerprint,
+                },
+            )
+
+    def test_adopted_snapshot_requires_valid_content_digest_for_every_file(
+        self,
+    ) -> None:
+        snapshot = self.root / "external-snapshot"
+        snapshot.mkdir()
+        (snapshot / "weights.bin").write_bytes(b"same")
+
+        for evidence in (
+            {"path": "weights.bin", "size": 4},
+            {"path": "weights.bin", "size": 4, "lfs_sha256": "not-a-digest"},
+            {"path": "weights.bin", "size": 4, "blob_id": "not-a-digest"},
+        ):
+            with self.subTest(evidence=evidence):
+                with self.assertRaisesRegex(ModelSecurityPolicyError, "digest"):
+                    verify_adopted_snapshot(snapshot, {"repository_files": [evidence]})
+
+    def test_model_adopt_rejects_mlxctl_owned_and_cache_overlapping_paths(
+        self,
+    ) -> None:
+        owned_root = self.root / "mlxctl-data"
+        owned_snapshot = owned_root / "models" / "snapshot"
+        owned_snapshot.mkdir(parents=True)
+        (owned_snapshot / "weights.bin").write_bytes(b"owned")
+        with self.assertRaisesRegex(SupplyPortError, "mlxctl-owned"):
+            inspect_adopted_snapshot(owned_snapshot, forbidden_roots=(owned_root,))
+
+        cache_snapshot = self.root / "cache" / _SHA_A
+        cache_snapshot.mkdir(parents=True)
+        (cache_snapshot / "weights.bin").write_bytes(b"cached")
+        supply = FakeModelSupply(self.root / "cache")
+        supply.revisions = (
+            CachedRevision(
+                "owner/model@" + _SHA_A,
+                "owner/model",
+                _SHA_A,
+                cache_snapshot,
+                6,
+                "local-observed",
+                True,
+            ),
+        )
+        port = ModelSupplyPort(supply, self.store, self.security)
+        with self.assertRaisesRegex(SupplyPortError, "managed Hugging Face cache"):
+            port.inspect_adoption(str(cache_snapshot))
+
     def test_optiq_safetensors_install_persists_launchable_exact_security_evidence(
         self,
     ) -> None:
@@ -675,6 +844,36 @@ route = "coding"
             "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit", _SHA_A
         )
         self.assertEqual(persisted["revision"], _SHA_A)
+
+    def test_model_mutation_returns_bounded_security_summary(self) -> None:
+        files = tuple(
+            RepositoryFile(
+                f"{'nested-' * 30}{index:05}.bin",
+                1,
+                blob_id=hashlib.sha1(str(index).encode()).hexdigest(),
+            )
+            for index in range(5_000)
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(repository_files=files), self.security_state
+        )
+        port = ModelSupplyPort(
+            FakeModelSupply(self.root / "cache"), self.store, security
+        )
+
+        result = port.execute(
+            "model.install",
+            {
+                "repository": "owner/large-manifest",
+                "revision": _SHA_A,
+                "alias": "large",
+            },
+        )
+
+        encoded = json.dumps(result, separators=(",", ":")).encode()
+        self.assertLess(len(encoded), MAX_FRAME_BYTES)
+        self.assertEqual(result["security"]["repository_file_count"], 5_000)
+        self.assertNotIn("repository_files", result["security"])
 
     def test_model_install_hard_blocks_findings_unsafe_serialization_and_unknown_scan(
         self,

@@ -179,6 +179,7 @@ class ModelIntelligenceReport:
     compatibility: tuple[RuntimeCompatibility, ...] = ()
     fit: MachineFit | None = None
     trust_signals: tuple[TrustSignal, ...] = ()
+    repository_files: tuple[RepositoryFile, ...] = ()
 
 
 class ModelRepositoryPort(Protocol):
@@ -662,6 +663,7 @@ class ModelIntelligence:
             compatibility=compatibility,
             fit=fit,
             trust_signals=trust_signals,
+            repository_files=envelope.files,
         )
 
     def _metadata_json(

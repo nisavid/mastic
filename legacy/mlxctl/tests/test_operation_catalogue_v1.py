@@ -26,6 +26,7 @@ class OperationCatalogueTests(unittest.TestCase):
             "runtime.install",
             "model.search",
             "model.install",
+            "model.adopt",
             "model.cache.evict",
             "service.create",
             "service.start",
@@ -115,6 +116,13 @@ class OperationCatalogueTests(unittest.TestCase):
             [item.name for item in rollback.parameters], ["resource", "target"]
         )
         self.assertTrue(rollback.parameters[1].required)
+        adopt = self.catalogue["model.adopt"]
+        self.assertEqual(
+            [item.name for item in adopt.parameters],
+            ["repository", "revision", "path", "alias"],
+        )
+        self.assertTrue(adopt.parameters[1].required)
+        self.assertTrue(adopt.parameters[2].required)
         self.assertEqual(self.catalogue["runtime.doctor"].parameters, ())
         self.assertEqual(self.catalogue["runtime.prune"].parameters, ())
         self.assertEqual(self.catalogue["model.cache.prune"].parameters, ())

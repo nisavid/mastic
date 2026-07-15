@@ -73,14 +73,22 @@ mlxctl gateway routes
 Send an OpenAI-compatible request:
 
 ```sh
+MLXCTL_TOKEN="$(<"${XDG_STATE_HOME:-$HOME/.local/state}/mlxctl/gateway.token")"
 curl http://127.0.0.1:8766/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $MLXCTL_TOKEN" \
   -d '{
     "model": "qwen36-optiq",
     "messages": [{"role": "user", "content": "Write a tiny Swift hello world."}],
     "temperature": 0
   }'
 ```
+
+The Gateway is private to the current user through an owner-only bearer
+credential. `mlxctl gateway inspect` shows its location and client setup
+instructions without revealing its value. `mlxctl client configure` wires the
+credential into supported clients automatically; do not copy it into mlxctl
+configuration, logs, or command arguments.
 
 Stop only that model process while leaving the Gateway available:
 
@@ -149,9 +157,30 @@ mlxctl model install OWNER/REPOSITORY \
   --alias my-model
 ```
 
+If another tool already downloaded an exact Hugging Face snapshot into its own
+directory, register it without copying the bytes:
+
+```sh
+mlxctl model adopt OWNER/REPOSITORY \
+  --revision EXACT_40_CHARACTER_COMMIT_SHA \
+  --path "$(pwd)/models/exact-snapshot" \
+  --alias my-model
+```
+
+The preview fingerprints the existing directory. Confirmation then checks that
+the directory did not change, assesses that exact repository revision, and
+verifies its files against the Hub manifest before registration. Adopted
+snapshots must be regular, non-symlink files owned by the current user. They
+must also live outside mlxctl-owned directories and the managed Hugging Face
+cache; use `model install` for a revision already in that cache, or move an
+externally owned snapshot before adopting it.
+
 `model verify`, `repair`, `update`, `rollback`, and `uninstall` manage the
 logical installation. `model cache inspect`, `evict`, and `prune`
 manage physical shared cache bytes. Cache deletion remains reference-aware.
+Adopted bytes remain externally owned: `uninstall` only unregisters them,
+`repair` directs you back to their owner, and cache eviction or pruning never
+claims or deletes them.
 
 Models that require remote code are refused by default. A trust grant names
 the exact Model Revision, exact Runtime Installation, and accepted risk:

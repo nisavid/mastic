@@ -207,12 +207,24 @@ def _models(raw: Mapping[str, object]) -> dict[str, ModelInstallation]:
         try:
             ResourceName(name)
             table = _table(value, f"model {name!r}")
-            _reject_unknown(f"model {name!r}", table, {"repository", "revision"})
+            _reject_unknown(
+                f"model {name!r}",
+                table,
+                {"repository", "revision", "provenance", "path"},
+            )
             revision = ModelRevision(
                 _string(table, "repository", f"model {name!r}"),
                 _string(table, "revision", f"model {name!r}"),
             )
-            result[name] = ModelInstallation(name, revision)
+            provenance = table.get("provenance", "cached")
+            if not isinstance(provenance, str):
+                raise ConfigSchemaError(
+                    f"model {name!r} provenance must be cached or adopted"
+                )
+            path = table.get("path")
+            if path is not None and not isinstance(path, str):
+                raise ConfigSchemaError(f"model {name!r} path must be a string")
+            result[name] = ModelInstallation(name, revision, provenance, path)
         except ValueError as error:
             raise ConfigSchemaError(str(error)) from error
     return result

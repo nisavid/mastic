@@ -39,6 +39,7 @@ class GatewayRuntime:
         clock_ns: Callable[[], int] = time.time_ns,
         max_in_flight_per_service: int = 4,
         metric_sink: Callable[[Mapping[str, object]], object] | None = None,
+        authenticate: Callable[[str | None], bool] | None = None,
     ) -> None:
         validate_loopback_bind(host)
         if not 1 <= port <= 65535:
@@ -53,6 +54,7 @@ class GatewayRuntime:
         self._clock_ns = clock_ns
         self._max_in_flight_per_service = max_in_flight_per_service
         self._metric_sink = metric_sink or (lambda _metric: None)
+        self._authenticate = authenticate
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._routes: dict[str, GatewayRoute] = {}
@@ -70,7 +72,12 @@ class GatewayRuntime:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            app = create_gateway(self, bind_host=self.host, activity=self)
+            app = create_gateway(
+                self,
+                bind_host=self.host,
+                activity=self,
+                authenticate=self._authenticate,
+            )
             server = self._server_factory(app, self.host, self.port)
             thread = threading.Thread(
                 target=server.run,

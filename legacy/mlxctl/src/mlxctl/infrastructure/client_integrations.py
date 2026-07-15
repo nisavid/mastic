@@ -21,6 +21,11 @@ from mlxctl.application.config_schema import (
     ClientSettings,
     validate_hindsight_profile_name,
 )
+from mlxctl.infrastructure.gateway_credential import read_gateway_token
+
+
+_HINDSIGHT_API_KEY = "HINDSIGHT_API_LLM_API_KEY"
+_REDACTED = "<redacted>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +62,7 @@ class ClientConfiguration:
     codex_provider_id: str = "mlxctl-local"
     hindsight_provider: str = "openai"
     max_concurrent: int = 1
+    credential_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -90,6 +96,11 @@ class ClientConfiguration:
             raise ValueError("context_window must be positive")
         if self.max_concurrent <= 0:
             raise ValueError("max_concurrent must be positive")
+        if self.credential_path is not None:
+            credential_path = Path(self.credential_path)
+            if not credential_path.is_absolute():
+                raise ValueError("credential_path must be absolute")
+            object.__setattr__(self, "credential_path", credential_path)
         normalized = [
             re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
             for name in self.sampling_profiles
@@ -142,10 +153,12 @@ class LocalClientIntegrationFactory:
         codex_config_path: str | Path,
         hindsight_profiles_dir: str | Path,
         ownership_dir: str | Path,
+        credential_reader: Callable[[Path], str] = read_gateway_token,
     ) -> None:
         self.codex_config_path = Path(codex_config_path).expanduser()
         self.hindsight_profiles_dir = Path(hindsight_profiles_dir).expanduser()
         self.ownership_dir = Path(ownership_dir).expanduser()
+        self._credential_reader = credential_reader
         for path, label in (
             (self.codex_config_path, "Codex config path"),
             (self.hindsight_profiles_dir, "Hindsight profiles directory"),
@@ -183,6 +196,7 @@ class LocalClientIntegrationFactory:
             config_path,
             self.ownership_dir / f"hindsight-{profile_name}.ownership.json",
             self.ownership_dir / f"hindsight-{profile_name}.config.backup",
+            credential_reader=self._credential_reader,
         )
 
 
@@ -382,23 +396,26 @@ class HindsightClientIntegration:
         backup_path: str | Path,
         *,
         replace: Replace | None = None,
+        credential_reader: Callable[[Path], str] = read_gateway_token,
     ) -> None:
         self.config_path = Path(config_path)
         self.manifest_path = Path(manifest_path)
         self.backup_path = Path(backup_path)
         self._replace = replace or _atomic_replace
+        self._credential_reader = credential_reader
 
     def preview(self, configuration: ClientConfiguration) -> tuple[SemanticChange, ...]:
         raw, _ = _read(self.config_path)
         env = _EnvDocument(raw.decode())
-        return tuple(env.changes(_hindsight_fields(configuration)))
+        desired = self._desired(configuration)
+        return tuple(_redact_change(change) for change in env.changes(desired))
 
     def apply(
         self, configuration: ClientConfiguration, *, takeover: bool = False
     ) -> ClientApplyResult:
         raw, existed = _read(self.config_path)
         env = _EnvDocument(raw.decode())
-        desired = _hindsight_fields(configuration)
+        desired = self._desired(configuration)
         prior_manifest = self._manifest(optional=True)
         prior_fields = {
             tuple(item["path"]): item for item in prior_manifest.get("fields", [])
@@ -409,15 +426,21 @@ class HindsightClientIntegration:
             if path[0] in desired:
                 continue
             present, current, _line = env.lookup(path[0])
-            if not present or current != previous.get("after"):
+            matches = (
+                _secret_matches(current, previous)
+                if path[0] == _HINDSIGHT_API_KEY and present
+                else current == previous.get("after")
+            )
+            if not present or not matches:
                 owned.append(previous)
                 continue
             if previous["before_present"]:
-                env.restore_line(path[0], str(previous["before_line"]))
-                changes.append(SemanticChange(path, current, previous.get("before")))
+                before, before_line = _backup_env_value(self.backup_path, path[0])
+                env.restore_line(path[0], before_line)
+                changes.append(_redact_change(SemanticChange(path, current, before)))
             else:
                 env.delete(path[0])
-                changes.append(SemanticChange(path, current, None))
+                changes.append(_redact_change(SemanticChange(path, current, None)))
 
         for key, after in desired.items():
             path = (key,)
@@ -425,7 +448,9 @@ class HindsightClientIntegration:
             previous = prior_fields.get(path)
             if not present or current != after:
                 changes.append(
-                    SemanticChange(path, current if present else None, after)
+                    _redact_change(
+                        SemanticChange(path, current if present else None, after)
+                    )
                 )
                 env.set(key, after)
             if previous is not None:
@@ -438,15 +463,24 @@ class HindsightClientIntegration:
                 continue
             else:
                 before_present, before, before_line = False, None, None
-            owned.append(
-                {
-                    "path": [key],
-                    "before_present": before_present,
-                    "before": before,
-                    "before_line": before_line,
-                    "after": after,
-                }
-            )
+            if key == _HINDSIGHT_API_KEY:
+                owned.append(
+                    {
+                        "path": [key],
+                        "before_present": before_present,
+                        "after_digest": _digest(after.encode()),
+                    }
+                )
+            else:
+                owned.append(
+                    {
+                        "path": [key],
+                        "before_present": before_present,
+                        "before": before,
+                        "before_line": before_line,
+                        "after": after,
+                    }
+                )
 
         ownership_changed = bool(owned) and not prior_manifest
         if not changes and not ownership_changed:
@@ -500,16 +534,22 @@ class HindsightClientIntegration:
         for item in manifest["fields"]:
             path = tuple(item["path"])
             present, current, _line = env.lookup(path[0])
-            if not present or current != item.get("after"):
+            matches = (
+                _secret_matches(current, item)
+                if path[0] == _HINDSIGHT_API_KEY and present
+                else current == item.get("after")
+            )
+            if not present or not matches:
                 skipped.append(path)
                 retained.append(item)
                 continue
             if item["before_present"]:
-                env.restore_line(path[0], str(item["before_line"]))
-                changes.append(SemanticChange(path, current, item.get("before")))
+                before, before_line = _backup_env_value(self.backup_path, path[0])
+                env.restore_line(path[0], before_line)
+                changes.append(_redact_change(SemanticChange(path, current, before)))
             else:
                 env.delete(path[0])
-                changes.append(SemanticChange(path, current, None))
+                changes.append(_redact_change(SemanticChange(path, current, None)))
         rendered = env.render().encode()
         if changes:
             if not manifest["config_existed"] and not rendered.strip() and not retained:
@@ -553,6 +593,14 @@ class HindsightClientIntegration:
         _validate_manifest_paths(manifest, self.config_path, self.backup_path)
         return manifest
 
+    def _desired(self, configuration: ClientConfiguration) -> Mapping[str, str]:
+        token = (
+            self._credential_reader(configuration.credential_path)
+            if configuration.credential_path is not None
+            else None
+        )
+        return _hindsight_fields(configuration, token=token)
+
 
 def _codex_fields(
     configuration: ClientConfiguration,
@@ -567,6 +615,11 @@ def _codex_fields(
     }
     if configuration.context_window is not None:
         fields[("model_context_window",)] = configuration.context_window
+    if configuration.credential_path is not None:
+        auth = ("model_providers", provider, "auth")
+        fields[(*auth, "command")] = "/bin/cat"
+        fields[(*auth, "args")] = [str(configuration.credential_path)]
+        fields[(*auth, "refresh_interval_ms")] = 0
     for name, sampling in configuration.sampling_profiles.items():
         prefix = ("profiles", name)
         fields[(*prefix, "model")] = configuration.service_name
@@ -578,19 +631,47 @@ def _codex_fields(
     return MappingProxyType(fields)
 
 
-def _hindsight_fields(configuration: ClientConfiguration) -> Mapping[str, str]:
+def _hindsight_fields(
+    configuration: ClientConfiguration, *, token: str | None = None
+) -> Mapping[str, str]:
     fields = {
         "HINDSIGHT_API_LLM_PROVIDER": configuration.hindsight_provider,
         "HINDSIGHT_API_LLM_BASE_URL": configuration.gateway_endpoint,
         "HINDSIGHT_API_LLM_MODEL": configuration.service_name,
         "HINDSIGHT_API_LLM_MAX_CONCURRENT": str(configuration.max_concurrent),
     }
+    if token is not None:
+        fields[_HINDSIGHT_API_KEY] = token
     for name, sampling in configuration.sampling_profiles.items():
         suffix = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
         for key, value in sampling.values().items():
             setting = "MAX_TOKENS" if key == "max_tokens" else key.upper()
             fields[f"HINDSIGHT_API_LLM_{setting}_{suffix}"] = str(value)
     return MappingProxyType(fields)
+
+
+def _secret_matches(current: str | None, item: Mapping[str, object]) -> bool:
+    return current is not None and _digest(current.encode()) == item.get("after_digest")
+
+
+def _redact_change(change: SemanticChange) -> SemanticChange:
+    if change.path != (_HINDSIGHT_API_KEY,):
+        return change
+    return SemanticChange(
+        change.path,
+        _REDACTED if change.before is not None else None,
+        _REDACTED if change.after is not None else None,
+    )
+
+
+def _backup_env_value(path: Path, key: str) -> tuple[str, str]:
+    raw, existed = _read(path)
+    if not existed:
+        raise ClientIntegrationConflict("client backup is missing")
+    present, value, line = _EnvDocument(raw.decode()).lookup(key)
+    if not present or value is None or line is None:
+        raise ClientIntegrationConflict(f"client backup lacks {key}")
+    return value, line
 
 
 def _test_request(

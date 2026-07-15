@@ -207,6 +207,7 @@ class ModelIntelligenceTests(unittest.TestCase):
         self.assertEqual(report.attributes["parameters"].value["total"], 30)
         self.assertEqual(report.attributes["parameters"].state, EvidenceState.OBSERVED)
         self.assertEqual(report.cache.state, "absent")
+        self.assertEqual(report.repository_files, repository.envelope.files)
         self.assertEqual(repository.fetches[0][1], SHA)
 
     def test_reports_optiq_kv_and_mtp_as_structural_evidence(self) -> None:
