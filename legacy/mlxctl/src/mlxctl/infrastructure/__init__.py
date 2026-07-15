@@ -1,1 +1,1 @@
-"""Concrete persistence and operating-system adapters for mlxctl."""
+"""Concrete persistence, network, process, and operating-system adapters."""
