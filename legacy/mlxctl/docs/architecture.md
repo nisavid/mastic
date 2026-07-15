@@ -128,6 +128,27 @@ services. Requests never start services implicitly.
 Request telemetry records identity, timing, token totals, outcome, and resource
 correlation. It does not record prompt or response content by default.
 
+## Resource admission and pressure
+
+Before starting an Inference Service, mlxctl combines exact model weight and
+auxiliary evidence, architecture-aware KV and runtime-state projections,
+requested context and concurrency, current Service Run measurements, system
+memory and pressure, and a configurable system reserve. The resulting fit is
+likely, borderline, no-fit, or unknown and always includes its assumptions.
+
+Likely fit starts normally. Borderline or unknown fit requires confirmation or
+an exact noninteractive override. No-fit requires an operator-approved
+transition plan that names affected services or settings; a generic force flag
+cannot hide the risk. Per-service request queues are bounded and return a
+stable retryable response when full.
+
+Critical memory pressure immediately blocks new starts and sheds new Gateway
+work while bounded in-flight requests finish. The Supervisor may then stop the
+least-recently-used idle Service Runs until pressure recovers, but never stops a
+Pinned Inference Service automatically. If only pinned or busy services remain,
+it keeps shedding work and presents an exact operator stop plan. Every pressure
+decision and lifecycle action is journaled and visible in CLI and TUI.
+
 ## User interfaces
 
 The CLI uses Typer and Rich for nested resource commands, shell completion,

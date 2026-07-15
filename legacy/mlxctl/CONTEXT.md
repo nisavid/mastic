@@ -45,6 +45,12 @@ Named desired state combining one Model Alias, one Runtime Installation,
 launch options, activation policy, and Gateway route.
 _Avoid_: Server Definition, process, port
 
+**Pinned Inference Service**:
+An Inference Service excluded from automatic idle or critical-pressure
+eviction. Pinning does not prevent explicit stop, failure recovery, or
+operator-approved transition plans.
+_Avoid_: Ready service, active service
+
 **Service Run**:
 One concrete activation of an Inference Service, identified by a run ID for
 lifecycle, diagnostics, and metrics correlation.
