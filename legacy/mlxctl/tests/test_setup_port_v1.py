@@ -227,7 +227,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(self.verifier.calls[-1][0], "verify.request")
         self.assertEqual(self.verifier.calls[-1][1]["model"], "engineering")
         self.assertEqual(
-            {call[1]["service"] for call in self.clients.calls}, {"engineering"}
+            {call[1]["service"] for call in self.clients.calls}, {"coding"}
         )
         self.assertEqual(len(self.evidence.items["setup"]), 8)
         verification_evidence = self.evidence.items["setup"][-1].detail
