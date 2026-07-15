@@ -37,6 +37,10 @@ port = 8766
 definition = "optiq"
 version = "0.2.18"
 provenance = "tested"
+root = "/Users/example/.local/share/mlxctl/runtimes/optiq-0.2.18"
+launcher = ["/Users/example/.local/share/mlxctl/runtimes/optiq-0.2.18/bin/optiq", "serve"]
+capabilities = ["model", "host", "port", "kv_config", "mtp"]
+bundle_id = "optiq-0.2.18-py313-macos-arm64"
 
 [models.qwen]
 repository = "mlx-community/Qwen-OptiQ"

@@ -16,6 +16,10 @@ port = 8766
 definition = "optiq"
 version = "0.2.18"
 provenance = "tested"
+root = "/Users/example/.local/share/mlxctl/runtimes/optiq@0.2.18"
+launcher = ["/Users/example/.local/share/mlxctl/runtimes/optiq@0.2.18/bin/optiq", "serve"]
+capabilities = ["model", "host", "port", "kv_config", "mtp"]
+bundle_id = "optiq-0.2.18-py313-macos-arm64"
 
 [models.qwen-exact]
 repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
@@ -52,6 +56,7 @@ class ConfigSchemaV1Tests(unittest.TestCase):
 
         self.assertEqual(config.gateway.port, 8766)
         self.assertEqual(config.runtimes["optiq@0.2.18"].definition, "optiq")
+        self.assertIn("mtp", config.runtimes["optiq@0.2.18"].capabilities)
         self.assertEqual(config.models["qwen-exact"].revision.revision[:8], "70a3aa32")
         self.assertEqual(config.aliases["qwen-optiq"].installation_name, "qwen-exact")
         self.assertTrue(config.services["coding"].pinned)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
+from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
@@ -34,6 +35,10 @@ class ConfiguredRuntime:
     definition: str
     version: str
     provenance: str
+    root: str
+    launcher: tuple[str, ...]
+    capabilities: frozenset[str]
+    bundle_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +121,15 @@ def _runtimes(raw: Mapping[str, object]) -> dict[str, ConfiguredRuntime]:
         _reject_unknown(
             f"runtime {installation_id!r}",
             table,
-            {"definition", "version", "provenance"},
+            {
+                "definition",
+                "version",
+                "provenance",
+                "root",
+                "launcher",
+                "capabilities",
+                "bundle_id",
+            },
         )
         definition = _string(table, "definition", f"runtime {installation_id!r}")
         try:
@@ -125,11 +138,50 @@ def _runtimes(raw: Mapping[str, object]) -> dict[str, ConfiguredRuntime]:
             raise ConfigSchemaError(
                 f"unknown Runtime Definition {definition!r}"
             ) from error
+        provenance = _string(table, "provenance", f"runtime {installation_id!r}")
+        if provenance not in {"tested", "custom", "adopted"}:
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} provenance must be tested, custom, or adopted"
+            )
+        root = Path(_string(table, "root", f"runtime {installation_id!r}"))
+        launcher_raw = table.get("launcher")
+        capabilities_raw = table.get("capabilities")
+        if not root.is_absolute():
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} root must be absolute"
+            )
+        if (
+            not isinstance(launcher_raw, list)
+            or not launcher_raw
+            or not all(isinstance(item, str) and item for item in launcher_raw)
+        ):
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} launcher must be a nonempty string array"
+            )
+        if not Path(launcher_raw[0]).is_absolute():
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} launcher executable must be absolute"
+            )
+        if not isinstance(capabilities_raw, list) or not all(
+            isinstance(item, str) and item for item in capabilities_raw
+        ):
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} capabilities must be a string array"
+            )
+        bundle_id = table.get("bundle_id")
+        if bundle_id is not None and not isinstance(bundle_id, str):
+            raise ConfigSchemaError(
+                f"runtime {installation_id!r} bundle_id must be a string"
+            )
         result[installation_id] = ConfiguredRuntime(
             installation_id=installation_id,
             definition=definition,
             version=_string(table, "version", f"runtime {installation_id!r}"),
-            provenance=_string(table, "provenance", f"runtime {installation_id!r}"),
+            provenance=provenance,
+            root=str(root),
+            launcher=tuple(launcher_raw),
+            capabilities=frozenset(capabilities_raw),
+            bundle_id=bundle_id,
         )
     return result
 
