@@ -342,6 +342,25 @@ class LocalOperationBackendTests(unittest.TestCase):
             ).execute()
             self.assertTrue(inspected["resource"]["desired"]["pinned"])
 
+    def test_service_create_uses_the_public_service_argument(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            backend.prepare(
+                OperationRequest(
+                    "service.create",
+                    {
+                        "service": "assistant",
+                        "model_alias": "coding",
+                        "runtime": "optiq-0.2.18",
+                        "route": "assistant",
+                    },
+                )
+            ).execute()
+
+            listed = backend.prepare(OperationRequest("service.list")).execute()
+            self.assertIn("assistant", [item["name"] for item in listed["items"]])
+
     def test_live_lifecycle_calls_only_supervisor_port(self) -> None:
         with TemporaryDirectory() as directory:
             supervisor = _Port({"run_id": "run-2", "state": "starting"})

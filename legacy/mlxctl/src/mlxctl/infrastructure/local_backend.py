@@ -751,7 +751,12 @@ class LocalOperationBackend:
                 return
             if name.startswith("service."):
                 services = document.setdefault("services", tomlkit.table())
-                resource = str(parameters.get("resource", parameters.get("name", "")))
+                resource = str(
+                    parameters.get(
+                        "resource",
+                        parameters.get("service", parameters.get("name", "")),
+                    )
+                )
                 if (
                     name in {"service.edit", "service.remove"}
                     and resource not in services
