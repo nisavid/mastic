@@ -158,6 +158,8 @@ class GatewayRunner(Protocol):
 
     def set_route(self, service: str, state: str, endpoint: str | None) -> None: ...
 
+    def describe_route(self, route: GatewayRoute) -> None: ...
+
     def shed_new_work(self, enabled: bool) -> None: ...
 
     def is_busy(self, service: str) -> bool: ...
@@ -260,7 +262,16 @@ class Supervisor:
             try:
                 self._gateway.start()
                 for service in self._desired_state.services():
-                    self._gateway.set_route(str(service.name), "stopped", None)
+                    route = self._gateway_route(service)
+                    self._gateway.describe_route(
+                        GatewayRoute(
+                            service=route,
+                            state="stopped",
+                            model=str(service.model_alias),
+                            runtime=service.runtime_installation,
+                        )
+                    )
+                    self._gateway.set_route(route, "stopped", None)
                 self._recover_runs_locked()
             except Exception as error:
                 self._state = "failed"
@@ -338,7 +349,9 @@ class Supervisor:
                     error=str(error),
                 )
                 self._runs[name] = _Run(rejected, service)
-                self._gateway.set_route(name, "unavailable", None)
+                self._gateway.set_route(
+                    self._gateway_route(service), "unavailable", None
+                )
                 self._persist_run_locked(self._runs[name])
                 self._finish_operation_locked(operation_id, rejected.state.value)
                 return ServiceTransition(operation_id, rejected, needs_start)
@@ -348,7 +361,7 @@ class Supervisor:
             )
             run = _Run(starting, service)
             self._runs[name] = run
-            self._gateway.set_route(name, "unavailable", None)
+            self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._event_locked(operation_id, "launch_prepared", run_id=run_id)
             try:
                 process = self._processes.launch(launch.argv, launch.environment)
@@ -394,7 +407,9 @@ class Supervisor:
                         upstream_port=port,
                         pid=process.pid,
                     )
-                    self._gateway.set_route(name, "ready", endpoint)
+                    self._gateway.set_route(
+                        self._gateway_route(service), "ready", endpoint
+                    )
                     self._persist_run_locked(run)
                     self._finish_operation_locked(operation_id, "ready")
                     return ServiceTransition(operation_id, run.status, needs_start)
@@ -426,7 +441,7 @@ class Supervisor:
                         name, self._new_identity_locked("run"), ServiceRunState.STOPPED
                     )
                 )
-                self._gateway.set_route(name, "stopped", None)
+                self._gateway.set_route(self._gateway_route(service), "stopped", None)
                 self._finish_operation_locked(operation_id, "stopped")
                 return ServiceTransition(operation_id, status)
             run.status = ServiceRunStatus(
@@ -436,13 +451,13 @@ class Supervisor:
                 upstream_port=run.status.upstream_port,
                 pid=run.status.pid,
             )
-            self._gateway.set_route(name, "unavailable", None)
+            self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._persist_run_locked(run)
             self._terminate_locked(run)
             run.status = ServiceRunStatus(
                 name, run.status.run_id, ServiceRunState.STOPPED
             )
-            self._gateway.set_route(name, "stopped", None)
+            self._gateway.set_route(self._gateway_route(service), "stopped", None)
             self._persist_run_locked(run)
             self._finish_operation_locked(operation_id, "stopped")
             return ServiceTransition(operation_id, run.status)
@@ -491,9 +506,11 @@ class Supervisor:
                     run
                     for run in active
                     if not run.service.pinned
-                    and not self._gateway.is_busy(run.status.service)
+                    and not self._gateway.is_busy(self._gateway_route(run.service))
                 ),
-                key=lambda run: self._gateway.last_used_ns(run.status.service),
+                key=lambda run: self._gateway.last_used_ns(
+                    self._gateway_route(run.service)
+                ),
             )
         stopped: list[str] = []
         for run in candidates:
@@ -522,7 +539,7 @@ class Supervisor:
                     remaining,
                     key=lambda run: (
                         run.service.pinned,
-                        self._gateway.last_used_ns(run.status.service),
+                        self._gateway.last_used_ns(self._gateway_route(run.service)),
                     ),
                 )
             )
@@ -540,17 +557,24 @@ class Supervisor:
         """Return Gateway routes without starting stopped services."""
 
         return tuple(
-            self.resolve(str(service.name))
+            self.resolve(str(service.route))
             for service in self._desired_state.services()
         )
 
     def resolve(self, service: str) -> GatewayRoute | None:
         """Resolve current route state; resolution never activates a service."""
 
-        desired = self._desired_state.service(service)
+        desired = next(
+            (
+                item
+                for item in self._desired_state.services()
+                if str(item.route) == service
+            ),
+            None,
+        )
         if desired is None:
             return None
-        status = self.service_status(service)
+        status = self.service_status(str(desired.name))
         endpoint = None
         route_state = "stopped"
         if status.state is ServiceRunState.READY and status.upstream_port is not None:
@@ -617,7 +641,11 @@ class Supervisor:
                 service_name, run_id, ServiceRunState.READY, port, pid
             )
             self._runs[service_name] = _Run(status, service, process, identity)
-            self._gateway.set_route(service_name, "ready", f"http://127.0.0.1:{port}")
+            self._gateway.set_route(
+                self._gateway_route(service),
+                "ready",
+                f"http://127.0.0.1:{port}",
+            )
 
     def _refresh_exits_locked(self) -> None:
         for run in self._runs.values():
@@ -639,7 +667,9 @@ class Supervisor:
                     ServiceRunState.FAILED,
                     error="runtime exited unexpectedly",
                 )
-                self._gateway.set_route(run.status.service, "unavailable", None)
+                self._gateway.set_route(
+                    self._gateway_route(run.service), "unavailable", None
+                )
                 operation_id = self._begin_operation_locked(
                     "service.failure", run.status.service
                 )
@@ -697,7 +727,7 @@ class Supervisor:
             ServiceRunState.FAILED,
             error=error,
         )
-        self._gateway.set_route(run.status.service, "unavailable", None)
+        self._gateway.set_route(self._gateway_route(run.service), "unavailable", None)
         self._persist_run_locked(run)
         self._finish_operation_locked(operation_id, "failed", error=error)
         return ServiceTransition(operation_id, run.status, supervisor_started)
@@ -706,6 +736,10 @@ class Supervisor:
         if self._shedding_new_work != enabled:
             self._gateway.shed_new_work(enabled)
             self._shedding_new_work = enabled
+
+    @staticmethod
+    def _gateway_route(service: InferenceService) -> str:
+        return str(service.route)
 
     def _persist_run_locked(self, run: _Run) -> None:
         snapshot: dict[str, object] = {

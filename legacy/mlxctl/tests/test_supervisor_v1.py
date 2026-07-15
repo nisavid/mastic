@@ -17,12 +17,14 @@ from mlxctl.infrastructure.supervisor_v1 import (
 )
 
 
-def _service(name: str, *, pinned: bool = False) -> InferenceService:
+def _service(
+    name: str, *, pinned: bool = False, route: str | None = None
+) -> InferenceService:
     return InferenceService(
         name=ResourceName(name),
         model_alias=ResourceName(f"{name}-model"),
         runtime_installation="optiq@0.2.18",
-        route=ResourceName(name),
+        route=ResourceName(route or name),
         pinned=pinned,
         options={"context_length": 32768},
     )
@@ -157,6 +159,7 @@ class FakeGateway:
         self.calls: list[object] = []
         self.busy_services: set[str] = set()
         self.last_used: dict[str, int] = {}
+        self.descriptions = {}
 
     def start(self):
         self.running = True
@@ -165,6 +168,9 @@ class FakeGateway:
     def set_route(self, service: str, state: str, endpoint: str | None):
         self.routes[service] = (state, endpoint)
         self.calls.append(("route", service, state, endpoint))
+
+    def describe_route(self, route):
+        self.descriptions[route.service] = route
 
     def shed_new_work(self, enabled: bool):
         self.calls.append(("shed", enabled))
@@ -208,6 +214,34 @@ class FakeClock:
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_public_gateway_route_is_distinct_from_service_resource_name(self) -> None:
+        service = _service("worker", route="coding")
+        self.desired = FakeDesiredState(service)
+        supervisor = Supervisor(
+            desired_state=self.desired,
+            runtime_supply=self.runtime,
+            state_store=self.store,
+            gateway=self.gateway,
+            processes=self.processes,
+            probe=self.probe,
+            memory_pressure=self.pressure,
+            clock=self.clock,
+            readiness_timeout=3,
+            drain_timeout=2,
+            terminate_timeout=1,
+        )
+
+        supervisor.start()
+        transition = supervisor.start_service("worker")
+
+        self.assertEqual(transition.run.state, ServiceRunState.READY)
+        self.assertIn("coding", self.gateway.routes)
+        self.assertNotIn("worker", self.gateway.routes)
+        route = supervisor.resolve("coding")
+        self.assertEqual(route.service, "coding")
+        self.assertEqual(route.model, "worker-model")
+        self.assertEqual(route.runtime, "optiq@0.2.18")
+
     def setUp(self) -> None:
         self.desired = FakeDesiredState(_service("coding"), _service("memory"))
         self.runtime = FakeRuntimeSupply()
