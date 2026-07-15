@@ -49,9 +49,10 @@ action. Read-only commands never start it. The Supervisor remains running until
 the user explicitly stops it. Stopping it drains the Gateway and Service Runs,
 persists terminal state, and ends bounded operations safely.
 
-Long operations are durable Supervisor jobs. The invoking CLI or TUI may wait,
-detach, reconnect, stream progress, or request cancellation. Operation journals
-make supported work resumable after interruption.
+Long physical operations have durable identities and journals. The invoking CLI
+or TUI waits while the operation runs; `operation list` and `operation inspect`
+show the recorded result. Public v1 does not claim detach, resume, or
+cancellation semantics that an operation owner cannot guarantee.
 
 ## Persistence boundaries
 
@@ -60,7 +61,8 @@ make supported work resumable after interruption.
   replaced.
 - SQLite in WAL mode stores operation journals, observed resource and run
   state, versioned snapshots, and metrics.
-- Runtime logs are append-only and correlated to Service Run IDs.
+- Runtime logs are private, size-bounded, rotated, and correlated to Service Run
+  IDs.
 - Runtime Installations are immutable side-by-side environments under the
   per-user data directory.
 - Model bytes stay in official Hugging Face or declared local caches. mlxctl
@@ -72,7 +74,7 @@ make supported work resumable after interruption.
 The local control protocol uses a mode-0600 Unix socket and verifies the peer's
 user identity. Framed JSON messages carry a protocol version, request and
 operation IDs, typed parameters, progress events, results, stable error codes,
-and cancellation requests.
+and terminal results.
 
 Protocol data-transfer objects are separate from domain types. Version
 negotiation fails clearly before an incompatible command runs. Human prose and
@@ -125,22 +127,20 @@ stays healthy when an upstream fails, reports per-service readiness through
 `/v1/models`, and returns stable actionable errors for stopped or unavailable
 services. Requests never start services implicitly.
 
-Request telemetry records identity, timing, token totals, outcome, and resource
-correlation. It does not record prompt or response content by default.
+Request telemetry records admission, completion, active-request counts, and
+service correlation. Lifecycle and pressure telemetry record state transitions.
+Prompt and response content, authorization headers, and token payloads are not
+recorded.
 
 ## Resource admission and pressure
 
-Before starting an Inference Service, mlxctl combines exact model weight and
-auxiliary evidence, architecture-aware KV and runtime-state projections,
-requested context and concurrency, current Service Run measurements, system
-memory and pressure, and a configurable system reserve. The resulting fit is
-likely, borderline, no-fit, or unknown and always includes its assumptions.
-
-Likely fit starts normally. Borderline or unknown fit requires confirmation or
-an exact noninteractive override. No-fit requires an operator-approved
-transition plan that names affected services or settings; a generic force flag
-cannot hide the risk. Per-service request queues are bounded and return a
-stable retryable response when full.
+Model inspection and guided setup combine exact model-weight evidence,
+architecture-aware KV and runtime-state projections, requested context and
+concurrency, current machine memory, and a system reserve. The resulting fit is
+likely, borderline, no-fit, or unknown and includes its assumptions. The setup
+plan blocks a known no-fit selection and makes uncertain evidence visible before
+confirmation. Per-service admission is bounded and returns a stable retryable
+response at the concurrency limit.
 
 Critical memory pressure immediately blocks new starts and sheds new Gateway
 work while bounded in-flight requests finish. The Supervisor may then stop the
@@ -155,14 +155,14 @@ The CLI uses Typer and Rich for nested resource commands, shell completion,
 contextual help, TTY-aware human output, and deterministic versioned JSON or
 NDJSON.
 
-The TUI uses Textual screens, a command palette, reactive snapshots,
-background workers, contextual actions, progress, confirmation, and
+The TUI uses Textual screens, a command palette, reactive snapshots, background
+workers, contextual actions, confirmation, working-state feedback, and
 notifications. It calls the same application operations as the CLI.
 
-Successful observation commands exit zero even when they report stopped,
-degraded, or unhealthy state. Invalid invocation or failed observation exits
-nonzero. Explicit `mlxctl check` requirements own readiness and health policy
-pass, fail, and error exits.
+Observation commands exit zero when the observation itself succeeds, even when
+the reported resource is stopped or degraded. `mlxctl check` and
+`mlxctl service check` additionally exit nonzero when their health policy
+fails. Invalid invocation and failed observation also exit nonzero.
 
 ## Verification seams
 

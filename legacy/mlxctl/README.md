@@ -150,7 +150,7 @@ mlxctl model install OWNER/REPOSITORY \
 ```
 
 `model verify`, `repair`, `update`, `rollback`, and `uninstall` manage the
-logical installation. `model cache inspect`, `move`, `evict`, and `prune`
+logical installation. `model cache inspect`, `evict`, and `prune`
 manage physical shared cache bytes. Cache deletion remains reference-aware.
 
 Models that require remote code are refused by default. A trust grant names
