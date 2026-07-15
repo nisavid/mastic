@@ -1,43 +1,33 @@
 # mlxctl
 
-`mlxctl` manages named local [MLX](https://github.com/ml-explore/mlx)
-inference servers as services instead of loose terminal processes. It gives
-clients stable loopback endpoints while a small supervisor starts and stops the
-underlying server processes, checks readiness, and records local metrics.
+`mlxctl` is a local inference manager for Apple-silicon Macs. It installs and
+checks MLX runtimes, resolves exact model revisions, runs several named
+Inference Services at once, and gives clients one stable OpenAI-compatible
+Gateway at `http://127.0.0.1:8766/v1`.
 
-The project provides two commands:
+Use `mlxctl` for day-to-day work. Its companion process, `mlxd`, owns the
+Gateway and child runtime processes. You should not need to edit configuration
+files or call `launchctl`, Hugging Face cache tools, or runtime binaries to
+perform a supported operation.
 
-- `mlxctl` is the operator-facing CLI and terminal dashboard.
-- `mlxd` is the foreground supervisor that owns server lifecycle and runtime
-  state.
+First-party Runtime Definitions cover
+[`mlx-lm`](https://github.com/ml-explore/mlx-lm), MLX-VLM, and
+[OptiQ](https://github.com/ChenMnZ/OptiQ). Each Inference Service selects one
+exact Runtime Installation, one stable Model Alias, its own private upstream
+port, and a public Gateway route. Several services can therefore run at the
+same time without competing for one hard-coded server port.
 
-`mlxctl` targets Apple-silicon Macs and supports `mlx_lm` and `optiq` server
-definitions. Runtime endpoints are loopback-only; the project does not expose
-inference servers directly to a network.
+## Get a working service
 
-## What it provides
+This path installs mlxctl, creates the recommended service for a suitable Mac,
+starts it, and sends a request through the Gateway.
 
-- Named models and server definitions in one validated TOML file.
-- Stable client ports in front of private, dynamically allocated upstream
-  ports.
-- Start, stop, status, model-discovery, and metrics commands with optional JSON
-  output.
-- A curses dashboard for interactive operation and a plain snapshot when
-  output is redirected.
-- Request and process metrics stored in a local SQLite database.
-- A versioned Unix-socket control protocol between `mlxctl` and `mlxd`.
-- Optional launchd activation when the documented LaunchAgent is installed.
-
-## Get to a working control plane
-
-This first path runs `mlxd` in the foreground. It verifies installation and
-configuration without installing a LaunchAgent or downloading a model.
-
-### Prerequisites
+### Requirements
 
 - macOS on Apple silicon
 - Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/)
+- enough free memory and disk for the model you select
 
 Clone the repository and install the tool:
 
@@ -47,172 +37,263 @@ cd systools
 uv tool install ./tools/mlxctl
 ```
 
-Create the configuration directory with private permissions:
+Confirm that the complete interface is available:
 
 ```sh
-mkdir -p ~/.config/mlxd
-chmod 700 ~/.config/mlxd
+mlxctl --help
+mlxctl runtime available
 ```
 
-Create `~/.config/mlxd/config.toml`:
-
-```toml
-schema_version = 1
-
-[models.small]
-reference = "mlx-community/Llama-3.2-3B-Instruct-4bit"
-
-[servers.local]
-type = "mlx_lm"
-model = "small"
-port = 8765
-```
-
-In one terminal, start the supervisor with a longer idle window for this
-check:
+Run guided setup:
 
 ```sh
-mlxd --idle-grace-seconds 300
+mlxctl setup
 ```
 
-In another terminal, inspect the configured server:
+mlxctl checks the Mac, renders an editable plan, and asks before changing
+anything. The built-in recommendation currently targets Macs with at least
+48 GiB of unified memory and 24 GiB of free disk. It installs the tested OptiQ
+runtime, pins
+`mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit` to an exact revision, uses the
+model's `kv_config.json`, enables MTP, creates the `qwen36-optiq` service and
+route, starts it, and verifies a request.
+
+If no recommendation fits, setup stops without choosing an unsafe model. Use
+the model workflow below to inspect a smaller candidate, then run
+`mlxctl setup --profile expert --help` to supply an exact editable selection.
+
+Check the resulting system:
 
 ```sh
 mlxctl status
+mlxctl service inspect qwen36-optiq
+mlxctl gateway routes
 ```
 
-You should see:
-
-```text
-local is stopped at http://127.0.0.1:8765.
-```
-
-Stop the foreground supervisor with `Ctrl-C`. The control plane is now ready;
-install a supported server runtime before starting inference.
-
-## Run a server
-
-`mlxd` launches the selected runtime by command name. Ensure either
-`mlx_lm.server` or `optiq` is installed and visible on the supervisor's
-`PATH`, then start `mlxd` in the foreground as above or install the launchd
-deployment described below.
-
-Start the example server and inspect its stable endpoint:
+Send an OpenAI-compatible request:
 
 ```sh
-mlxctl start local
-mlxctl status local
+curl http://127.0.0.1:8766/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen36-optiq",
+    "messages": [{"role": "user", "content": "Write a tiny Swift hello world."}],
+    "temperature": 0
+  }'
 ```
 
-Clients can use `http://127.0.0.1:8765` while the server is ready. Stop it when
-finished:
+Stop only that model process while leaving the Gateway available:
 
 ```sh
-mlxctl stop local
+mlxctl service stop qwen36-optiq
 ```
 
-The first start may take longer while the selected runtime obtains model
-weights. The readiness timeout defaults to 120 seconds and can be changed in
-the `[daemon]` configuration table.
+Stop every Service Run, the Gateway, and `mlxd` itself:
 
-## Install launchd activation
+```sh
+mlxctl supervisor stop
+```
 
-On macOS, `mlxctl` can kickstart a registered per-user LaunchAgent when the
-control socket is absent. The current activation seam expects the label
-`io.nisavid.mlxd`; `RunAtLoad` and `KeepAlive` can remain disabled so the
-supervisor starts only when a command needs it and exits after becoming idle.
+The next mutation that needs `mlxd` can activate it again. Read-only commands,
+including `status`, `check`, `doctor`, lists, and inspections, never start it.
 
-The exact plist, directories, environment variables, permissions, and control
-behavior are defined in the
-[`mlxctl` deployment contract](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/deployment-contract.md).
-The author's chezmoi-managed deployment implements that contract, but it is not
-required for foreground operation.
+## Use the operations console
 
-## Use the CLI
+Run `mlxctl` with no arguments, or run `mlxctl tui`, to open the terminal UI.
+It provides the same operations as the CLI from one shared catalogue.
 
-| Command | Purpose |
-| --- | --- |
-| `mlxctl start SERVER` | Start one configured server and wait for readiness. |
-| `mlxctl stop SERVER` | Stop one managed server. |
-| `mlxctl status [SERVER]` | Show lifecycle state and the stable client endpoint. |
-| `mlxctl models SERVER` | Show model identifiers advertised by a ready server. |
-| `mlxctl metrics [SERVER]` | Summarize request and process metrics. |
-| `mlxctl dashboard` | Open the interactive dashboard, or print one snapshot when redirected. |
+- Use the left navigation for live resources, topology, diagnostics, and the
+  complete command catalogue.
+- Use the guided setup, model search, runtime install, and service builder
+  actions for common workflows.
+- Press `Ctrl+P` and type a command or intent to open any operation.
+- Review the complete resolved plan before confirming a mutation.
+- Press `?` for help and `q` to quit.
 
-Every non-dashboard command accepts `--json`. Metrics can also be filtered with
-`--model`, `--start`, and `--end`; timestamps must be timezone-aware ISO 8601
-values. Run `mlxctl COMMAND --help` for the exact arguments.
+State is expressed with words and symbols as well as color. Narrow terminals
+collapse secondary panes without removing operations.
 
-In the interactive dashboard:
+## Find and manage models
 
-| Key | Action |
-| --- | --- |
-| `j` / `↓` | Select the next server. |
-| `k` / `↑` | Select the previous server. |
-| `s` | Start the selected server. |
-| `x` | Stop the selected server. |
-| `r` | Refresh immediately. |
-| `q` | Quit. |
+Model discovery, fit analysis, installation, aliases, and cached bytes are
+separate surfaces:
 
-## Configure models and servers
+```sh
+# Curated mlx-community candidates
+mlxctl model search qwen --source curated
 
-The configuration file is `~/.config/mlxd/config.toml` by default. Version 1
-has these top-level tables:
+# Broader Hugging Face search
+mlxctl model search qwen --source broad --limit 20
 
-| Table | Purpose | Defaults |
+# Models already present in the local Hugging Face cache
+mlxctl model search --source local
+
+# Identity, declared capabilities, trust signals, and estimated Mac fit
+mlxctl model inspect mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit \
+  --revision 70a3aa32c7feef511182bf16aa332f37e8d82014 \
+  --context-tokens 32768 \
+  --concurrency 1
+
+# Exact configured installations and aliases
+mlxctl model list
+
+# Physical cached revisions and disk usage
+mlxctl model cache list
+```
+
+Install a chosen revision under a stable alias:
+
+```sh
+mlxctl model install OWNER/REPOSITORY \
+  --revision EXACT_COMMIT_SHA \
+  --alias my-model
+```
+
+`model verify`, `repair`, `update`, `rollback`, and `uninstall` manage the
+logical installation. `model cache inspect`, `move`, `evict`, and `prune`
+manage physical shared cache bytes. Cache deletion remains reference-aware.
+
+Models that require remote code are refused by default. A trust grant names
+the exact Model Revision, exact Runtime Installation, and accepted risk:
+
+```sh
+mlxctl model trust my-model \
+  --runtime EXACT_RUNTIME_INSTALLATION \
+  --accepted-risks '["remote_code"]'
+```
+
+Changing the revision or runtime invalidates that grant. Known security
+findings and integrity mismatches cannot be overridden.
+
+## Build and run several services
+
+Inspect the available runtime families and installed instances:
+
+```sh
+mlxctl runtime available
+mlxctl runtime list
+mlxctl runtime doctor
+```
+
+Install the tested channel, then create a service from an installed runtime
+and Model Alias:
+
+```sh
+mlxctl runtime install optiq
+
+mlxctl service create assistant \
+  --model-alias my-model \
+  --runtime EXACT_RUNTIME_INSTALLATION \
+  --route assistant \
+  --options '{"max_context":32768,"kv_config":"kv_config.json","mtp":true}'
+```
+
+Run several services by giving each a different service name and route. Their
+runtime processes receive private dynamic upstream ports; clients continue to
+use the one Gateway port and select a route through the request's `model`
+field.
+
+```sh
+mlxctl service start assistant
+mlxctl service list
+mlxctl gateway routes
+mlxctl service stop assistant
+```
+
+`activation=manual` starts only when requested. `activation=supervisor` starts
+with the Supervisor. Pinned services are protected from automatic pressure
+eviction; critical memory pressure rejects new work but does not kill a busy or
+pinned service.
+
+## Configure Codex or Hindsight
+
+Client integrations are owned and reversible. They write only the settings
+needed for the selected Gateway route and retain ownership evidence for safe
+removal.
+
+```sh
+mlxctl client configure codex \
+  --service assistant \
+  --context-window 32768 \
+  --sampling-profiles '{"coding":{"temperature":0}}'
+
+mlxctl client configure hindsight \
+  --service assistant \
+  --profile default \
+  --context-window 32768 \
+  --max-concurrent 1 \
+  --sampling-profiles '{
+    "verification":{"temperature":0},
+    "retain":{"temperature":0.1},
+    "reflect":{"temperature":0.9},
+    "consolidation":{"temperature":0}
+  }'
+```
+
+Verify and remove an integration through mlxctl:
+
+```sh
+mlxctl client test codex
+mlxctl client inspect codex
+mlxctl client remove codex
+```
+
+## Diagnose and recover
+
+Start with the narrowest surface that answers the question:
+
+```sh
+mlxctl status                 # whole-system overview
+mlxctl check                  # concise component checks
+mlxctl doctor                 # diagnosed issues and next actions
+mlxctl service check NAME     # one service and route
+mlxctl runtime doctor         # runtime roots and launchers
+mlxctl logs NAME              # bounded product-owned logs
+mlxctl operation list        # physical install/update operation history
+```
+
+Every command supports `--json`, `--json-lines`, and `--plain`. Mutations can
+use `--yes` only after mlxctl has resolved an exact plan. Run any command with
+`--help` for accepted values and discovery commands.
+
+## Understand the resource model
+
+- A **Runtime Definition** describes how mlx-lm, MLX-VLM, or OptiQ is installed,
+  probed, and launched. A **Runtime Installation** is one exact local instance.
+- A **Model Revision** is immutable Hugging Face content. A **Model
+  Installation** records that revision, and a **Model Alias** gives services a
+  stable name.
+- An **Inference Service** combines one Model Alias, Runtime Installation,
+  launch options, activation policy, and Gateway route. A **Service Run** is
+  its current process.
+- The **Gateway** owns the stable loopback client endpoint and routes by the
+  OpenAI `model` field. It never starts a stopped service because a request
+  arrived.
+- The **Supervisor** owns the Gateway, Service Runs, pressure admission, and
+  lifecycle evidence. It is explicit and per-user.
+
+Desired state is strict TOML. Operational state is content-free SQLite in WAL
+mode. Inference prompts and responses are never stored there.
+
+## Files and deployment
+
+| Purpose | Default path | Override |
 | --- | --- | --- |
-| `[daemon]` | Readiness, stop, and metrics-sampling intervals. | `readiness_timeout_seconds = 120`, `stop_timeout_seconds = 10`, `metrics_interval_seconds = 5` |
-| `[metrics]` | Local metrics retention. | `retention_days = 30` |
-| `[models.NAME]` | Maps a local alias to a model repository or filesystem reference. | `reference` is required. |
-| `[servers.NAME]` | Declares one named server and stable client endpoint. | `host = "127.0.0.1"`; `type`, `model`, and `port` are required. |
+| Desired state | `~/.config/mlxctl/config.toml` | `MLXCTL_CONFIG_DIR` |
+| Operations and socket | `~/.local/state/mlxctl/` | `MLXCTL_STATE_DIR` |
+| Runtime Installations | `~/.local/share/mlxctl/runtimes/` | `MLXCTL_DATA_DIR` |
+| Private logs | `~/Library/Logs/mlxctl/` | `MLXCTL_LOG_DIR` |
 
-A server may also define an `[servers.NAME.environment]` table of string
-values and an `[servers.NAME.options]` table. `mlx_lm` accepts
-`draft_model`, `prompt_cache_size`, `prompt_concurrency`, `pipeline`, `temp`,
-`top_p`, and `top_k`. `optiq` accepts those options plus `adapter`,
-`allow_model_switch`, `anthropic`, `idle_timeout`, `kv_bits`, `kv_config`,
-`kv_group_size`, `max_context`, `mtp`, and `quantized_kv_start`. When `mtp` is
-`true`, mlxctl passes `--mtp` to OptiQ; when it is `false` or omitted, OptiQ's
-default MTP-disabled behavior applies.
+mlxctl creates owned directories with mode `0700`. Runtime and model content,
+state, logs, and client ownership evidence do not belong in Git.
 
-Aliases must match `[A-Za-z0-9][A-Za-z0-9._-]*`. Hosts must be `localhost` or
-a literal loopback IP address, client host/port pairs must be unique, and
-unknown fields or options are rejected before the supervisor starts.
-
-## Runtime files
-
-| Purpose | Default | Override |
-| --- | --- | --- |
-| Configuration | `~/.config/mlxd/` | `MLXD_CONFIG_DIR` |
-| State, socket, and metrics | `~/.local/state/mlxd/` | `MLXD_STATE_DIR` |
-| Supervisor and server logs | `~/Library/Logs/mlxd/` | `MLXD_LOG_DIR` |
-
-`mlxd` creates state and log directories with mode `0700` and runtime files
-with mode `0600`. Keep model weights, credentials, state, databases, and logs
-out of Git.
-
-## How the pieces fit
-
-Each server definition owns a stable client endpoint. When it starts, `mlxd`
-allocates a private upstream port, launches the configured runtime through its
-adapter, and waits for its health and model APIs. A local metrics proxy keeps
-the stable client port in place, forwards traffic to the upstream process, and
-records request observations. `mlxctl` talks to the supervisor over a private
-Unix socket rather than controlling child processes directly.
-
-The supervisor exits after 15 idle seconds by default when no server or control
-client remains active. A later CLI command can activate it again through
-launchd.
-
-For the exact filesystem and control interfaces shared with deployment tooling,
-see
-[`docs/deployment-contract.md`](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/deployment-contract.md).
-For the server APIs used by readiness and metrics, see
-[`docs/research/mlx-server-apis.md`](https://github.com/nisavid/systools/blob/main/tools/mlxctl/docs/research/mlx-server-apis.md).
+For launchd and deployment-tool integration, see
+[`docs/deployment-contract.md`](docs/deployment-contract.md). For the resource
+and process design, see [`docs/architecture.md`](docs/architecture.md).
 
 ## Develop mlxctl
 
-Run all commands from `tools/mlxctl/`:
+Run checks from `tools/mlxctl/`:
 
 ```sh
 uv run python -m unittest discover -s tests
@@ -221,11 +302,9 @@ uvx ruff format --check .
 uv build
 ```
 
-The package uses a `src/` layout and keeps its resolved runtime dependencies in
-`uv.lock`. Contributions should include tests at the behavioral boundary they
-change.
+The package uses a `src/` layout and locks its development environment in
+`uv.lock`. Changes should test the public behavior they claim.
 
 ## License
 
-`mlxctl` is available under the
-[MIT License](https://github.com/nisavid/systools/blob/main/tools/mlxctl/LICENSE).
+mlxctl is available under the [MIT License](LICENSE).
