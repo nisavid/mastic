@@ -294,12 +294,14 @@ class ExactRuntimeLaunchSupply:
         model_installations: Mapping[str, SuppliedModelInstallation]
         | Callable[[], Mapping[str, SuppliedModelInstallation]],
         launch_builder: RuntimeLaunchBuilder,
+        trust_grants: Callable[[], Sequence[Mapping[str, object]]] | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
         self._load_config = load_config
         self._runtime_installations = runtime_installations
         self._model_installations = model_installations
         self._launch_builder = launch_builder
+        self._trust_grants = trust_grants or (lambda: ())
         self._environment = dict(environment or {})
 
     def prepare_launch(
@@ -337,6 +339,13 @@ class ExactRuntimeLaunchSupply:
             )
         snapshot = self._validate_model(configured_model, model)
         options = self._resolve_model_artifacts(dict(service.options), snapshot)
+        self._require_remote_code_grant(
+            options,
+            model_installation=alias.installation_name,
+            repository=configured_model.revision.repository,
+            revision=configured_model.revision.revision,
+            runtime_installation=service.runtime_installation,
+        )
         required_capabilities = frozenset({"model", "host", "port", *options.keys()})
         argv = self._launch_builder.build(
             runtime,
@@ -418,6 +427,33 @@ class ExactRuntimeLaunchSupply:
                 "exact cached model snapshot is not a directory"
             )
         return snapshot
+
+    def _require_remote_code_grant(
+        self,
+        options: Mapping[str, object],
+        *,
+        model_installation: str,
+        repository: str,
+        revision: str,
+        runtime_installation: str,
+    ) -> None:
+        if options.get("trust_remote_code") is not True:
+            return
+        for grant in self._trust_grants():
+            accepted = grant.get("accepted_risks", ())
+            if (
+                grant.get("model_installation") == model_installation
+                and grant.get("repository") == repository
+                and grant.get("revision") == revision
+                and grant.get("runtime_installation") == runtime_installation
+                and isinstance(accepted, (tuple, list))
+                and "remote_code" in accepted
+            ):
+                return
+        raise CapabilityValidationError(
+            "remote model code is not trusted for this exact Model Revision and "
+            "Runtime Installation; grant remote_code with mlxctl model trust"
+        )
 
     @staticmethod
     def _resolve_model_artifacts(

@@ -48,9 +48,11 @@ def _config(
     runtime_capabilities: frozenset[str] = frozenset(
         {"model", "host", "port", "kv_config", "mtp"}
     ),
+    trust_remote_code: bool = False,
 ):
     launcher = ", ".join(f'"{item}"' for item in runtime_launcher)
     capabilities = ", ".join(f'"{item}"' for item in sorted(runtime_capabilities))
+    remote_code = "trust_remote_code = true" if trust_remote_code else ""
     return validate_config(
         tomlkit.parse(
             f"""
@@ -79,6 +81,7 @@ route = "{service_name}"
 [services.{service_name}.options]
 kv_config = "kv_config.json"
 mtp = true
+{remote_code}
 """
         )
     )
@@ -313,6 +316,54 @@ class HostPolicyAdapterTests(unittest.TestCase):
 
 
 class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
+    def test_launch_requires_exact_revision_and_runtime_scoped_remote_code_grant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            capabilities = runtime.capabilities | {"trust_remote_code"}
+            runtime = SuppliedRuntimeInstallation(
+                installation_id=runtime.installation_id,
+                runtime=runtime.runtime,
+                version=runtime.version,
+                provenance=runtime.provenance,
+                root=runtime.root,
+                launcher=runtime.launcher,
+                capabilities=capabilities,
+                bundle_id=runtime.bundle_id,
+            )
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=capabilities,
+                trust_remote_code=True,
+            )
+            grants: list[dict[str, object]] = []
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                trust_grants=lambda: grants,
+            )
+
+            with self.assertRaisesRegex(CapabilityValidationError, "not trusted"):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
+            grants.append(
+                {
+                    "model_installation": "qwen-exact",
+                    "repository": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+                    "revision": _REVISION,
+                    "runtime_installation": "optiq@0.2.18",
+                    "accepted_risks": ["remote_code"],
+                }
+            )
+            prepared = supply.prepare_launch(
+                config.services["coding"], "127.0.0.1", 49152
+            )
+
+            self.assertIn("--trust-remote-code", prepared.argv)
+
     def test_launch_resolves_current_physical_supply_at_execution_time(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
