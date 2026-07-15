@@ -275,6 +275,28 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "plan_changed")
         self.assertEqual(self.runtime.calls, [])
 
+    def test_expert_setup_requires_every_exact_identity_field(self) -> None:
+        port = self.port()
+
+        with self.assertRaisesRegex(ApplicationError, "expert setup requires"):
+            port.preview({"profile": "expert", "model_repository": "acme/model"})
+
+        preview = port.preview(
+            {
+                "profile": "expert",
+                "runtime_name": "optiq",
+                "runtime_version": "0.3.3",
+                "runtime_lock_digest": "sha256:" + "a" * 64,
+                "model_repository": "acme/model",
+                "model_revision": "3" * 40,
+                "trust_grants": (),
+                "service_name": "assistant",
+                "gateway_endpoint": "http://127.0.0.1:8766/v1",
+            }
+        )
+        self.assertEqual(preview["profile"], "custom")
+        self.assertEqual(preview["selection"]["service_name"], "assistant")
+
     def test_resume_reuses_durable_runtime_evidence_after_interruption(self):
         failing_model = FakeOwner(fail="model.install")
         port = self.port(model=failing_model)

@@ -279,6 +279,12 @@ class SetupPlanner:
             profile.selection.validate_exact()
         self._profiles = profiles
 
+    @property
+    def expert_template(self) -> ExactSetupSelection:
+        """Return an editable shape, never an implicit machine recommendation."""
+
+        return self._profiles[0].selection
+
     def plan(
         self,
         preflight: SetupPreflight,
@@ -288,8 +294,12 @@ class SetupPlanner:
     ) -> SetupPlan:
         self._validate_machine(preflight)
         request = request or SetupRequest()
-        profile = self._recommend(preflight.memory_bytes, preflight.disk_free_bytes)
-        selection = request.selection or profile.selection
+        if request.selection is None:
+            profile = self._recommend(preflight.memory_bytes, preflight.disk_free_bytes)
+            selection = profile.selection
+        else:
+            profile = None
+            selection = request.selection
         selection.validate_exact()
         if request.noninteractive:
             if request.selection is None:
@@ -330,7 +340,7 @@ class SetupPlanner:
             )
 
         return SetupPlan(
-            profile_name=profile.name if request.selection is None else "custom",
+            profile_name=profile.name if profile is not None else "custom",
             selection=selection,
             preflight=preflight,
             steps=tuple(steps),
@@ -484,7 +494,16 @@ class SetupPlanner:
             if profile.minimum_memory_bytes <= memory_bytes
             and profile.minimum_disk_bytes <= disk_free_bytes
         ]
-        return eligible[-1] if eligible else self._profiles[0]
+        if not eligible:
+            smallest = self._profiles[0]
+            raise ValueError(
+                "no recommended setup profile fits this Mac: "
+                f"{smallest.name!r} requires at least "
+                f"{smallest.minimum_memory_bytes} bytes of memory and "
+                f"{smallest.minimum_disk_bytes} bytes of free disk; "
+                "use expert setup to select a smaller exact model"
+            )
+        return eligible[-1]
 
     @staticmethod
     def _validate_machine(preflight: SetupPreflight) -> None:

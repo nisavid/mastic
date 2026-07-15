@@ -235,9 +235,19 @@ class SetupOperationPort:
         try:
             facts = self._preflight(offline)
             prior = tuple(self._evidence.load("setup"))
-            baseline = self._planner.plan(facts, evidence=prior)
-            selection = _selection(parameters, baseline.selection)
-            explicit_selection = _has_selection(parameters) or profile == "expert"
+            if profile == "expert":
+                missing = _missing_expert_selection(parameters)
+                if missing:
+                    raise ValueError(
+                        "expert setup requires an exact selection: "
+                        + ", ".join(missing)
+                    )
+                selection = _selection(parameters, self._planner.expert_template)
+                explicit_selection = True
+            else:
+                baseline = self._planner.plan(facts, evidence=prior)
+                selection = _selection(parameters, baseline.selection)
+                explicit_selection = _has_selection(parameters)
             request = SetupRequest(
                 selection=selection if explicit_selection else None,
                 noninteractive=bool(parameters.get("noninteractive", False)),
@@ -591,6 +601,25 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
         }
         for key in parameters
     )
+
+
+def _missing_expert_selection(parameters: Mapping[str, object]) -> tuple[str, ...]:
+    supplied = parameters.get("selection")
+    if isinstance(supplied, ExactSetupSelection):
+        return ()
+    values: dict[str, object] = dict(supplied) if isinstance(supplied, Mapping) else {}
+    values.update(parameters)
+    required = (
+        "runtime_name",
+        "runtime_version",
+        "runtime_lock_digest",
+        "model_repository",
+        "model_revision",
+        "trust_grants",
+        "service_name",
+        "gateway_endpoint",
+    )
+    return tuple(name for name in required if name not in values)
 
 
 def _validate_runtime_result(

@@ -76,6 +76,24 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(preview.clients, ("codex", "hindsight"))
         self.assertEqual(preview.sampling_profiles["coding"]["temperature"], 0.0)
 
+    def test_guided_setup_never_falls_back_to_an_oversized_profile(self) -> None:
+        undersized = SetupPreflight(
+            "darwin",
+            "arm64",
+            memory_bytes=8 * GIB,
+            disk_free_bytes=8 * GIB,
+            online=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
+            self.planner.plan(undersized)
+
+        expert = self.planner.plan(
+            undersized,
+            SetupRequest(selection=self.compact.selection),
+        )
+        self.assertEqual(expert.profile_name, "custom")
+
     def test_service_identity_and_options_are_exact_immutable_plan_inputs(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
         options = {
