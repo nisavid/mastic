@@ -317,17 +317,26 @@ class OperationalStateStore:
             Path(f"{self._path}-journal"),
         ):
             try:
-                metadata = path.lstat()
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                )
             except FileNotFoundError:
                 continue
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                raise OSError(f"operational state target is not a regular file: {path}")
-            if metadata.st_uid != os.getuid():
-                raise PermissionError(
-                    f"operational state target is not user-owned: {path}"
-                )
-            if chmod:
-                os.chmod(path, 0o600, follow_symlinks=False)
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise OSError(
+                        f"operational state target is not a regular file: {path}"
+                    )
+                if metadata.st_uid != os.getuid():
+                    raise PermissionError(
+                        f"operational state target is not user-owned: {path}"
+                    )
+                if chmod:
+                    os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
 
 
 def _identity(dto: Mapping[str, object], key: str, noun: str) -> str:
