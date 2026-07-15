@@ -25,6 +25,20 @@ class FakeResolver:
         return self.routes.get(service)
 
 
+class FakeActivity:
+    def __init__(self) -> None:
+        self.active: dict[str, int] = {}
+        self.events: list[tuple[str, str]] = []
+
+    def begin(self, service: str) -> None:
+        self.active[service] = self.active.get(service, 0) + 1
+        self.events.append(("begin", service))
+
+    def end(self, service: str) -> None:
+        self.active[service] -= 1
+        self.events.append(("end", service))
+
+
 class ChunkStream(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
@@ -268,7 +282,10 @@ class GatewayTests(unittest.TestCase):
                 stream=stream,
             )
         )
-        app = create_gateway(resolver, client_factory=lambda: upstream)
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
 
         with TestClient(app) as client:
             with client.stream(
@@ -283,6 +300,8 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(response.headers["x-request-id"], "upstream-1")
         self.assertEqual(stream.pulled, 3)
         self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
 
     def test_invalid_json_or_model_is_rejected_without_contacting_upstream(
         self,

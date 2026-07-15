@@ -46,11 +46,26 @@ class GatewayRouteResolver(Protocol):
     def resolve(self, service: str) -> GatewayRoute | None | Any: ...
 
 
+class GatewayActivity(Protocol):
+    """Track in-flight work so pressure policy never evicts a busy service."""
+
+    def begin(self, service: str) -> None: ...
+
+    def end(self, service: str) -> None: ...
+
+
 class _UpstreamStreamingResponse(StreamingResponse):
     """Streaming response that closes upstream even when downstream send fails."""
 
-    def __init__(self, upstream: httpx.Response, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        upstream: httpx.Response,
+        *,
+        on_close: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
         self._upstream = upstream
+        self._on_close = on_close
         super().__init__(upstream.aiter_raw(), **kwargs)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -58,6 +73,9 @@ class _UpstreamStreamingResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             await self._upstream.aclose()
+            if self._on_close is not None:
+                self._on_close()
+                self._on_close = None
 
 
 def validate_loopback_bind(host: str) -> str:
@@ -80,6 +98,7 @@ def create_gateway(
     bind_host: str = "127.0.0.1",
     client_factory: Callable[[], Any] | None = None,
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+    activity: GatewayActivity | None = None,
 ) -> Starlette:
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
@@ -197,9 +216,13 @@ def create_gateway(
             },
             params=request.query_params,
         )
+        if activity is not None:
+            activity.begin(service)
         try:
             upstream = await client.send(upstream_request, stream=True)
         except (httpx.HTTPError, OSError):
+            if activity is not None:
+                activity.end(service)
             return _error_response(
                 502,
                 "upstream_unavailable",
@@ -208,9 +231,14 @@ def create_gateway(
                 parameter="model",
                 retryable=True,
             )
+        except BaseException:
+            if activity is not None:
+                activity.end(service)
+            raise
 
         return _UpstreamStreamingResponse(
             upstream,
+            on_close=(lambda: activity.end(service)) if activity is not None else None,
             status_code=upstream.status_code,
             headers={
                 name: value
