@@ -797,17 +797,13 @@ class LocalOperationBackend:
             value = remove(parameters)
         elif name == "service.remove":
             resource = str(parameters.get("resource", ""))
-            drained = self._supervisor.execute(
-                "service.drain", {"resource": resource, "confirmed": True}
-            )
-            stopped = self._supervisor.execute(
-                "service.stop", {"resource": resource, "confirmed": True}
+            removed = self._supervisor.execute(
+                "service.remove", {"resource": resource, "confirmed": True}
             )
             configured = self._local_mutation(request)
             value = {
                 "service": resource,
-                "drain": drained,
-                "stop": stopped,
+                "lifecycle": removed,
                 "configuration": configured,
             }
         elif name in _SUPERVISOR_MUTATIONS:
@@ -991,6 +987,36 @@ class LocalOperationBackend:
                 }
             )
 
+        model_uninstall: tuple[str, tuple[str, ...]] | None = None
+        if name == "model.uninstall":
+            config = self._config()
+            resource = str(parameters.get("resource", ""))
+            installation_name = self._model_installation_name(resource, config)
+            aliases = tuple(
+                sorted(
+                    alias
+                    for alias, target in config.aliases.items()
+                    if target.installation_name == installation_name
+                )
+            )
+            referenced = tuple(
+                sorted(
+                    service_name
+                    for service_name, service in config.services.items()
+                    if str(service.model_alias) in aliases
+                )
+            )
+            if referenced:
+                raise ApplicationError(
+                    "resource_in_use",
+                    f"Model Installation {installation_name!r} is selected by services: "
+                    + ", ".join(referenced),
+                    next_actions=tuple(
+                        f"mlxctl service remove {service}" for service in referenced
+                    ),
+                )
+            model_uninstall = installation_name, aliases
+
         def edit(document) -> None:
             if name == "gateway.configure":
                 gateway = document.setdefault("gateway", tomlkit.table())
@@ -1029,21 +1055,12 @@ class LocalOperationBackend:
                 return
             if name == "model.uninstall":
                 models = document.setdefault("models", tomlkit.table())
-                resource = str(parameters.get("resource", ""))
-                if resource not in models:
-                    raise _not_found("Model Installation", resource)
-                aliases = document.get("aliases", {})
-                referenced = sorted(
-                    key
-                    for key, item in aliases.items()
-                    if item.get("installation") == resource
-                )
-                if referenced:
-                    raise ApplicationError(
-                        "resource_in_use",
-                        f"Model Installation {resource!r} is selected by aliases: {', '.join(referenced)}",
-                    )
-                del models[resource]
+                assert model_uninstall is not None
+                installation_name, aliases_to_remove = model_uninstall
+                alias_table = document.setdefault("aliases", tomlkit.table())
+                for alias in aliases_to_remove:
+                    alias_table.pop(alias, None)
+                del models[installation_name]
 
         if not self._config_store.exists:
             self._config_store.import_text("schema_version = 1\n")

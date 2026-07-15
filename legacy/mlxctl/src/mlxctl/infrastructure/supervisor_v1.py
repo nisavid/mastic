@@ -169,6 +169,8 @@ class GatewayRunner(Protocol):
 
     def describe_route(self, route: GatewayRoute) -> None: ...
 
+    def remove_route(self, service: str) -> None: ...
+
     def shed_new_work(self, enabled: bool) -> None: ...
 
     def is_busy(self, service: str) -> bool: ...
@@ -510,6 +512,19 @@ class Supervisor:
 
         self.stop_service(name)
         return self.start_service(name)
+
+    def remove_service(self, name: str) -> ServiceTransition:
+        """Drain and stop one service, then remove its live Gateway route."""
+
+        service = self._desired_state.service(name)
+        if service is None:
+            raise ServiceNotFoundError(name)
+        self.drain_service(name)
+        stopped = self.stop_service(name)
+        with self._lock:
+            self._gateway.remove_route(name)
+            self._runs.pop(name, None)
+        return stopped
 
     def service_status(self, name: str) -> ServiceRunStatus:
         """Observe one service without activating it."""

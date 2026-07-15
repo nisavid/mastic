@@ -125,6 +125,16 @@ class GatewayRuntime:
                 endpoint=current.endpoint if current else route.endpoint,
             )
 
+    def remove_route(self, service: str) -> None:
+        """Remove one stopped desired route and its activity metadata."""
+
+        with self._lock:
+            if self._active.get(service, 0) > 0:
+                raise RuntimeError(f"Gateway route {service!r} is still active")
+            self._routes.pop(service, None)
+            self._active.pop(service, None)
+            self._last_used.pop(service, None)
+
     def list_routes(self) -> Iterable[GatewayRoute]:
         with self._lock:
             return tuple(self._effective(route) for route in self._routes.values())

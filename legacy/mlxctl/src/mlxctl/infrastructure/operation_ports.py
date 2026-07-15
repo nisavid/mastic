@@ -98,6 +98,8 @@ class SupervisorOperationPort:
             value = self._supervisor.stop_service(resource)
         elif operation == "service.restart":
             value = self._supervisor.restart_service(resource)
+        elif operation == "service.remove":
+            value = self._supervisor.remove_service(resource)
         elif operation == "pressure.reconcile":
             value = self._supervisor.reconcile_pressure()
         else:

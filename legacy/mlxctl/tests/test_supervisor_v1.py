@@ -178,6 +178,11 @@ class FakeGateway:
     def describe_route(self, route):
         self.descriptions[route.service] = route
 
+    def remove_route(self, service: str):
+        self.routes.pop(service, None)
+        self.descriptions.pop(service, None)
+        self.calls.append(("remove_route", service))
+
     def shed_new_work(self, enabled: bool):
         self.calls.append(("shed", enabled))
 
@@ -414,6 +419,14 @@ class SupervisorTests(unittest.TestCase):
                 for event in self.store.event_items
             )
         )
+
+    def test_service_removal_drops_the_stopped_gateway_route(self) -> None:
+        self.supervisor.start_service("coding")
+
+        removed = self.supervisor.remove_service("coding")
+
+        self.assertEqual(removed.run.state, ServiceRunState.STOPPED)
+        self.assertNotIn("coding", self.gateway.routes)
 
     def test_one_service_failure_does_not_stop_another(self) -> None:
         coding = self.supervisor.start_service("coding")

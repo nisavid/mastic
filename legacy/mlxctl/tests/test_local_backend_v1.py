@@ -71,6 +71,17 @@ service = "coding"
 temperature = 0.0
 """
 
+_MODEL_ONLY_CONFIG = """\
+schema_version = 1
+
+[models.qwen]
+repository = "mlx-community/Qwen-OptiQ"
+revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[aliases.coding]
+installation = "qwen"
+"""
+
 
 class _NeverCalled:
     def __getattr__(self, name):
@@ -532,11 +543,23 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertTrue(prepared.requires_supervisor)
             self.assertEqual(
                 [call[0] for call in supervisor.calls],
-                ["service.drain", "service.stop"],
+                ["service.remove"],
             )
             self.assertEqual(result["resource"]["service"], "chat")
             remaining = backend.prepare(OperationRequest("service.list")).execute()
             self.assertNotIn("chat", {item["name"] for item in remaining["items"]})
+
+    def test_model_uninstall_removes_unreferenced_alias_with_installation(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory), config=_MODEL_ONLY_CONFIG)
+
+            backend.prepare(
+                OperationRequest("model.uninstall", {"resource": "coding"})
+            ).execute()
+
+            shown = backend.prepare(OperationRequest("config.show")).execute()
+            self.assertEqual(shown["resource"]["models"], {})
+            self.assertEqual(shown["resource"]["aliases"], {})
 
     def test_service_create_uses_the_public_service_argument(self) -> None:
         with TemporaryDirectory() as directory:

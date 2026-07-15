@@ -198,12 +198,17 @@ class _GatewayMutationGuard:
                 socket_running = stat.S_ISSOCK(self._control_socket.lstat().st_mode)
             except FileNotFoundError:
                 pass
-        if request.name == "gateway.configure" and (
+        if request.name in {"gateway.configure", "service.edit"} and (
             self._launchd.status().running or socket_running
         ):
+            resource = (
+                "Gateway endpoint"
+                if request.name == "gateway.configure"
+                else "Inference Service"
+            )
             raise ApplicationError(
-                "gateway_running",
-                "Stop the Supervisor before changing the Gateway endpoint.",
+                "supervisor_running",
+                f"Stop the Supervisor before changing the {resource}.",
                 next_actions=(
                     "mlxctl supervisor stop",
                     "retry the Gateway configuration",
