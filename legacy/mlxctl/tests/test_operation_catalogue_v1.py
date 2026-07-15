@@ -74,6 +74,20 @@ class OperationCatalogueTests(unittest.TestCase):
         self.assertTrue(install.examples)
         self.assertIn("json", install.output_modes)
 
+    def test_summaries_explain_user_visible_effects(self) -> None:
+        self.assertEqual(
+            self.catalogue["model.search"].summary,
+            "Search curated, Hugging Face, or local cached models.",
+        )
+        self.assertIn(
+            "drain and stop one service",
+            self.catalogue["service.stop"].summary.casefold(),
+        )
+        self.assertIn(
+            "desired and live state",
+            self.catalogue["service.list"].summary.casefold(),
+        )
+
     def test_parameters_explain_accepted_values_and_discovery(self) -> None:
         install = self.catalogue["runtime.install"]
         self.assertEqual(install.parameters[0].kind, ParameterKind.ARGUMENT)

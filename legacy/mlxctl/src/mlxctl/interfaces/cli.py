@@ -360,7 +360,7 @@ def _group_help(group: str) -> str:
         "runtime": "Discover and manage exact Runtime Installations.",
         "model": "Search, inspect, install, verify, and trust exact Model Revisions.",
         "service": "Create and control named Inference Services.",
-        "operation": "Inspect, follow, cancel, and resume durable operations.",
+        "operation": "Inspect durable physical operations and their recorded events.",
         "client": "Configure and verify supported Gateway Client Integrations.",
         "config": "Inspect, edit, validate, diff, and restore desired configuration.",
     }[group]

@@ -214,15 +214,80 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
 
 
 def _summary(name: str) -> str:
-    if name == "model.install":
-        return "Install and verify one exact revision of a model."
-    if name == "runtime.available":
-        return "List known Runtime Definitions, including those not installed."
-    if name == "service.start":
-        return "Start a named Inference Service and visibly activate the Supervisor if needed."
-    if name == "supervisor.stop":
-        return "Drain and stop all Service Runs, the Gateway, and the Supervisor."
-    return name.replace(".", " ").replace("-", " ").capitalize() + "."
+    return {
+        "setup": "Plan and create a complete local inference service on this Mac.",
+        "remove": "Preview and remove mlxctl-owned services, state, and integrations.",
+        "status": "Show the whole local inference system without starting it.",
+        "check": "Run concise health checks across the Supervisor, Gateway, and services.",
+        "doctor": "Diagnose configuration, lifecycle, routing, and service failures.",
+        "logs": "Read bounded mlxctl logs, optionally for one resource.",
+        "metrics": "Read locally recorded operational metrics, optionally for one resource.",
+        "tui": "Open the interactive local inference operations console.",
+        "supervisor.status": "Show whether the per-user Supervisor is running.",
+        "supervisor.start": "Start the Gateway and services configured for supervisor activation.",
+        "supervisor.stop": "Drain and stop all Service Runs, the Gateway, and the Supervisor.",
+        "supervisor.restart": "Drain and reconstruct the Supervisor and its managed services.",
+        "supervisor.logs": "Read the bounded private Supervisor log.",
+        "supervisor.inspect": "Inspect Supervisor state and durable operations together.",
+        "gateway.status": "Show the stable loopback endpoint and configured route count.",
+        "gateway.inspect": "Inspect the Gateway endpoint, routes, and observed runtime state.",
+        "gateway.routes": "List stable Gateway model routes and their Inference Services.",
+        "gateway.configure": "Change the stopped Gateway's loopback host or stable port.",
+        "gateway.restart": "Drain and restart the Gateway through the Supervisor.",
+        "gateway.logs": "Read the bounded private Gateway log.",
+        "gateway.metrics": "Read locally recorded Gateway metrics.",
+        "runtime.list": "List installed and adopted Runtime Installations.",
+        "runtime.available": "List built-in Runtime Definitions, including uninstalled ones.",
+        "runtime.inspect": "Inspect a Runtime Definition or exact Installation.",
+        "runtime.install": "Install and probe a tested or exact custom runtime version.",
+        "runtime.adopt": "Probe and adopt an existing runtime environment.",
+        "runtime.update": "Install and switch to a newer tested or exact custom runtime.",
+        "runtime.rollback": "Switch services to a retained Runtime Installation.",
+        "runtime.remove": "Remove one unreferenced Runtime Installation.",
+        "runtime.prune": "Remove safe, unreferenced Runtime Installations.",
+        "runtime.doctor": "Check installed runtime roots and executable launchers.",
+        "model.search": "Search curated, Hugging Face, or local cached models.",
+        "model.list": "List configured Model Installations and their stable aliases.",
+        "model.inspect": "Inspect model identity, capabilities, trust signals, and Mac fit.",
+        "model.install": "Resolve, cache, verify, and name one exact revision of a model.",
+        "model.verify": "Verify one installed Model Revision against its cached bytes.",
+        "model.repair": "Repair missing or incomplete bytes for an exact Model Revision.",
+        "model.update": "Install an exact newer revision beside the current installation.",
+        "model.rollback": "Move a Model Alias to a retained Model Installation.",
+        "model.uninstall": "Remove one unreferenced Model Installation and its aliases.",
+        "model.trust": "Grant named risks to one exact Model Revision and Runtime Installation.",
+        "model.cache.list": "List locally cached model revisions and observed disk usage.",
+        "model.cache.inspect": "Inspect one physical Cached Revision and its provenance.",
+        "model.cache.move": "Move one Cached Revision through the cache owner.",
+        "model.cache.evict": "Evict one safe, unreferenced Cached Revision.",
+        "model.cache.prune": "Evict safe, unreferenced Cached Revisions.",
+        "service.list": "List named Inference Services with desired and live state.",
+        "service.create": "Create a named service from a Model Alias and Runtime Installation.",
+        "service.inspect": "Inspect one service's desired state, run, route, and next action.",
+        "service.edit": "Change a stopped service's model, runtime, route, or pressure policy.",
+        "service.start": "Start one service and visibly activate the Supervisor if needed.",
+        "service.stop": "Drain and stop one service without stopping the Gateway.",
+        "service.restart": "Drain and restart one service with current desired state.",
+        "service.remove": "Drain, stop, and delete one Inference Service definition.",
+        "service.logs": "Read one service's bounded private runtime log.",
+        "service.metrics": "Read locally recorded metrics for one service.",
+        "service.check": "Check one service's desired state, run, and Gateway route.",
+        "operation.list": "List durable physical operations and their current status.",
+        "operation.inspect": "Inspect one durable operation and its recorded events.",
+        "client.list": "List mlxctl-owned Client Integrations.",
+        "client.inspect": "Inspect one owned client endpoint and sampling configuration.",
+        "client.configure": "Configure Codex or Hindsight for one Gateway route.",
+        "client.test": "Send a bounded verification request through one configured client.",
+        "client.remove": "Remove only the settings owned by one Client Integration.",
+        "config.path": "Show the active desired-state file path.",
+        "config.show": "Show validated desired state without starting the Supervisor.",
+        "config.validate": "Validate current desired state and report its revision.",
+        "config.diff": "Compare candidate TOML with current desired state.",
+        "config.history": "List retained desired-state revisions.",
+        "config.export": "Export canonical validated desired state.",
+        "config.import": "Preview and import validated desired state.",
+        "config.restore": "Restore one retained desired-state revision.",
+    }[name]
 
 
 def _example(name: str) -> str:

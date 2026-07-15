@@ -135,7 +135,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
     async def test_command_palette_opens_the_selected_operation_workbench(self) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:
             await pilot.press("ctrl+p")
-            await pilot.press(*"exact revision")
+            await pilot.press(*"resolve cache verify name")
             await pilot.pause()
             await pilot.press("down", "enter")
             await pilot.pause()
