@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Ivan D Vasin" }]
 dependencies = [
   "httpx>=0.28,<1",
-  "huggingface-hub>=0.33,<1",
+  "huggingface-hub>=1.0,<2",
   "psutil>=7.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "rich>=14,<15",
   "starlette>=0.47,<1",
