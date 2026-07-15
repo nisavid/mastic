@@ -24,6 +24,7 @@ _REQUEST_HEADER_ALLOWLIST = frozenset(
 _RESPONSE_HEADER_ALLOWLIST = frozenset(
     {"cache-control", "content-encoding", "content-type", "x-request-id"}
 )
+DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +79,13 @@ def create_gateway(
     *,
     bind_host: str = "127.0.0.1",
     client_factory: Callable[[], Any] | None = None,
+    max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
 ) -> Starlette:
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
     validate_loopback_bind(bind_host)
+    if max_request_bytes <= 0:
+        raise ValueError("Gateway request limit must be positive.")
     make_client = client_factory or (
         lambda: httpx.AsyncClient(timeout=None, trust_env=False)
     )
@@ -111,8 +115,15 @@ def create_gateway(
 
     async def proxy(request: Request) -> JSONResponse | StreamingResponse:
         try:
-            body = await request.body()
+            body = await _read_limited_body(request, max_request_bytes)
             payload = json.loads(body)
+        except RequestTooLarge:
+            return _error_response(
+                413,
+                "request_too_large",
+                f"The request exceeds the {max_request_bytes}-byte Gateway limit.",
+                action="Reduce the request size and retry.",
+            )
         except (UnicodeDecodeError, json.JSONDecodeError):
             return _error_response(
                 400,
@@ -216,6 +227,26 @@ def create_gateway(
         ],
         lifespan=lifespan,
     )
+
+
+class RequestTooLarge(ValueError):
+    """The Gateway request exceeded its configured body limit."""
+
+
+async def _read_limited_body(request: Request, limit: int) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > limit:
+                raise RequestTooLarge
+        except ValueError as error:
+            raise RequestTooLarge from error
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            raise RequestTooLarge
+        body.extend(chunk)
+    return bytes(body)
 
 
 def _validated_upstream_origin(endpoint: str) -> str:

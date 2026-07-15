@@ -305,6 +305,33 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(missing_model.json()["error"]["code"], "model_required")
         self.assertEqual(upstream.requests, [])
 
+    def test_oversized_request_is_rejected_before_buffering_or_routing(self) -> None:
+        resolver = FakeResolver(
+            [
+                GatewayRoute(
+                    service="coding",
+                    state="ready",
+                    endpoint="http://127.0.0.1:49152",
+                )
+            ]
+        )
+        upstream = FakeUpstreamClient()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            max_request_bytes=64,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "input": "x" * 128},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["error"]["code"], "request_too_large")
+        self.assertEqual(upstream.requests, [])
+
 
 class GatewayStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_downstream_backpressure_and_disconnect_close_upstream(self) -> None:
