@@ -42,6 +42,27 @@ class ApplicationManager:
     def register(self, dispatcher: OperationDispatcher) -> None:
         for name in self._catalogue:
             dispatcher.register(name, self._handler(dispatcher))
+            dispatcher.register_preview(name, self._preview_handler())
+
+    def _preview_handler(self):
+        def preview(request: OperationRequest) -> OperationResult:
+            operation = self._catalogue[request.name]
+            prepared = self._backend.prepare(request)
+            plan = tuple(dict(event) for event in prepared.events)
+            return OperationResult(
+                request.name,
+                {
+                    "schema_version": 1,
+                    "operation": request.name,
+                    "state": "planned",
+                    "confirmation_required": operation.confirmation,
+                    "requires_supervisor": prepared.requires_supervisor,
+                    "plan": plan,
+                },
+                events=prepared.events,
+            )
+
+        return preview
 
     def _handler(self, dispatcher: OperationDispatcher):
         def handle(request: OperationRequest) -> OperationResult:

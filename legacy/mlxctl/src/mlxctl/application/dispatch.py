@@ -73,6 +73,7 @@ class OperationDispatcher:
         self._catalogue = catalogue
         self._activator = activator
         self._handlers: dict[str, Handler] = {}
+        self._preview_handlers: dict[str, Handler] = {}
         self._execution: ContextVar[_Execution | None] = ContextVar(
             "mlxctl_operation_execution", default=None
         )
@@ -83,6 +84,33 @@ class OperationDispatcher:
         if name in self._handlers:
             raise ValueError(f"operation already registered: {name}")
         self._handlers[name] = handler
+
+    def register_preview(self, name: str, handler: Handler) -> None:
+        """Register a side-effect-free resolved-plan handler."""
+
+        if name not in self._catalogue:
+            raise ApplicationError("unknown_operation", f"unknown operation: {name}")
+        if name in self._preview_handlers:
+            raise ValueError(f"operation preview already registered: {name}")
+        self._preview_handlers[name] = handler
+
+    def preview(self, request: OperationRequest) -> OperationResult:
+        """Resolve an operation plan without activating or executing it."""
+
+        if request.name not in self._catalogue:
+            raise ApplicationError(
+                "unknown_operation", f"unknown operation: {request.name}"
+            )
+        handler = self._preview_handlers.get(request.name)
+        if handler is None:
+            raise ApplicationError(
+                "preview_unavailable",
+                f"{request.name} cannot be previewed in this installation",
+            )
+        result = handler(request)
+        if result.operation != request.name:
+            raise ValueError("preview handler returned a result for another operation")
+        return result
 
     def execute(self, request: OperationRequest) -> OperationResult:
         if request.name not in self._catalogue:

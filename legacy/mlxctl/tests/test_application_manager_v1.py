@@ -57,6 +57,21 @@ class ApplicationManagerTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "confirmation_required")
 
+    def test_preview_resolves_the_backend_plan_without_execution_or_activation(
+        self,
+    ) -> None:
+        self.backend.require.add("model.cache.evict")
+
+        result = self.dispatcher.preview(
+            OperationRequest("model.cache.evict", {"resource": "cached"})
+        )
+
+        self.assertEqual(result.value["state"], "planned")
+        self.assertTrue(result.value["confirmation_required"])
+        self.assertTrue(result.value["requires_supervisor"])
+        self.assertEqual(result.value["plan"][0]["phase"], "plan")
+        self.assertEqual(self.activator.calls, 0)
+
     def test_service_start_can_visibly_activate_supervisor(self) -> None:
         self.backend.require.add("service.start")
 

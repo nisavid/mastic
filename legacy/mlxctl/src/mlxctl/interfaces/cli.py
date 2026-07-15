@@ -21,6 +21,8 @@ from mlxctl.application.dispatch import (
 
 
 class Dispatcher(Protocol):
+    def preview(self, request: OperationRequest) -> OperationResult: ...
+
     def execute(self, request: OperationRequest) -> OperationResult: ...
 
 
@@ -126,11 +128,18 @@ def _add_command(
         _validate_accepted(operation.parameters, parameters)
         if operation.confirmation:
             if not confirmed:
-                if (
-                    json_output
-                    or json_lines
-                    or not typer.confirm(f"Apply {operation.name} with {parameters}?")
-                ):
+                if json_output or json_lines:
+                    raise typer.Abort()
+                try:
+                    plan = dispatcher.preview(
+                        OperationRequest(operation.name, parameters)
+                    )
+                except ApplicationError as error:
+                    _render_error(error, json_output=False)
+                    raise typer.Exit(1) from error
+                Console().print("[bold]Resolved mutation plan[/bold]")
+                Console().print(Pretty(_plain(plan.value), expand_all=True))
+                if not typer.confirm("Apply this exact plan?"):
                     raise typer.Abort()
             parameters["confirmed"] = True
         _invoke(

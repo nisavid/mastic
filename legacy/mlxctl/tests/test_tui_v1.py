@@ -14,8 +14,22 @@ from mlxctl.interfaces.tui import (
 class _Dispatcher:
     def __init__(self) -> None:
         self.requests = []
+        self.previews = []
         self.error = None
         self.result_value = {"state": "complete"}
+
+    def preview(self, request):
+        self.previews.append(request)
+        if self.error is not None:
+            raise self.error
+        return OperationResult(
+            request.name,
+            {
+                "state": "planned",
+                "operation": request.name,
+                "parameters": dict(request.parameters),
+            },
+        )
 
     def execute(self, request):
         self.requests.append(request)
@@ -140,8 +154,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertEqual(self.dispatcher.requests, [])
+            self.assertEqual(self.dispatcher.previews[-1].name, "model.install")
             plan = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Complete mutation plan", plan)
+            self.assertIn("Resolved backend plan", plan)
             self.assertIn("model.install", plan)
             self.assertIn("mlx-community/Qwen3-4B-4bit", plan)
             self.assertIn("revision: abc123", plan)

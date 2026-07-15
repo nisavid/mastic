@@ -432,9 +432,25 @@ class MlxctlApp(App[None]):
         if not operation.confirmation:
             self.execute_operation(operation.name, **parameters)
             return
+        try:
+            preview = self.dispatcher.preview(
+                OperationRequest(operation.name, parameters)
+            )
+        except ApplicationError as error:
+            actions = "\n".join(f"  → {action}" for action in error.next_actions)
+            body = f"{error.code}\n\n{error.message}"
+            if actions:
+                body += f"\n\nNext actions\n{actions}"
+            self.query_one("#view-body", Static).update(body)
+            self.notify(error.message, title="Plan failed", severity="error")
+            return
         self.pending_parameters = parameters
+        resolved = json.dumps(
+            dict(preview.value), indent=2, sort_keys=True, default=str
+        )
         self.query_one("#view-body", Static).update(
             self._mutation_plan(operation, parameters)
+            + f"\n\nResolved backend plan\n{resolved}"
         )
         self.query_one("#operation-submit", Button).styles.display = "none"
         self.query_one("#operation-confirm", Button).styles.display = "block"
