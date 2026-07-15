@@ -22,6 +22,7 @@ from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonSe
 from mlxctl.infrastructure.production import (
     _ActivatingOperationOwner,
     _GatewayMutationGuard,
+    _LocalSupervisorOwner,
     _LocalModelSupply,
     _SetupSupervisorOwner,
     _setup_planner,
@@ -128,6 +129,26 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(activator.calls, 1)
         self.assertEqual(remote.calls, [("supervisor.start", {})])
         self.assertEqual(result["state"], "running")
+
+    def test_local_supervisor_stop_is_idempotent_without_remote_activation(
+        self,
+    ) -> None:
+        remote = _Port({"state": "stopping"})
+        owner = _LocalSupervisorOwner(remote, _Launchd(False))
+
+        result = owner.execute("supervisor.stop", {})
+
+        self.assertEqual(result, {"state": "stopped", "already_stopped": True})
+        self.assertEqual(remote.calls, [])
+
+    def test_local_supervisor_stop_forwards_when_launchd_is_running(self) -> None:
+        remote = _Port({"state": "stopping"})
+        owner = _LocalSupervisorOwner(remote, _Launchd(True))
+
+        result = owner.execute("supervisor.stop", {})
+
+        self.assertEqual(result, {"state": "stopping"})
+        self.assertEqual(remote.calls, [("supervisor.stop", {})])
 
     def test_running_gateway_endpoint_edit_fails_before_preview_or_execution(
         self,
@@ -270,6 +291,29 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(payload["StandardErrorPath"], payload["StandardOutPath"])
         self.assertEqual(payload["Umask"], 0o077)
+
+    def test_local_composition_preserves_tool_environment_interpreter_symlink(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_interpreter = root / "base-python"
+            base_interpreter.touch()
+            tool_interpreter = root / "tool-environment-python"
+            tool_interpreter.symlink_to(base_interpreter)
+            paths = MlxctlPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+
+            production = compose_local(
+                paths=paths, home=root, executable=tool_interpreter
+            )
+            payload = plistlib.loads(production.launchd.preview())
+
+        self.assertEqual(
+            payload["ProgramArguments"][0], str(tool_interpreter.absolute())
+        )
+        self.assertNotEqual(payload["ProgramArguments"][0], str(base_interpreter))
 
     @patch("mlxctl.infrastructure.production_host.subprocess.run")
     def test_runtime_installer_uses_configured_absolute_uv(self, run) -> None:

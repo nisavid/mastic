@@ -187,6 +187,21 @@ class _ActivatingOperationOwner:
         return self._remote.execute(operation, parameters)
 
 
+class _LocalSupervisorOwner:
+    """Forward lifecycle work without starting a Supervisor just to stop it."""
+
+    def __init__(self, remote: OperationOwner, launchd: LaunchdAdapter) -> None:
+        self._remote = remote
+        self._launchd = launchd
+
+    def execute(
+        self, operation: str, parameters: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        if operation == "supervisor.stop" and not self._launchd.status().running:
+            return {"state": "stopped", "already_stopped": True}
+        return self._remote.execute(operation, parameters)
+
+
 class _DispatcherOwner:
     def __init__(
         self,
@@ -299,7 +314,7 @@ def compose_local(
     paths = paths or resolve_paths(home=resolved_home)
     paths.prepare()
     credential = GatewayCredential(paths.gateway_credential)
-    executable = (executable or Path(sys.executable)).expanduser().resolve()
+    executable = (executable or Path(sys.executable)).expanduser().absolute()
     launchd = make_launchd(
         executable=executable,
         home=resolved_home,
@@ -352,7 +367,7 @@ def compose_local(
         activator=activator,
         runtime_supply=remote,
         model_supply=model,
-        supervisor=remote,
+        supervisor=_LocalSupervisorOwner(remote, launchd),
         setup=setup,
         clients=client,
         config_store=config_store,

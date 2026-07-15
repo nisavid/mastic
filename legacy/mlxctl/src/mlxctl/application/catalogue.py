@@ -198,7 +198,7 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
             if kind is OperationKind.MUTATION:
                 if name in {"setup", "service.start"}:
                     supervisor = SupervisorRequirement.MAY_START
-                elif name not in _LOCAL_MUTATIONS:
+                elif name != "supervisor.stop" and name not in _LOCAL_MUTATIONS:
                     supervisor = SupervisorRequirement.REQUIRED
             summary = _summary(name)
             operations[name] = Operation(

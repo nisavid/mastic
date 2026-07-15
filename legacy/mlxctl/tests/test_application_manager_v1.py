@@ -107,6 +107,19 @@ class ApplicationManagerTests(unittest.TestCase):
         self.assertFalse(result.supervisor_started)
         self.assertEqual(self.activator.calls, 0)
 
+    def test_supervisor_stop_uses_a_running_supervisor_without_starting_one(
+        self,
+    ) -> None:
+        self.backend.require.add("supervisor.stop")
+
+        result = self.dispatcher.execute(
+            OperationRequest("supervisor.stop", {"confirmed": True})
+        )
+
+        self.assertFalse(result.supervisor_started)
+        self.assertEqual(self.activator.calls, 0)
+        self.assertEqual(result.value["operation"], "supervisor.stop")
+
     def test_backend_cannot_activate_a_read_only_operation(self) -> None:
         self.backend.require.add("status")
 

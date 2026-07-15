@@ -68,6 +68,12 @@ class OperationCatalogueTests(unittest.TestCase):
                     SupervisorRequirement.NEVER_START,
                 )
 
+    def test_supervisor_stop_never_starts_the_supervisor_it_is_stopping(self) -> None:
+        self.assertIs(
+            self.catalogue["supervisor.stop"].supervisor,
+            SupervisorRequirement.NEVER_START,
+        )
+
     def test_mutations_declare_confirmation_and_machine_help(self) -> None:
         install = self.catalogue["model.install"]
         self.assertTrue(install.confirmation)
