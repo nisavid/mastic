@@ -52,6 +52,7 @@ class ExactSetupSelection:
     pinned: bool = False
     service_options: Mapping[str, object] = field(default_factory=dict)
     clients: tuple[str, ...] = ()
+    client_options: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     sampling_profiles: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     context_window: int | None = None
 
@@ -63,6 +64,16 @@ class ExactSetupSelection:
         object.__setattr__(self, "clients", tuple(self.clients))
         if self.trust_grants is not None:
             object.__setattr__(self, "trust_grants", tuple(self.trust_grants))
+        object.__setattr__(
+            self,
+            "client_options",
+            MappingProxyType(
+                {
+                    str(name): _freeze_json_mapping(settings, f"client_options.{name}")
+                    for name, settings in self.client_options.items()
+                }
+            ),
+        )
         object.__setattr__(
             self,
             "sampling_profiles",
@@ -104,6 +115,34 @@ class ExactSetupSelection:
             raise ValueError("activation must be manual or supervisor") from error
         if type(self.pinned) is not bool:
             raise ValueError("pinned must be boolean")
+        unknown_clients = sorted(set(self.clients) - {"codex", "hindsight"})
+        if unknown_clients:
+            raise ValueError("unsupported setup clients: " + ", ".join(unknown_clients))
+        unselected_options = sorted(set(self.client_options) - set(self.clients))
+        if unselected_options:
+            raise ValueError(
+                "client_options require selected clients: "
+                + ", ".join(unselected_options)
+            )
+        allowed_client_options = {
+            "profile",
+            "provider",
+            "max_concurrent",
+            "sampling_profiles",
+            "context_window",
+        }
+        for client, options in self.client_options.items():
+            unknown = sorted(set(options) - allowed_client_options)
+            if unknown:
+                raise ValueError(
+                    f"client_options.{client} has unknown fields: " + ", ".join(unknown)
+                )
+        if "hindsight" in self.clients and not self.client_options.get(
+            "hindsight", {}
+        ).get("profile"):
+            raise ValueError(
+                "Hindsight setup requires client_options.hindsight.profile"
+            )
         lock_algorithm, separator, lock_value = self.runtime_lock_digest.partition(":")
         if (
             separator != ":"
@@ -207,6 +246,7 @@ class SetupPreview:
     service_options: Mapping[str, object]
     gateway_endpoint: str
     clients: tuple[str, ...]
+    client_options: Mapping[str, Mapping[str, object]]
     sampling_profiles: Mapping[str, Mapping[str, object]]
     context_window: int | None
     steps: tuple[PlanStep, ...]
@@ -367,6 +407,7 @@ class SetupPlanner:
             service_options=selection.service_options,
             gateway_endpoint=selection.gateway_endpoint,
             clients=selection.clients,
+            client_options=selection.client_options,
             sampling_profiles=selection.sampling_profiles,
             context_window=selection.context_window,
             steps=plan.steps,
@@ -541,6 +582,22 @@ class SetupPlanner:
                 False,
             ),
             (
+                "gateway.configure",
+                "Configure the stable Gateway route",
+                {
+                    "endpoint": selection.gateway_endpoint,
+                    "service": selection.service_name,
+                    "route": selection.service_route,
+                },
+                False,
+            ),
+            (
+                "supervisor.activate",
+                "Register and visibly activate the Supervisor",
+                {"reason": "install runtimes, models, and start the selected service"},
+                False,
+            ),
+            (
                 "runtime.install",
                 "Install and probe the exact Runtime Installation",
                 {
@@ -563,20 +620,11 @@ class SetupPlanner:
             ),
             ("service.configure", "Configure the Inference Service", common, False),
             (
-                "gateway.configure",
-                "Configure the stable Gateway route",
-                {
-                    "endpoint": selection.gateway_endpoint,
-                    "service": selection.service_name,
-                    "route": selection.service_route,
-                },
-                False,
-            ),
-            (
                 "client.configure",
                 "Configure selected clients",
                 {
                     "clients": selection.clients,
+                    "client_options": selection.client_options,
                     "service": selection.service_name,
                     "route": selection.service_route,
                     "endpoint": selection.gateway_endpoint,

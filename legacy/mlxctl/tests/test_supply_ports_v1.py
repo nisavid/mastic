@@ -333,6 +333,27 @@ route = "coding"
         )
         self.assertEqual(result["plan"]["referenced_services"], ["coding"])
 
+    def test_runtime_update_honors_explicit_channel_contract(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        old = manager._installation("optiq-old", "optiq", "0.2", "tested")
+        RuntimeSupplyPort.persist_runtime(self.store, old)
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        with self.assertRaisesRegex(SupplyPortError, "does not accept"):
+            port.execute(
+                "runtime.update",
+                {
+                    "resource": "optiq-old",
+                    "channel": "tested",
+                    "version": "0.3",
+                },
+            )
+        with self.assertRaisesRegex(SupplyPortError, "requires an exact version"):
+            port.execute(
+                "runtime.update",
+                {"resource": "optiq-old", "channel": "custom"},
+            )
+
     def test_runtime_remove_is_reference_gated_and_requires_confirmation(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
         files = FakeRuntimeFiles()

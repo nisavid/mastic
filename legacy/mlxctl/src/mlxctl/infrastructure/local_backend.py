@@ -56,7 +56,6 @@ _SUPERVISOR_MUTATIONS = frozenset(
         "service.stop",
         "service.restart",
         "operation.cancel",
-        "operation.resume",
     }
 )
 _RUNTIME_MUTATIONS = frozenset(
@@ -88,7 +87,6 @@ _LOCAL_MUTATIONS = frozenset(
         "model.trust",
         "service.create",
         "service.edit",
-        "service.remove",
         "client.configure",
         "client.remove",
         "config.import",
@@ -164,8 +162,10 @@ class LocalOperationBackend:
                 "confirmation_required": operation.confirmation,
                 "parameters": _plain(request.parameters),
             }
-        requires_supervisor = request.name == "setup" or request.name in (
-            _SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS
+        requires_supervisor = (
+            request.name
+            in (_SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS)
+            or request.name == "service.remove"
         )
         return PreparedOperation(
             requires_supervisor=requires_supervisor,
@@ -227,7 +227,12 @@ class LocalOperationBackend:
         if name in {"status", "check", "doctor", "tui"}:
             return self._overview(name, config)
         if name in {"logs", "metrics"}:
-            return self._telemetry(name, "all", None)
+            resource = request.parameters.get("resource")
+            return self._telemetry(
+                name,
+                "all",
+                str(resource) if resource is not None else None,
+            )
         if name.startswith("supervisor."):
             return self._supervisor_query(name)
         if name.startswith("gateway."):
@@ -256,6 +261,13 @@ class LocalOperationBackend:
             "port": config.gateway.port,
         }
         services = self._service_items(config)
+        operations = list(self._state_store.operations())
+        active_operations = sum(
+            1
+            for operation in operations
+            if operation.get("status") in {"queued", "running", "resuming"}
+        )
+        pressure = str(supervisor.get("pressure", "unknown"))
         failed = [
             item["name"]
             for item in services
@@ -277,6 +289,9 @@ class LocalOperationBackend:
             supervisor=supervisor,
             gateway=gateway,
             services=services,
+            operations=operations,
+            active_operations=active_operations,
+            pressure=pressure,
             failed_services=failed,
             evidence=["desired-state", "operational-state"],
             next_actions=next_actions,
@@ -656,6 +671,21 @@ class LocalOperationBackend:
                     "operation_unavailable", "product removal is not configured"
                 )
             value = remove(parameters)
+        elif name == "service.remove":
+            resource = str(parameters.get("resource", ""))
+            drained = self._supervisor.execute(
+                "service.drain", {"resource": resource, "confirmed": True}
+            )
+            stopped = self._supervisor.execute(
+                "service.stop", {"resource": resource, "confirmed": True}
+            )
+            configured = self._local_mutation(request)
+            value = {
+                "service": resource,
+                "drain": drained,
+                "stop": stopped,
+                "configuration": configured,
+            }
         elif name in _SUPERVISOR_MUTATIONS:
             if name.startswith("service."):
                 config = self._config()
@@ -797,17 +827,43 @@ class LocalOperationBackend:
         if name == "model.trust":
             resource = str(parameters.get("resource", parameters.get("model", "")))
             config = self._config()
+            installation_name = self._model_installation_name(resource, config)
             _resource(
-                OperationRequest(name, {"resource": resource}),
+                OperationRequest(name, {"resource": installation_name}),
                 config.models,
                 "Model Installation",
             )
+            runtime = str(parameters.get("runtime", ""))
+            _resource(
+                OperationRequest(name, {"resource": runtime}),
+                config.runtimes,
+                "Runtime Installation",
+            )
+            model = config.models[installation_name]
+            revision = str(parameters.get("revision", model.revision.revision))
+            if revision != model.revision.revision:
+                raise ApplicationError(
+                    "revision_mismatch",
+                    "trust must target the configured exact Model Revision",
+                )
+            accepted = parameters.get("accepted_risks")
+            if not isinstance(accepted, (tuple, list)) or not all(
+                isinstance(item, str) and item for item in accepted
+            ):
+                raise ApplicationError(
+                    "invalid_parameter",
+                    "accepted_risks must be a JSON array of nonempty strings",
+                )
             return self._state_store.put_snapshot(
                 {
                     "kind": "trust",
-                    "id": resource,
-                    "version": str(parameters.get("revision", "1")),
-                    "accepted_risks": list(parameters.get("accepted_risks", ())),
+                    "id": f"{installation_name}@{runtime}",
+                    "version": revision,
+                    "model_installation": installation_name,
+                    "repository": model.revision.repository,
+                    "revision": revision,
+                    "runtime_installation": runtime,
+                    "accepted_risks": list(accepted),
                 }
             )
 

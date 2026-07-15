@@ -106,9 +106,12 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#first-run")
             title = str(self.app.query_one("#view-title", Static).content)
             body = str(self.app.query_one("#view-body", Static).content)
-            self.assertEqual(title, "Create your first useful service")
-            self.assertIn("exact Model Revision", body)
-            self.assertIn("Nothing changes until", body)
+            self.assertEqual(title, "setup")
+            self.assertEqual(self.app.selected_operation, "setup")
+            self.assertIn("complete plan", body)
+            self.assertTrue(
+                self.app.query_one("#operation-form").styles.display == "block"
+            )
 
     async def test_command_palette_exposes_every_catalogue_operation(self) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:
@@ -211,9 +214,12 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                     for parameter in operation.parameters:
                         control = self.app.query_one(f"#parameter-{parameter.name}")
                         if parameter.required and isinstance(control, Input):
-                            control.value = (
-                                "1" if parameter.value_type == "integer" else "example"
-                            )
+                            if parameter.value_type == "integer":
+                                control.value = "1"
+                            elif parameter.value_type == "json":
+                                control.value = "[]"
+                            else:
+                                control.value = "example"
                         elif parameter.required and isinstance(control, Select):
                             control.value = parameter.accepted[0]
                     before = len(self.dispatcher.requests)

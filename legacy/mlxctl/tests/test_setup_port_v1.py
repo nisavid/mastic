@@ -75,6 +75,7 @@ def selection(*, revision="2" * 40, trust=()):
         },
         gateway_endpoint="http://127.0.0.1:8766/v1",
         clients=("codex", "hindsight"),
+        client_options={"hindsight": {"profile": "default"}},
         sampling_profiles={
             "coding": {"temperature": 0.0, "top_p": 0.95},
             "reflect": {"temperature": 0.9, "top_p": 0.95},
@@ -161,6 +162,10 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(preview["selection"]["model_revision"], "2" * 40)
         self.assertEqual(preview["selection"]["model_alias"], "qwen-optiq")
         self.assertEqual(preview["selection"]["service_route"], "engineering")
+        self.assertEqual(
+            preview["selection"]["client_options"]["hindsight"]["profile"],
+            "default",
+        )
         self.assertEqual(preview["selection"]["activation"], "supervisor")
         self.assertTrue(preview["selection"]["pinned"])
         self.assertTrue(preview["selection"]["service_options"]["mtp"])
@@ -221,6 +226,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "runtime": {"draft_tokens": 4},
             },
         )
+        self.assertEqual(self.supervisor.calls[0][0], "supervisor.start")
         self.assertEqual(
             self.supervisor.calls[-1], ("service.start", {"resource": "coding"})
         )
@@ -229,7 +235,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(
             {call[1]["service"] for call in self.clients.calls}, {"coding"}
         )
-        self.assertEqual(len(self.evidence.items["setup"]), 8)
+        self.assertEqual(len(self.evidence.items["setup"]), 9)
         verification_evidence = self.evidence.items["setup"][-1].detail
         self.assertNotIn("mlxctl ready", verification_evidence)
         self.assertIn("response_sha256", verification_evidence)
@@ -312,7 +318,12 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "setup_interrupted")
         self.assertEqual(
             [item.step_id for item in self.evidence.items["setup"]],
-            ["preflight", "runtime.install"],
+            [
+                "preflight",
+                "gateway.configure",
+                "supervisor.activate",
+                "runtime.install",
+            ],
         )
 
         resumed = self.port()
@@ -331,7 +342,10 @@ class SetupOperationPortTests(unittest.TestCase):
     def test_offline_missing_artifacts_block_before_any_owner_runs(self):
         port = self.port()
         preview = port.preview({"offline": True})
-        self.assertEqual(preview["steps"][1]["state"], "blocked")
+        runtime = next(
+            step for step in preview["steps"] if step["id"] == "runtime.install"
+        )
+        self.assertEqual(runtime["state"], "blocked")
 
         with self.assertRaises(ApplicationError) as raised:
             port.execute(

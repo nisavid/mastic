@@ -230,6 +230,9 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["schema_version"], 1)
             self.assertEqual(result["supervisor"]["state"], "stopped")
             self.assertEqual(result["services"], [])
+            self.assertEqual(result["operations"], [])
+            self.assertEqual(result["active_operations"], 0)
+            self.assertEqual(result["pressure"], "unknown")
             self.assertIn("mlxctl supervisor start", result["next_actions"])
 
     def test_uninitialized_status_and_config_are_actionable_without_a_file(
@@ -309,6 +312,11 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["evidence"], ["no-metrics-observed"])
             self.assertEqual(metrics.calls, [("all", None)])
 
+            backend.prepare(
+                OperationRequest("metrics", {"resource": "coding"})
+            ).execute()
+            self.assertEqual(metrics.calls[-1], ("all", "coding"))
+
     def test_model_search_uses_the_cli_source_and_install_derives_alias(self) -> None:
         with TemporaryDirectory() as directory:
             supply = _DirectInstallSupply()
@@ -333,6 +341,42 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertIn(("search", "Qwen", "broad", 3), supply.calls)
             install = next(call for call in supply.calls if call[0] == "install")
             self.assertEqual(install[1]["alias"], "Qwen-OptiQ")
+
+    def test_model_trust_is_exact_revision_and_runtime_scoped(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(Path(directory))
+
+            result = backend.prepare(
+                OperationRequest(
+                    "model.trust",
+                    {
+                        "resource": "coding",
+                        "runtime": "optiq-0.2.18",
+                        "accepted_risks": ["custom_code"],
+                    },
+                )
+            ).execute()
+
+            trust = result["resource"]
+            self.assertEqual(trust["model_installation"], "qwen")
+            self.assertEqual(trust["runtime_installation"], "optiq-0.2.18")
+            self.assertEqual(trust["revision"], "a" * 40)
+            self.assertEqual(trust["accepted_risks"], ["custom_code"])
+            self.assertIsNotNone(
+                state.snapshot("trust", "qwen@optiq-0.2.18", version="a" * 40)
+            )
+
+            with self.assertRaisesRegex(ApplicationError, "JSON array"):
+                backend.prepare(
+                    OperationRequest(
+                        "model.trust",
+                        {
+                            "resource": "coding",
+                            "runtime": "optiq-0.2.18",
+                            "accepted_risks": "custom_code",
+                        },
+                    )
+                ).execute()
 
     def test_model_inspect_accepts_arbitrary_repository_before_install(self) -> None:
         with TemporaryDirectory() as directory:
@@ -392,6 +436,27 @@ class LocalOperationBackendTests(unittest.TestCase):
                 OperationRequest("service.inspect", {"resource": "chat"})
             ).execute()
             self.assertTrue(inspected["resource"]["desired"]["pinned"])
+
+    def test_service_remove_drains_and_stops_before_deleting_desired_state(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            supervisor = _Port()
+            backend, _ = self._backend(Path(directory), supervisor=supervisor)
+
+            prepared = backend.prepare(
+                OperationRequest("service.remove", {"resource": "chat"})
+            )
+            result = prepared.execute()
+
+            self.assertTrue(prepared.requires_supervisor)
+            self.assertEqual(
+                [call[0] for call in supervisor.calls],
+                ["service.drain", "service.stop"],
+            )
+            self.assertEqual(result["resource"]["service"], "chat")
+            remaining = backend.prepare(OperationRequest("service.list")).execute()
+            self.assertNotIn("chat", {item["name"] for item in remaining["items"]})
 
     def test_service_create_uses_the_public_service_argument(self) -> None:
         with TemporaryDirectory() as directory:
@@ -453,7 +518,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(state.operations(), ())
             self.assertEqual(state.events(), ())
 
-    def test_setup_prepares_exact_plan_and_activates_only_on_later_execution(
+    def test_setup_prepares_exact_plan_and_defers_activation_to_remote_steps(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -462,7 +527,7 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             prepared = backend.prepare(OperationRequest("setup"))
 
-            self.assertTrue(prepared.requires_supervisor)
+            self.assertFalse(prepared.requires_supervisor)
             self.assertEqual(prepared.events[0]["plan_fingerprint"], "sha256:exact")
             self.assertEqual(setup.calls, [])
 
@@ -572,7 +637,6 @@ class LocalOperationBackendTests(unittest.TestCase):
 
     def test_mutation_categories_have_preview_and_exact_activation_policy(self) -> None:
         supervisor_backed = {
-            "setup",
             "supervisor.start",
             "supervisor.stop",
             "supervisor.restart",
@@ -593,8 +657,8 @@ class LocalOperationBackendTests(unittest.TestCase):
             "service.start",
             "service.stop",
             "service.restart",
+            "service.remove",
             "operation.cancel",
-            "operation.resume",
         }
         with TemporaryDirectory() as directory:
             backend, state = self._backend(

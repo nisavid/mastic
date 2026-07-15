@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from mlxctl.domain.admission import PressureLevel
 from mlxctl.domain.resources import (
+    ActivationPolicy,
     InferenceService,
     ResourceName,
     ServiceRunState,
@@ -18,13 +19,18 @@ from mlxctl.infrastructure.supervisor_v1 import (
 
 
 def _service(
-    name: str, *, pinned: bool = False, route: str | None = None
+    name: str,
+    *,
+    pinned: bool = False,
+    route: str | None = None,
+    activation: ActivationPolicy = ActivationPolicy.MANUAL,
 ) -> InferenceService:
     return InferenceService(
         name=ResourceName(name),
         model_alias=ResourceName(f"{name}-model"),
         runtime_installation="optiq@0.2.18",
         route=ResourceName(route or name),
+        activation=activation,
         pinned=pinned,
         options={"context_length": 32768},
     )
@@ -214,6 +220,33 @@ class FakeClock:
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_supervisor_activation_policy_starts_only_selected_services(self) -> None:
+        self.desired = FakeDesiredState(
+            _service("manual"),
+            _service("automatic", activation=ActivationPolicy.SUPERVISOR),
+        )
+        supervisor = Supervisor(
+            desired_state=self.desired,
+            runtime_supply=self.runtime,
+            state_store=self.store,
+            gateway=self.gateway,
+            processes=self.processes,
+            probe=self.probe,
+            memory_pressure=self.pressure,
+            clock=self.clock,
+            readiness_timeout=3,
+            drain_timeout=2,
+            terminate_timeout=1,
+        )
+
+        status = supervisor.start()
+
+        self.assertEqual(
+            {run.service for run in status.runs if run.state is ServiceRunState.READY},
+            {"automatic"},
+        )
+        self.assertEqual(self.gateway.routes["manual"][0], "stopped")
+
     def test_public_gateway_route_is_distinct_from_service_resource_name(self) -> None:
         service = _service("worker", route="coding")
         self.desired = FakeDesiredState(service)

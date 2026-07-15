@@ -63,9 +63,11 @@ class RemoteOperationPort:
                 error.message,
                 next_actions=("mlxctl supervisor status", "mlxctl doctor"),
             ) from error
+        result = dict(response.result)
         return {
-            **dict(response.result),
-            "operation_id": response.operation_id,
+            **result,
+            "operation_id": result.get("operation_id", response.operation_id),
+            "control_operation_id": response.operation_id,
             "progress": [dict(item) for item in response.progress],
         }
 

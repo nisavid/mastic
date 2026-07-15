@@ -106,6 +106,10 @@ class HostIntegrationTests(unittest.TestCase):
                         "run": {"state": "ready"},
                     }
                 ],
+                "operations": [
+                    {"id": "op-1", "status": "running"},
+                    {"id": "op-2", "status": "ready"},
+                ],
             }
         )
 
@@ -115,6 +119,7 @@ class HostIntegrationTests(unittest.TestCase):
         self.assertEqual(snapshot.supervisor, "running")
         self.assertIn("127.0.0.1:8766", snapshot.gateway)
         self.assertEqual(snapshot.pressure, "warning")
+        self.assertEqual(snapshot.active_operations, 1)
         self.assertEqual(snapshot.services[0].runtime, "optiq@0.3.3")
 
     def test_private_log_reader_bounds_files_and_rejects_symlinks(self) -> None:

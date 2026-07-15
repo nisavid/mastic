@@ -98,14 +98,14 @@ class LocalSnapshotProvider:
         active = sum(
             1
             for item in operations
-            if _mapping(item).get("state") in {"queued", "running", "resuming"}
+            if _mapping(item).get("status") in {"queued", "running", "resuming"}
         )
         return TuiSnapshot(
             supervisor=str(supervisor.get("state", "stopped")),
             gateway=gateway_text,
             services=services,
             active_operations=active,
-            pressure=str(supervisor.get("pressure", "unknown")),
+            pressure=str(value.get("pressure", supervisor.get("pressure", "unknown"))),
         )
 
     @staticmethod

@@ -30,7 +30,7 @@ class OperationCatalogueTests(unittest.TestCase):
             "service.create",
             "service.start",
             "service.stop",
-            "operation.follow",
+            "operation.inspect",
             "client.configure",
             "config.restore",
             "logs",
@@ -52,6 +52,7 @@ class OperationCatalogueTests(unittest.TestCase):
         for name in (
             "remove",
             "gateway.configure",
+            "model.uninstall",
             "model.trust",
             "service.create",
             "service.edit",
@@ -95,6 +96,17 @@ class OperationCatalogueTests(unittest.TestCase):
             self.catalogue["client.configure"].parameters[0].accepted,
             ("codex", "hindsight"),
         )
+        rollback = self.catalogue["model.rollback"]
+        self.assertEqual(
+            [item.name for item in rollback.parameters], ["resource", "target"]
+        )
+        self.assertTrue(rollback.parameters[1].required)
+        self.assertEqual(self.catalogue["runtime.doctor"].parameters, ())
+        self.assertEqual(self.catalogue["runtime.prune"].parameters, ())
+        self.assertEqual(self.catalogue["model.cache.prune"].parameters, ())
+        self.assertEqual(self.catalogue["doctor"].parameters, ())
+        self.assertNotIn("operation.resume", self.catalogue)
+        self.assertNotIn("operation.follow", self.catalogue)
         setup = {
             parameter.name: parameter
             for parameter in self.catalogue["setup"].parameters

@@ -287,6 +287,7 @@ class SetupOperationPort:
                 "service_options": _plain(preview.service_options),
                 "gateway_endpoint": preview.gateway_endpoint,
                 "clients": list(preview.clients),
+                "client_options": _plain(preview.client_options),
                 "sampling_profiles": _plain(preview.sampling_profiles),
                 "context_window": preview.context_window,
             },
@@ -304,6 +305,8 @@ class SetupOperationPort:
         selection = plan.selection
         if step.id == "preflight":
             return {"validated": True, **_plain(plan.preflight)}
+        if step.id == "supervisor.activate":
+            return self._supervisor.execute("supervisor.start", {"confirmed": True})
         if step.id == "runtime.install":
             result = self._runtime.execute(
                 "runtime.install",
@@ -374,6 +377,8 @@ class SetupOperationPort:
         if step.id == "client.configure":
             configured = {}
             for client in selection.clients:
+                options = _plain(selection.client_options.get(client, {}))
+                assert isinstance(options, Mapping)
                 configured[client] = self._clients.execute(
                     "client.configure",
                     {
@@ -384,6 +389,7 @@ class SetupOperationPort:
                         "endpoint": selection.gateway_endpoint,
                         "sampling_profiles": selection.sampling_profiles,
                         "context_window": selection.context_window,
+                        **options,
                         "confirmed": True,
                     },
                 )
@@ -501,6 +507,7 @@ def _selection(
                 "service_options",
                 "gateway_endpoint",
                 "clients",
+                "client_options",
                 "sampling_profiles",
                 "context_window",
             }
@@ -533,6 +540,11 @@ def _selection(
     sampling = overrides.get("sampling_profiles", baseline.sampling_profiles)
     if not isinstance(sampling, Mapping):
         raise ApplicationError("invalid_setup", "sampling_profiles must be an object")
+    client_options = overrides.get("client_options", baseline.client_options)
+    if not isinstance(client_options, Mapping) or not all(
+        isinstance(value, Mapping) for value in client_options.values()
+    ):
+        raise ApplicationError("invalid_setup", "client_options must be an object")
     service_options = overrides.get("service_options", baseline.service_options)
     if not isinstance(service_options, Mapping):
         raise ApplicationError("invalid_setup", "service_options must be an object")
@@ -571,6 +583,7 @@ def _selection(
             overrides.get("gateway_endpoint", baseline.gateway_endpoint)
         ),
         clients=clients,
+        client_options=client_options,  # type: ignore[arg-type]
         sampling_profiles=sampling,  # type: ignore[arg-type]
         context_window=_optional_int(
             overrides.get("context_window", baseline.context_window)
@@ -596,6 +609,7 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
             "service_options",
             "gateway_endpoint",
             "clients",
+            "client_options",
             "sampling_profiles",
             "context_window",
         }
@@ -710,6 +724,7 @@ def _selection_value(selection: ExactSetupSelection) -> Mapping[str, object]:
         "service_options": selection.service_options,
         "gateway_endpoint": selection.gateway_endpoint,
         "clients": selection.clients,
+        "client_options": selection.client_options,
         "sampling_profiles": selection.sampling_profiles,
         "context_window": selection.context_window,
     }

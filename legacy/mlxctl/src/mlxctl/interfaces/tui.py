@@ -237,12 +237,12 @@ class MlxctlApp(App[None]):
     def on_resize(self, event: events.Resize) -> None:
         self._apply_responsive_layout(event.size.width)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         identity = event.button.id or ""
         if identity.startswith("nav-"):
             self.show_view(identity.removeprefix("nav-"))
         elif identity == "first-run":
-            self.show_view("first-run")
+            await self.open_operation("setup")
         elif identity == "open-topology":
             self.show_view("topology")
         elif identity == "refresh":

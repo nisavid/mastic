@@ -105,9 +105,25 @@ class OperationPortTests(unittest.TestCase):
         cancelled = port.execute("operation.cancel", {"resource": "op-7"})
 
         self.assertEqual(result["operation_id"], "op-1")
+        self.assertEqual(result["control_operation_id"], "op-1")
         self.assertEqual(result["progress"], [{"phase": "start"}])
         self.assertEqual(cancelled["operation_id"], "op-7")
         self.assertIn(("cancel", "op-7"), client.calls)
+
+    def test_remote_port_preserves_owner_durable_operation_identity(self) -> None:
+        client = FakeControlClient()
+        original = client.execute
+
+        def execute(operation, parameters=None):
+            response = original(operation, parameters)
+            response.result = {"operation_id": "durable-op-9", "state": "ready"}
+            return response
+
+        client.execute = execute
+        result = RemoteOperationPort(client).execute("service.start", {})
+
+        self.assertEqual(result["operation_id"], "durable-op-9")
+        self.assertEqual(result["control_operation_id"], "op-1")
 
     def test_remote_errors_are_stable_application_errors(self) -> None:
         client = FakeControlClient()

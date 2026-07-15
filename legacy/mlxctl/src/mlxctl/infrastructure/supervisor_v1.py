@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Mapping, Protocol, Sequence
 
 from mlxctl.domain.admission import PressureLevel
-from mlxctl.domain.resources import InferenceService, ServiceRunState
+from mlxctl.domain.resources import ActivationPolicy, InferenceService, ServiceRunState
 from mlxctl.infrastructure.gateway import GatewayRoute
 
 
@@ -261,6 +261,7 @@ class Supervisor:
     def start(self) -> SupervisorStatus:
         """Explicitly start the one Gateway and recover verified child identities."""
 
+        activate: tuple[str, ...] = ()
         with self._lock:
             if self._state == "running":
                 return self._status_locked()
@@ -282,12 +283,21 @@ class Supervisor:
                     )
                     self._gateway.set_route(route, "stopped", None)
                 self._recover_runs_locked()
+                activate = tuple(
+                    str(service.name)
+                    for service in self._desired_state.services()
+                    if service.activation is ActivationPolicy.SUPERVISOR
+                    and str(service.name) not in self._runs
+                )
             except Exception as error:
                 self._state = "failed"
                 self._finish_operation_locked(operation_id, "failed", error=str(error))
                 raise
             self._state = "running"
             self._finish_operation_locked(operation_id, "running")
+        for name in activate:
+            self.start_service(name)
+        with self._lock:
             return self._status_locked(operation_id=operation_id)
 
     def restart(self) -> SupervisorStatus:

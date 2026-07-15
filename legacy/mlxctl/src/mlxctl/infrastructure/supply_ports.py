@@ -229,9 +229,21 @@ class RuntimeSupplyPort:
         config = self._config_store.load().value
         current = _runtime_installation(config.runtimes, resource)
         target_name = _optional(parameters, "target")
+        version = _optional(parameters, "version")
+        channel = str(
+            parameters.get("channel", "custom" if version is not None else "tested")
+        )
         if target_name:
+            if version is not None or "channel" in parameters:
+                raise SupplyPortError(
+                    "runtime update target cannot be combined with channel or version"
+                )
             target = _runtime_installation(config.runtimes, target_name)
-        elif parameters.get("version") is None:
+        elif channel == "tested":
+            if version is not None:
+                raise SupplyPortError(
+                    "tested runtime update does not accept a custom version"
+                )
             bundle = self._tested_bundle(
                 current.runtime, _optional(parameters, "bundle_id")
             )
@@ -249,7 +261,9 @@ class RuntimeSupplyPort:
                     self._config_store.load().value.runtimes,
                     str(target_result["installation_id"]),
                 )
-        else:
+        elif channel == "custom":
+            if version is None:
+                raise SupplyPortError("custom runtime update requires an exact version")
             target_result = self._install(
                 {
                     **dict(parameters),
@@ -261,6 +275,8 @@ class RuntimeSupplyPort:
                 self._config_store.load().value.runtimes,
                 str(target_result["installation_id"]),
             )
+        else:
+            raise SupplyPortError(f"unknown runtime installation channel: {channel}")
         references = _runtime_references(config, resource)
         plan = self._planner.plan_update(
             current, target, referenced_services=references

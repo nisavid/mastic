@@ -99,7 +99,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "metrics",
         "check",
     ),
-    "operation": ("list", "inspect", "follow", "cancel", "resume"),
+    "operation": ("list", "inspect", "cancel"),
     "client": ("list", "inspect", "configure", "test", "remove"),
     "config": (
         "path",
@@ -146,7 +146,6 @@ _QUERIES = frozenset(
         "service.check",
         "operation.list",
         "operation.inspect",
-        "operation.follow",
         "client.list",
         "client.inspect",
         "client.test",
@@ -168,7 +167,6 @@ _NO_CONFIRM = frozenset(
         "service.stop",
         "service.restart",
         "operation.cancel",
-        "operation.resume",
         "client.test",
     }
 )
@@ -177,6 +175,7 @@ _LOCAL_MUTATIONS = frozenset(
     {
         "remove",
         "gateway.configure",
+        "model.uninstall",
         "model.trust",
         "service.create",
         "service.edit",
@@ -334,6 +333,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 value_type="json",
             ),
             _option(
+                "client_options",
+                "JSON object of per-client settings; Hindsight requires a profile.",
+                value_type="json",
+            ),
+            _option(
                 "sampling_profiles",
                 "JSON object of per-client or per-operation sampling profiles.",
                 value_type="json",
@@ -370,13 +374,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
         )
     if name == "doctor":
-        return (
-            _option(
-                "fix",
-                "Preview and apply the selected safe repairs.",
-                value_type="boolean",
-            ),
-        )
+        return ()
     if name in {"logs", "metrics"}:
         return (
             _argument(
@@ -431,6 +429,8 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
     if name.startswith("runtime.") and name not in {
         "runtime.list",
         "runtime.available",
+        "runtime.doctor",
+        "runtime.prune",
     }:
         return (_argument("resource", resource_help["runtime"]),)
     if name == "model.search":
@@ -457,7 +457,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "offline", "Require already-cached exact content.", value_type="boolean"
             ),
         )
-    if name in {"model.update", "model.rollback"}:
+    if name == "model.update":
         return (
             _argument("resource", resource_help["model"]),
             _option(
@@ -467,6 +467,15 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "offline", "Require already-cached exact content.", value_type="boolean"
+            ),
+        )
+    if name == "model.rollback":
+        return (
+            _argument("resource", resource_help["model"]),
+            _option(
+                "target",
+                "Previously retained Model Installation ID from `mlxctl model list`.",
+                required=True,
             ),
         )
     if name == "model.trust":
@@ -479,7 +488,8 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "accepted_risks",
-                "Comma-separated revision-scoped risks explicitly accepted.",
+                "JSON array of revision-scoped risks explicitly accepted.",
+                value_type="json",
                 required=True,
             ),
         )
@@ -488,18 +498,26 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             _argument("resource", "Cached Revision identity."),
             _option("destination", "Existing target cache directory.", required=True),
         )
-    if name.startswith("model.cache.") and name != "model.cache.list":
+    if name.startswith("model.cache.") and name not in {
+        "model.cache.list",
+        "model.cache.prune",
+    }:
         return (
             _argument(
                 "resource",
                 "Cached Revision identity; discover values with `mlxctl model cache list`.",
             ),
         )
-    if name.startswith("model.") and name not in {
-        "model.list",
-        "model.search",
-        "model.inspect",
-    }:
+    if (
+        name.startswith("model.")
+        and not name.startswith("model.cache.")
+        and name
+        not in {
+            "model.list",
+            "model.search",
+            "model.inspect",
+        }
+    ):
         return (_argument("resource", resource_help["model"]),)
     if name == "service.create":
         return (
@@ -519,6 +537,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "Never auto-stop this service under memory pressure.",
                 value_type="boolean",
             ),
+            _option(
+                "options",
+                "JSON object of runtime-specific launch options.",
+                value_type="json",
+            ),
         )
     if name == "service.edit":
         return (
@@ -533,6 +556,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "pinned",
                 "Pin against automatic pressure eviction.",
                 value_type="boolean",
+            ),
+            _option(
+                "options",
+                "Replacement JSON object of runtime-specific launch options.",
+                value_type="json",
             ),
         )
     if name.startswith("service.") and name != "service.list":
@@ -551,6 +579,17 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option("profile", "Hindsight profile name when configuring Hindsight."),
             _option("context_window", "Client context window.", value_type="integer"),
+            _option(
+                "sampling_profiles",
+                "JSON object of named sampling profiles.",
+                value_type="json",
+            ),
+            _option("provider", "Client provider identifier."),
+            _option(
+                "max_concurrent",
+                "Maximum concurrent client requests.",
+                value_type="integer",
+            ),
         )
     if name == "client.test":
         return (
