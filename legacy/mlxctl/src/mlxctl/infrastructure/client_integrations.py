@@ -17,6 +17,11 @@ from urllib.parse import urlsplit
 import tomlkit
 from tomlkit.toml_document import TOMLDocument
 
+from mlxctl.application.config_schema import (
+    ClientSettings,
+    validate_hindsight_profile_name,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SamplingProfile:
@@ -126,6 +131,59 @@ class ClientIntegrationConflict(RuntimeError):
 Replace = Callable[[Path, bytes], None]
 TestResult = TypeVar("TestResult")
 TestRequest = Callable[[str, str, Mapping[str, object]], TestResult]
+
+
+class LocalClientIntegrationFactory:
+    """Select one precise local client integration from operation intent and state."""
+
+    def __init__(
+        self,
+        *,
+        codex_config_path: str | Path,
+        hindsight_profiles_dir: str | Path,
+        ownership_dir: str | Path,
+    ) -> None:
+        self.codex_config_path = Path(codex_config_path).expanduser()
+        self.hindsight_profiles_dir = Path(hindsight_profiles_dir).expanduser()
+        self.ownership_dir = Path(ownership_dir).expanduser()
+        for path, label in (
+            (self.codex_config_path, "Codex config path"),
+            (self.hindsight_profiles_dir, "Hindsight profiles directory"),
+            (self.ownership_dir, "client ownership directory"),
+        ):
+            if not path.is_absolute():
+                raise ValueError(f"{label} must be absolute")
+
+    def __call__(
+        self,
+        operation: str,
+        name: str,
+        parameters: Mapping[str, object],
+        settings: ClientSettings | None,
+    ) -> CodexClientIntegration | HindsightClientIntegration:
+        _safe_directory(self.ownership_dir, "client ownership directory")
+        if name == "codex":
+            _safe_target(self.codex_config_path, "Codex config")
+            return CodexClientIntegration(
+                self.codex_config_path,
+                self.ownership_dir / "codex.ownership.json",
+                self.ownership_dir / "codex.config.backup",
+            )
+        if name != "hindsight":
+            raise ValueError(f"unsupported Client Integration: {name}")
+        _safe_directory(self.hindsight_profiles_dir, "Hindsight profiles directory")
+        if operation == "client.configure":
+            profile = parameters.get("profile")
+        else:
+            profile = settings.profile if settings is not None else None
+        profile_name = validate_hindsight_profile_name(profile)
+        config_path = self.hindsight_profiles_dir / f"{profile_name}.env"
+        _safe_target(config_path, "Hindsight profile")
+        return HindsightClientIntegration(
+            config_path,
+            self.ownership_dir / f"hindsight-{profile_name}.ownership.json",
+            self.ownership_dir / f"hindsight-{profile_name}.config.backup",
+        )
 
 
 class CodexClientIntegration:
@@ -272,7 +330,7 @@ class CodexClientIntegration:
             raise ClientIntegrationConflict(
                 "Codex config changed after mlxctl applied the integration"
             )
-        backup = self.backup_path.read_bytes()
+        backup, _ = _read(self.backup_path)
         if manifest["config_existed"]:
             self._replace(self.config_path, backup)
         else:
@@ -455,7 +513,7 @@ class HindsightClientIntegration:
             raise ClientIntegrationConflict(
                 "Hindsight config changed after mlxctl applied the integration"
             )
-        backup = self.backup_path.read_bytes()
+        backup, _ = _read(self.backup_path)
         if manifest["config_existed"]:
             self._replace(self.config_path, backup)
         else:
@@ -651,11 +709,12 @@ def _parse_toml(raw: bytes) -> TOMLDocument:
 
 
 def _load_manifest(path: Path, integration: str, optional: bool) -> dict[str, object]:
-    if not path.exists():
+    payload, existed = _read(path)
+    if not existed:
         if optional:
             return {}
         raise FileNotFoundError(path)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(payload.decode())
     if (
         not isinstance(raw, dict)
         or raw.get("schema_version") != 1
@@ -678,6 +737,7 @@ def _validate_manifest_paths(
 
 
 def _read(path: Path) -> tuple[bytes, bool]:
+    _safe_target(path, "managed client file")
     try:
         return path.read_bytes(), True
     except FileNotFoundError:
@@ -709,6 +769,7 @@ def _write_private(path: Path, payload: bytes) -> None:
 
 
 def _atomic_replace(path: Path, payload: bytes) -> None:
+    _safe_target(path, "managed client file")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
@@ -737,6 +798,20 @@ def _digest(payload: bytes) -> str:
 
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _safe_directory(path: Path, label: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"{label} must be a directory")
+
+
+def _safe_target(path: Path, label: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{label} must be a regular file")
 
 
 def _plain(value: object) -> object:

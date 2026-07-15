@@ -67,7 +67,7 @@ pinned = false
 kind = "codex"
 service = "coding"
 
-[clients.codex.sampling]
+[clients.codex.sampling.coding]
 temperature = 0.0
 """
 

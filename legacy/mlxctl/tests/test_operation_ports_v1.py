@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from mlxctl.application.dispatch import ApplicationError
+from mlxctl.application.config_schema import ClientSettings, ClientSamplingSettings
 from mlxctl.infrastructure.control_client import SupervisorUnavailableError
 from mlxctl.infrastructure.operation_ports import (
     ClientOperationPort,
@@ -10,6 +11,7 @@ from mlxctl.infrastructure.operation_ports import (
 )
 from mlxctl.infrastructure.client_integrations import (
     ClientConfiguration,
+    ClientRemovalResult,
     SamplingProfile,
 )
 
@@ -128,11 +130,15 @@ class OperationPortTests(unittest.TestCase):
     def test_client_port_uses_one_preview_apply_test_remove_contract(self) -> None:
         adapter = FakeClientAdapter()
         records = []
+        persisted = {}
 
-        def configuration(name, parameters):
+        def configuration(name, parameters, settings):
+            service = (
+                settings.service if settings is not None else str(parameters["service"])
+            )
             return ClientConfiguration(
                 "http://127.0.0.1:8766/v1",
-                str(parameters.get("service", "coding")),
+                service,
                 sampling_profiles={
                     "coding": SamplingProfile(temperature=0.0),
                     "reflect": SamplingProfile(temperature=0.9),
@@ -140,10 +146,16 @@ class OperationPortTests(unittest.TestCase):
             )
 
         port = ClientOperationPort(
-            {"codex": adapter},
+            lambda operation, name, parameters, settings: adapter,
             configuration,
             request=lambda endpoint, model, sampling: {"model": model, **sampling},
-            record=lambda name, value: records.append((name, value)),
+            settings=lambda name: persisted.get(name),
+            record=lambda name, value: (
+                records.append((name, value)),
+                persisted.pop(name, None)
+                if value is None
+                else persisted.__setitem__(name, value),
+            ),
         )
 
         configured = port.execute(
@@ -159,6 +171,133 @@ class OperationPortTests(unittest.TestCase):
             [call[0] for call in adapter.calls], ["preview", "apply", "test", "remove"]
         )
         self.assertEqual(records[-1], ("codex", None))
+
+    def test_hindsight_profile_is_required_then_persisted_for_test_and_remove(
+        self,
+    ) -> None:
+        adapter = FakeClientAdapter()
+        records = {}
+        factory_calls = []
+
+        def adapter_factory(operation, name, parameters, settings):
+            factory_calls.append((operation, name, dict(parameters), settings))
+            return adapter
+
+        def configuration(name, parameters, settings):
+            service = settings.service if settings else str(parameters["service"])
+            return ClientConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                context_window=32768,
+                sampling_profiles={
+                    "retain": SamplingProfile(temperature=0.1),
+                    "reflect": SamplingProfile(temperature=0.9),
+                },
+            )
+
+        port = ClientOperationPort(
+            adapter_factory,
+            configuration,
+            request=lambda endpoint, model, sampling: {"model": model, **sampling},
+            settings=lambda name: records.get(name),
+            record=lambda name, value: (
+                records.pop(name, None)
+                if value is None
+                else records.__setitem__(name, value)
+            ),
+        )
+
+        with self.assertRaisesRegex(ApplicationError, "profile"):
+            port.execute(
+                "client.configure", {"client": "hindsight", "service": "memory"}
+            )
+
+        port.execute(
+            "client.configure",
+            {
+                "client": "hindsight",
+                "service": "memory",
+                "profile": "agent-memory",
+            },
+        )
+        stored = records["hindsight"]
+        self.assertIsInstance(stored, ClientSettings)
+        self.assertEqual(stored.profile, "agent-memory")
+        self.assertEqual(stored.context_window, 32768)
+        self.assertEqual(
+            stored.sampling["reflect"], ClientSamplingSettings(temperature=0.9)
+        )
+
+        port.execute("client.test", {"resource": "hindsight", "profile": "retain"})
+        port.execute("client.remove", {"resource": "hindsight"})
+
+        self.assertEqual(factory_calls[1][3].profile, "agent-memory")
+        self.assertEqual(factory_calls[2][3].profile, "agent-memory")
+        self.assertNotIn("hindsight", records)
+
+    def test_hindsight_profile_cannot_change_without_precise_removal(self) -> None:
+        stored = ClientSettings(
+            name="hindsight",
+            kind="hindsight",
+            service="memory",
+            profile="first",
+            context_window=None,
+            provider="openai",
+            max_concurrent=1,
+            sampling={},
+        )
+        port = ClientOperationPort(
+            lambda operation, name, parameters, settings: FakeClientAdapter(),
+            lambda name, parameters, settings: ClientConfiguration(
+                "http://127.0.0.1:8766/v1", "memory"
+            ),
+            request=lambda endpoint, model, sampling: {},
+            settings=lambda name: stored,
+        )
+
+        with self.assertRaisesRegex(ApplicationError, "[Rr]emove"):
+            port.execute(
+                "client.configure",
+                {
+                    "client": "hindsight",
+                    "service": "memory",
+                    "profile": "second",
+                },
+            )
+
+    def test_partial_precise_removal_retains_desired_state_identity(self) -> None:
+        stored = ClientSettings(
+            name="codex",
+            kind="codex",
+            service="coding",
+            profile=None,
+            context_window=32768,
+            provider="mlxctl-local",
+            max_concurrent=None,
+            sampling={},
+        )
+        adapter = FakeClientAdapter()
+        adapter.remove = lambda: ClientRemovalResult(
+            changed=True,
+            changes=(),
+            skipped_paths=(("model",),),
+        )
+        recorded = []
+        port = ClientOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ClientConfiguration(
+                "http://127.0.0.1:8766/v1", "coding"
+            ),
+            request=lambda endpoint, model, sampling: {},
+            settings=lambda name: stored,
+            record=lambda name, value: recorded.append((name, value)),
+        )
+
+        result = port.execute("client.remove", {"resource": "codex"})
+
+        self.assertTrue(result["desired_state_retained"])
+        self.assertEqual(result["skipped_paths"], [["model"]])
+        self.assertEqual(recorded, [])
 
 
 if __name__ == "__main__":

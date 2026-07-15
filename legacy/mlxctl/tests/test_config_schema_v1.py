@@ -42,9 +42,12 @@ mtp = true
 [clients.codex]
 kind = "codex"
 service = "coding"
+context_window = 32768
+provider = "mlxctl-local"
 
-[clients.codex.sampling]
+[clients.codex.sampling.coding]
 temperature = 0.0
+top_p = 0.95
 """
 
 
@@ -62,6 +65,9 @@ class ConfigSchemaV1Tests(unittest.TestCase):
         self.assertTrue(config.services["coding"].pinned)
         self.assertEqual(config.services["coding"].route, "coding")
         self.assertEqual(config.clients["codex"].service, "coding")
+        self.assertEqual(config.clients["codex"].context_window, 32768)
+        self.assertEqual(config.clients["codex"].provider, "mlxctl-local")
+        self.assertEqual(config.clients["codex"].sampling["coding"].top_p, 0.95)
 
     def test_rejects_unknown_keys_raw_argv_and_environment_escape_hatches(self) -> None:
         for insertion in (
@@ -118,6 +124,42 @@ route = "coding"
                     VALID.replace("temperature = 0.0", 'temperature = "cold"')
                 )
             )
+
+    def test_hindsight_profile_and_sampling_are_explicit_desired_state(self) -> None:
+        source = (
+            VALID.replace(
+                "[clients.codex]",
+                "[clients.hindsight]",
+            )
+            .replace(
+                'kind = "codex"',
+                'kind = "hindsight"\nprofile = "agent-memory"\nmax_concurrent = 1',
+            )
+            .replace(
+                "[clients.codex.sampling.coding]",
+                "[clients.hindsight.sampling.retain]",
+            )
+        )
+
+        client = validate_config(tomlkit.parse(source)).clients["hindsight"]
+
+        self.assertEqual(client.profile, "agent-memory")
+        self.assertEqual(client.sampling["retain"].temperature, 0.0)
+        self.assertEqual(client.max_concurrent, 1)
+
+    def test_rejects_unsafe_hindsight_profile_and_ambiguous_flat_sampling(self) -> None:
+        hindsight = VALID.replace("[clients.codex]", "[clients.hindsight]").replace(
+            'kind = "codex"',
+            'kind = "hindsight"\nprofile = "../default"\nmax_concurrent = 1',
+        )
+        with self.assertRaisesRegex(ConfigSchemaError, "profile"):
+            validate_config(tomlkit.parse(hindsight))
+
+        flat = VALID.replace(
+            "[clients.codex.sampling.coding]", "[clients.codex.sampling]"
+        )
+        with self.assertRaisesRegex(ConfigSchemaError, "sampling profile"):
+            validate_config(tomlkit.parse(flat))
 
 
 if __name__ == "__main__":

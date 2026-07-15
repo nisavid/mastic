@@ -7,9 +7,16 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mlxctl.application.config_schema import (
+    ClientSamplingSettings,
+    ClientSettings,
+    validate_hindsight_profile_name,
+)
 from mlxctl.application.dispatch import ApplicationError
 from mlxctl.infrastructure.control_client import ControlClientError, UnixControlClient
-from mlxctl.infrastructure.client_integrations import ClientConfiguration
+from mlxctl.infrastructure.client_integrations import (
+    ClientConfiguration,
+)
 from mlxctl.infrastructure.supervisor_v1 import Supervisor
 
 
@@ -102,57 +109,129 @@ class ClientOperationPort:
 
     def __init__(
         self,
-        adapters: Mapping[str, ClientAdapter],
-        configuration: Callable[[str, Mapping[str, object]], ClientConfiguration],
+        adapter: Callable[
+            [str, str, Mapping[str, object], ClientSettings | None], ClientAdapter
+        ],
+        configuration: Callable[
+            [str, Mapping[str, object], ClientSettings | None], ClientConfiguration
+        ],
         *,
         request: Callable[[str, str, Mapping[str, object]], object],
-        record: Callable[[str, ClientConfiguration | None], object] | None = None,
+        settings: Callable[[str], ClientSettings | None] | None = None,
+        record: Callable[[str, ClientSettings | None], object] | None = None,
     ) -> None:
-        self._adapters = dict(adapters)
+        self._adapter = adapter
         self._configuration = configuration
         self._request = request
+        self._settings = settings or (lambda _name: None)
         self._record = record or (lambda _name, _configuration: None)
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
         name = str(parameters.get("client", parameters.get("resource", "")))
-        try:
-            adapter = self._adapters[name]
-        except KeyError as error:
+        stored = self._settings(name)
+        if operation != "client.configure" and stored is None:
             raise ApplicationError(
                 "resource_not_found",
-                f"Client Integration {name!r} is unavailable",
-                next_actions=("mlxctl client list",),
+                f"Client Integration {name!r} is not configured",
+                next_actions=(f"mlxctl client configure {name}",),
+            )
+        try:
+            if operation == "client.configure" and name == "hindsight":
+                profile = validate_hindsight_profile_name(parameters.get("profile"))
+                if stored is not None and stored.profile != profile:
+                    raise ApplicationError(
+                        "integration_conflict",
+                        "Remove the owned Hindsight integration before selecting a different profile",
+                        next_actions=("mlxctl client remove hindsight",),
+                    )
+            adapter = self._adapter(operation, name, parameters, stored)
+        except ApplicationError:
+            raise
+        except (KeyError, ValueError) as error:
+            raise ApplicationError(
+                "invalid_parameter",
+                str(error),
+                next_actions=(f"mlxctl {operation.replace('.', ' ')} --help",),
             ) from error
         if operation == "client.remove":
             result = adapter.remove()
+            plain_result = _plain(result)
+            if isinstance(plain_result, Mapping) and plain_result.get("skipped_paths"):
+                return {**plain_result, "desired_state_retained": True}
             self._record(name, None)
-            return _plain(result)
-        configuration = self._configuration(name, parameters)
+            return plain_result
+        configuration = self._configuration(name, parameters, stored)
         if operation == "client.configure":
             preview = adapter.preview(configuration)
             result = adapter.apply(configuration)
-            self._record(name, configuration)
+            self._record(
+                name,
+                _client_settings(name, parameters, configuration, stored),
+            )
             return {"preview": _plain(preview), "result": _plain(result)}
         if operation == "client.test":
             profile = str(
                 parameters.get("profile")
                 or ("reflect" if name == "hindsight" else "coding")
             )
-            return {
-                "profile": profile,
-                "response": _plain(
-                    adapter.test(
-                        configuration,
-                        self._request,
-                        profile=profile,
-                    )
-                ),
-            }
+            try:
+                response = adapter.test(
+                    configuration,
+                    self._request,
+                    profile=profile,
+                )
+            except KeyError as error:
+                raise ApplicationError(
+                    "invalid_parameter",
+                    str(error),
+                    next_actions=(f"mlxctl client inspect {name}",),
+                ) from error
+            return {"profile": profile, "response": _plain(response)}
         raise ApplicationError(
             "operation_unavailable", f"{operation} is not a client operation"
         )
+
+
+def _client_settings(
+    name: str,
+    parameters: Mapping[str, object],
+    configuration: ClientConfiguration,
+    stored: ClientSettings | None,
+) -> ClientSettings:
+    service = str(parameters.get("service") or (stored.service if stored else ""))
+    if not service:
+        raise ApplicationError(
+            "invalid_parameter",
+            "client configure requires an Inference Service",
+        )
+    if name == "hindsight":
+        profile = validate_hindsight_profile_name(parameters.get("profile"))
+        provider = configuration.hindsight_provider
+        max_concurrent: int | None = configuration.max_concurrent
+    else:
+        profile = None
+        provider = configuration.codex_provider_id
+        max_concurrent = None
+    sampling = {
+        profile_name: ClientSamplingSettings(
+            temperature=profile_settings.temperature,
+            top_p=profile_settings.top_p,
+            max_tokens=profile_settings.max_tokens,
+        )
+        for profile_name, profile_settings in configuration.sampling_profiles.items()
+    }
+    return ClientSettings(
+        name=name,
+        kind=name,
+        service=service,
+        profile=profile,
+        context_window=configuration.context_window,
+        provider=provider,
+        max_concurrent=max_concurrent,
+        sampling=sampling,
+    )
 
 
 def _plain(value: object) -> object:

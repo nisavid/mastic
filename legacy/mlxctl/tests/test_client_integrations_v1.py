@@ -6,11 +6,13 @@ from pathlib import Path
 
 import tomlkit
 
+from mlxctl.application.config_schema import ClientSettings
 from mlxctl.infrastructure.client_integrations import (
     ClientConfiguration,
     ClientIntegrationConflict,
     CodexClientIntegration,
     HindsightClientIntegration,
+    LocalClientIntegrationFactory,
     SamplingProfile,
 )
 
@@ -227,6 +229,84 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 gateway_endpoint="http://localhost:8766/v1",
                 service_name="coding",
             )
+
+    def test_local_factory_selects_explicit_hindsight_profile_and_owned_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "hindsight" / "profiles"
+            ownership = root / "mlxctl" / "clients"
+            factory = LocalClientIntegrationFactory(
+                codex_config_path=root / "codex" / "config.toml",
+                hindsight_profiles_dir=profiles,
+                ownership_dir=ownership,
+            )
+
+            adapter = factory(
+                "client.configure",
+                "hindsight",
+                {"profile": "agent-memory"},
+                None,
+            )
+
+            self.assertEqual(adapter.config_path, profiles / "agent-memory.env")
+            self.assertEqual(
+                adapter.manifest_path,
+                ownership / "hindsight-agent-memory.ownership.json",
+            )
+
+            stored = ClientSettings(
+                name="hindsight",
+                kind="hindsight",
+                service="memory",
+                profile="agent-memory",
+                context_window=32768,
+                provider="openai",
+                max_concurrent=1,
+                sampling={},
+            )
+            test_adapter = factory(
+                "client.test",
+                "hindsight",
+                {"profile": "reflect"},
+                stored,
+            )
+            self.assertEqual(test_adapter.config_path, profiles / "agent-memory.env")
+
+    def test_local_factory_rejects_missing_traversal_and_symlink_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "profiles"
+            ownership = root / "ownership"
+            factory = LocalClientIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=profiles,
+                ownership_dir=ownership,
+            )
+            for profile in (None, "../default", ".hidden", "name/other"):
+                with (
+                    self.subTest(profile=profile),
+                    self.assertRaisesRegex(ValueError, "profile"),
+                ):
+                    factory(
+                        "client.configure",
+                        "hindsight",
+                        ({"profile": profile} if profile is not None else {}),
+                        None,
+                    )
+
+            profiles.mkdir()
+            target = root / "outside.env"
+            target.write_text("SECRET=yes\n", encoding="utf-8")
+            (profiles / "agent-memory.env").symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                factory(
+                    "client.configure",
+                    "hindsight",
+                    {"profile": "agent-memory"},
+                    None,
+                )
 
 
 if __name__ == "__main__":

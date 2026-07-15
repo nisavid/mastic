@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Mapping
 
@@ -42,11 +43,25 @@ class ConfiguredRuntime:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientSamplingSettings:
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ClientSettings:
     name: str
     kind: str
     service: str
-    sampling: Mapping[str, int | float | bool]
+    profile: str | None
+    context_window: int | None
+    provider: str
+    max_concurrent: int | None
+    sampling: Mapping[str, ClientSamplingSettings]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sampling", MappingProxyType(dict(self.sampling)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,28 +304,146 @@ def _clients(
     result = {}
     for name, value in raw.items():
         table = _table(value, f"client {name!r}")
-        _reject_unknown(f"client {name!r}", table, {"kind", "service", "sampling"})
+        _reject_unknown(
+            f"client {name!r}",
+            table,
+            {
+                "kind",
+                "service",
+                "profile",
+                "context_window",
+                "provider",
+                "max_concurrent",
+                "sampling",
+            },
+        )
         kind = _string(table, "kind", f"client {name!r}")
         if kind not in {"codex", "hindsight"}:
             raise ConfigSchemaError(f"unsupported client kind {kind!r}")
+        if name != kind:
+            raise ConfigSchemaError(
+                f"client {name!r} name must match its supported kind {kind!r}"
+            )
         service = _string(table, "service", f"client {name!r}")
         if service not in services:
             raise ConfigSchemaError(
                 f"client {name!r} references unknown Inference Service {service!r}"
             )
-        sampling = _table(table.get("sampling", {}), f"client {name!r} sampling")
-        if not all(
-            isinstance(key, str) and (type(value) in {int, float, bool})
-            for key, value in sampling.items()
+        profile = table.get("profile")
+        if profile is not None and not isinstance(profile, str):
+            raise ConfigSchemaError(f"client {name!r} profile must be a string")
+        if kind == "hindsight":
+            try:
+                profile = validate_hindsight_profile_name(profile)
+            except ConfigSchemaError as error:
+                raise ConfigSchemaError(
+                    f"client {name!r} requires a safe Hindsight profile name"
+                ) from error
+        elif profile is not None:
+            raise ConfigSchemaError(
+                f"client {name!r} profile is only valid for Hindsight"
+            )
+        context_window = table.get("context_window")
+        if context_window is not None and (
+            type(context_window) is not int or context_window <= 0
         ):
-            raise ConfigSchemaError(f"client {name!r} sampling values must be numeric")
+            raise ConfigSchemaError(
+                f"client {name!r} context_window must be a positive integer"
+            )
+        provider = table.get(
+            "provider", "mlxctl-local" if kind == "codex" else "openai"
+        )
+        if not isinstance(provider, str) or not provider:
+            raise ConfigSchemaError(f"client {name!r} provider must be a string")
+        max_concurrent = table.get("max_concurrent", 1 if kind == "hindsight" else None)
+        if max_concurrent is not None and (
+            type(max_concurrent) is not int or max_concurrent <= 0
+        ):
+            raise ConfigSchemaError(
+                f"client {name!r} max_concurrent must be a positive integer"
+            )
+        if kind == "codex" and max_concurrent is not None:
+            raise ConfigSchemaError(
+                f"client {name!r} max_concurrent is only valid for Hindsight"
+            )
+        sampling_raw = _table(table.get("sampling", {}), f"client {name!r} sampling")
+        sampling: dict[str, ClientSamplingSettings] = {}
+        normalized: set[str] = set()
+        for sampling_name, sampling_value in sampling_raw.items():
+            if not isinstance(sampling_name, str) or not _safe_sampling_name(
+                sampling_name
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} has an invalid sampling profile name"
+                )
+            normalized_name = (
+                re.sub(r"[^A-Za-z0-9]+", "_", sampling_name).strip("_").upper()
+            )
+            if normalized_name in normalized:
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile names collide after normalization"
+                )
+            normalized.add(normalized_name)
+            values = _table(
+                sampling_value,
+                f"client {name!r} sampling profile {sampling_name!r}",
+            )
+            _reject_unknown(
+                f"client {name!r} sampling profile {sampling_name!r}",
+                values,
+                {"temperature", "top_p", "max_tokens"},
+            )
+            temperature = values.get("temperature")
+            top_p = values.get("top_p")
+            max_tokens = values.get("max_tokens")
+            if temperature is not None and (
+                type(temperature) not in {int, float} or temperature < 0
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} temperature must be nonnegative"
+                )
+            if top_p is not None and (
+                type(top_p) not in {int, float} or not 0 < top_p <= 1
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} top_p must be in (0, 1]"
+                )
+            if max_tokens is not None and (
+                type(max_tokens) is not int or max_tokens <= 0
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} max_tokens must be positive"
+                )
+            sampling[sampling_name] = ClientSamplingSettings(
+                temperature=float(temperature) if temperature is not None else None,
+                top_p=float(top_p) if top_p is not None else None,
+                max_tokens=max_tokens,
+            )
         result[name] = ClientSettings(
             name=name,
             kind=kind,
             service=service,
-            sampling=MappingProxyType(dict(sampling)),
+            profile=profile,
+            context_window=context_window,
+            provider=provider,
+            max_concurrent=max_concurrent,
+            sampling=MappingProxyType(sampling),
         )
     return result
+
+
+def validate_hindsight_profile_name(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value
+    ):
+        raise ConfigSchemaError(
+            "Hindsight profile must be 1-64 letters, numbers, dots, dashes, or underscores and start with a letter or number"
+        )
+    return value
+
+
+def _safe_sampling_name(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value))
 
 
 def _option_value(value: object) -> bool:
