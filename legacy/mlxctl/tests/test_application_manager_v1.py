@@ -72,6 +72,23 @@ class ApplicationManagerTests(unittest.TestCase):
         self.assertEqual(result.value["plan"][0]["phase"], "plan")
         self.assertEqual(self.activator.calls, 0)
 
+    def test_preview_promotes_exact_plan_identity_for_interface_confirmation(self):
+        original = self.backend.prepare
+
+        def prepare(request):
+            prepared = original(request)
+            return PreparedOperation(
+                prepared.requires_supervisor,
+                prepared.execute,
+                ({"phase": "plan", "plan_fingerprint": "sha256:exact"},),
+            )
+
+        self.backend.prepare = prepare
+
+        result = self.dispatcher.preview(OperationRequest("setup"))
+
+        self.assertEqual(result.value["plan_fingerprint"], "sha256:exact")
+
     def test_service_start_can_visibly_activate_supervisor(self) -> None:
         self.backend.require.add("service.start")
 

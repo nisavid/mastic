@@ -87,6 +87,15 @@ class _Port:
         return self.result
 
 
+class _SetupPort(_Port):
+    def preview(self, parameters):
+        return {
+            "state": "review_required",
+            "plan_fingerprint": "sha256:exact",
+            "parameters": dict(parameters),
+        }
+
+
 class _Telemetry:
     def __init__(self, items=()):
         self.calls = []
@@ -402,17 +411,18 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(state.operations(), ())
             self.assertEqual(state.events(), ())
 
-    def test_setup_only_requests_activation_when_explicitly_selected(self) -> None:
+    def test_setup_prepares_exact_plan_and_activates_only_on_later_execution(
+        self,
+    ) -> None:
         with TemporaryDirectory() as directory:
-            backend, _ = self._backend(Path(directory))
+            setup = _SetupPort()
+            backend, _ = self._backend(Path(directory), setup=setup)
 
-            local = backend.prepare(OperationRequest("setup"))
-            activating = backend.prepare(
-                OperationRequest("setup", {"start_supervisor": True})
-            )
+            prepared = backend.prepare(OperationRequest("setup"))
 
-            self.assertFalse(local.requires_supervisor)
-            self.assertTrue(activating.requires_supervisor)
+            self.assertTrue(prepared.requires_supervisor)
+            self.assertEqual(prepared.events[0]["plan_fingerprint"], "sha256:exact")
+            self.assertEqual(setup.calls, [])
 
     def test_runtime_and_model_jobs_call_only_their_supply_ports(self) -> None:
         with TemporaryDirectory() as directory:
@@ -503,6 +513,7 @@ class LocalOperationBackendTests(unittest.TestCase):
 
     def test_mutation_categories_have_preview_and_exact_activation_policy(self) -> None:
         supervisor_backed = {
+            "setup",
             "supervisor.start",
             "supervisor.stop",
             "supervisor.restart",
@@ -527,7 +538,11 @@ class LocalOperationBackendTests(unittest.TestCase):
             "operation.resume",
         }
         with TemporaryDirectory() as directory:
-            backend, state = self._backend(Path(directory), model_supply=_ModelSupply())
+            backend, state = self._backend(
+                Path(directory),
+                model_supply=_ModelSupply(),
+                setup=_SetupPort(),
+            )
             state.put_operation({"id": "job-1", "state": "running"})
             for name, operation in build_operation_catalogue().items():
                 if operation.kind is not OperationKind.MUTATION:

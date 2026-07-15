@@ -49,16 +49,27 @@ class ApplicationManager:
             operation = self._catalogue[request.name]
             prepared = self._backend.prepare(request)
             plan = tuple(dict(event) for event in prepared.events)
+            identity = next(
+                (
+                    event["plan_fingerprint"]
+                    for event in reversed(plan)
+                    if isinstance(event.get("plan_fingerprint"), str)
+                ),
+                None,
+            )
+            value = {
+                "schema_version": 1,
+                "operation": request.name,
+                "state": "planned",
+                "confirmation_required": operation.confirmation,
+                "requires_supervisor": prepared.requires_supervisor,
+                "plan": plan,
+            }
+            if identity is not None:
+                value["plan_fingerprint"] = identity
             return OperationResult(
                 request.name,
-                {
-                    "schema_version": 1,
-                    "operation": request.name,
-                    "state": "planned",
-                    "confirmation_required": operation.confirmation,
-                    "requires_supervisor": prepared.requires_supervisor,
-                    "plan": plan,
-                },
+                value,
                 events=prepared.events,
             )
 

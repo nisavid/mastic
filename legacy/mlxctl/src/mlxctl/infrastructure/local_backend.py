@@ -136,16 +136,25 @@ class LocalOperationBackend:
         self._validate_request(request)
         if operation.kind is OperationKind.QUERY:
             return PreparedOperation(False, lambda: self._query(request))
-        preview = {
-            "schema_version": 1,
-            "operation": request.name,
-            "confirmation_required": operation.confirmation,
-            "parameters": _plain(request.parameters),
-        }
-        requires_supervisor = request.name in (
+        preview_method = (
+            getattr(self._setup, "preview", None) if request.name == "setup" else None
+        )
+        if callable(preview_method):
+            preview = {
+                "schema_version": 1,
+                "operation": request.name,
+                "confirmation_required": operation.confirmation,
+                **_plain(preview_method(request.parameters)),
+            }
+        else:
+            preview = {
+                "schema_version": 1,
+                "operation": request.name,
+                "confirmation_required": operation.confirmation,
+                "parameters": _plain(request.parameters),
+            }
+        requires_supervisor = request.name == "setup" or request.name in (
             _SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS
-        ) or (
-            request.name == "setup" and bool(request.parameters.get("start_supervisor"))
         )
         return PreparedOperation(
             requires_supervisor=requires_supervisor,

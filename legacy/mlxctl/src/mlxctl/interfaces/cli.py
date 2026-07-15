@@ -141,6 +141,9 @@ def _add_command(
                 Console().print(Pretty(_plain(plan.value), expand_all=True))
                 if not typer.confirm("Apply this exact plan?"):
                     raise typer.Abort()
+                fingerprint = plan.value.get("plan_fingerprint")
+                if isinstance(fingerprint, str):
+                    parameters["plan_fingerprint"] = fingerprint
             parameters["confirmed"] = True
         _invoke(
             dispatcher,

@@ -15,14 +15,14 @@ class _Dispatcher:
 
     def preview(self, request):
         self.previews.append(request)
-        return OperationResult(
-            request.name,
-            {
-                "state": "planned",
-                "operation": request.name,
-                "parameters": dict(request.parameters),
-            },
-        )
+        value = {
+            "state": "planned",
+            "operation": request.name,
+            "parameters": dict(request.parameters),
+        }
+        if request.name == "setup":
+            value["plan_fingerprint"] = "sha256:exact"
+        return OperationResult(request.name, value)
 
     def execute(self, request):
         self.requests.append(request)
@@ -150,6 +150,15 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("Resolved mutation plan", result.output)
         self.assertEqual(self.dispatcher.previews[-1].name, "service.remove")
         self.assertFalse(self.dispatcher.requests)
+
+    def test_setup_confirmation_carries_the_reviewed_plan_fingerprint(self) -> None:
+        result = self.runner.invoke(self.app, ["setup"], input="y\n")
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            self.dispatcher.requests[-1].parameters["plan_fingerprint"],
+            "sha256:exact",
+        )
 
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])

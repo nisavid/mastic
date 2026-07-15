@@ -22,14 +22,14 @@ class _Dispatcher:
         self.previews.append(request)
         if self.error is not None:
             raise self.error
-        return OperationResult(
-            request.name,
-            {
-                "state": "planned",
-                "operation": request.name,
-                "parameters": dict(request.parameters),
-            },
-        )
+        value = {
+            "state": "planned",
+            "operation": request.name,
+            "parameters": dict(request.parameters),
+        }
+        if request.name == "setup":
+            value["plan_fingerprint"] = "sha256:exact"
+        return OperationResult(request.name, value)
 
     def execute(self, request):
         self.requests.append(request)
@@ -187,6 +187,21 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(self.app.focused.id, "operation-submit")
+
+    async def test_setup_confirmation_carries_the_reviewed_plan_fingerprint(
+        self,
+    ) -> None:
+        async with self.app.run_test(size=(120, 45)) as pilot:
+            await self.app.open_operation("setup")
+            self.app.query_one("#operation-submit").press()
+            await pilot.pause()
+            self.app.query_one("#operation-confirm").press()
+            await pilot.pause()
+
+            self.assertEqual(
+                self.dispatcher.requests[-1].parameters["plan_fingerprint"],
+                "sha256:exact",
+            )
 
     async def test_every_catalogue_operation_can_be_executed_from_tui(self) -> None:
         async with self.app.run_test(size=(140, 55)) as pilot:

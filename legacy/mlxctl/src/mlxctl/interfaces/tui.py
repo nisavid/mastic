@@ -445,7 +445,11 @@ class MlxctlApp(App[None]):
             self.query_one("#view-body", Static).update(body)
             self.notify(error.message, title="Plan failed", severity="error")
             return
-        self.pending_parameters = parameters
+        pending = dict(parameters)
+        fingerprint = preview.value.get("plan_fingerprint")
+        if isinstance(fingerprint, str):
+            pending["plan_fingerprint"] = fingerprint
+        self.pending_parameters = pending
         resolved = json.dumps(
             dict(preview.value), indent=2, sort_keys=True, default=str
         )
