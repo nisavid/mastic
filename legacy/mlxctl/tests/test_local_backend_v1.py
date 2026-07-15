@@ -95,6 +95,17 @@ class _SetupPort(_Port):
             "parameters": dict(parameters),
         }
 
+    def preview_removal(self):
+        return {
+            "state": "review_required",
+            "plan_fingerprint": "sha256:remove-exact",
+            "steps": ({"id": "state.remove"},),
+        }
+
+    def remove(self, parameters):
+        self.calls.append(("remove", dict(parameters)))
+        return {"state": "complete", "removed": True}
+
 
 class _Telemetry:
     def __init__(self, items=()):
@@ -454,6 +465,23 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertTrue(prepared.requires_supervisor)
             self.assertEqual(prepared.events[0]["plan_fingerprint"], "sha256:exact")
             self.assertEqual(setup.calls, [])
+
+    def test_product_removal_previews_exact_plan_without_starting_supervisor(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            setup = _SetupPort()
+            backend, _ = self._backend(Path(directory), setup=setup)
+
+            prepared = backend.prepare(OperationRequest("remove"))
+
+            self.assertFalse(prepared.requires_supervisor)
+            self.assertEqual(
+                prepared.events[0]["plan_fingerprint"], "sha256:remove-exact"
+            )
+            result = prepared.execute()
+            self.assertTrue(result["resource"]["removed"])
+            self.assertEqual(setup.calls, [("remove", {})])
 
     def test_runtime_and_model_jobs_call_only_their_supply_ports(self) -> None:
         with TemporaryDirectory() as directory:
