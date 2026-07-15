@@ -503,6 +503,13 @@ class MlxctlApp(App[None]):
                         raise ValueError(
                             f"{parameter.name.replace('_', ' ').title()} must be a whole number."
                         ) from error
+                elif value is not None and parameter.value_type == "json":
+                    try:
+                        value = json.loads(value)
+                    except json.JSONDecodeError as error:
+                        raise ValueError(
+                            f"{parameter.name.replace('_', ' ').title()} must be valid JSON: {error.msg}."
+                        ) from error
             else:  # pragma: no cover - Textual form construction is exhaustive.
                 raise TypeError(f"unsupported control for {parameter.name}")
             if parameter.required and value is None:

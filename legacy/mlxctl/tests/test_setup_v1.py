@@ -31,6 +31,7 @@ def _selection(*, service: str, revision: str) -> ExactSetupSelection:
             "coding": {"temperature": 0.0, "top_p": 0.95},
             "memory-reflect": {"temperature": 0.9, "top_p": 0.95},
         },
+        service_options={"kv_config": "kv_config.json", "mtp": True},
     )
 
 
@@ -66,9 +67,83 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(preview.runtime, "optiq==0.2.18")
         self.assertEqual(preview.model_revision, "2" * 40)
         self.assertEqual(preview.service_name, "coding")
+        self.assertEqual(preview.model_alias, "coding")
+        self.assertEqual(preview.service_route, "coding")
+        self.assertEqual(preview.activation, "manual")
+        self.assertFalse(preview.pinned)
+        self.assertEqual(preview.service_options["kv_config"], "kv_config.json")
         self.assertEqual(preview.gateway_endpoint, "http://127.0.0.1:8766/v1")
         self.assertEqual(preview.clients, ("codex", "hindsight"))
         self.assertEqual(preview.sampling_profiles["coding"]["temperature"], 0.0)
+
+    def test_service_identity_and_options_are_exact_immutable_plan_inputs(self) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+        options = {
+            "kv_config": "kv_config.json",
+            "mtp": True,
+            "runtime": {"draft_tokens": 4},
+            "stop": ["</s>", 17],
+        }
+        exact = ExactSetupSelection(
+            runtime_name="optiq",
+            runtime_version="0.3.3",
+            runtime_lock_digest="sha256:" + "a" * 64,
+            model_repository="mlx-community/example",
+            model_revision="3" * 40,
+            trust_grants=(),
+            service_name="internal-worker",
+            model_alias="qwen-optiq",
+            service_route="coding",
+            activation="supervisor",
+            pinned=True,
+            service_options=options,
+            gateway_endpoint="http://127.0.0.1:8766/v1",
+        )
+
+        plan = self.planner.plan(facts, SetupRequest(selection=exact))
+        service = next(step for step in plan.steps if step.id == "service.configure")
+        gateway = next(step for step in plan.steps if step.id == "gateway.configure")
+        verify = next(step for step in plan.steps if step.id == "verify.request")
+
+        options["mtp"] = False
+        self.assertTrue(exact.service_options["mtp"])
+        self.assertEqual(exact.service_options["runtime"]["draft_tokens"], 4)
+        with self.assertRaises(TypeError):
+            exact.service_options["mtp"] = False  # type: ignore[index]
+        self.assertEqual(service.inputs["model_alias"], "qwen-optiq")
+        self.assertEqual(service.inputs["route"], "coding")
+        self.assertEqual(service.inputs["activation"], "supervisor")
+        self.assertTrue(service.inputs["pinned"])
+        self.assertEqual(gateway.inputs["route"], "coding")
+        self.assertEqual(verify.inputs["model"], "coding")
+
+    def test_service_names_activation_and_json_options_are_validated(self) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+        invalid_name = ExactSetupSelection(
+            runtime_name="optiq",
+            runtime_version="0.3.3",
+            runtime_lock_digest="sha256:" + "a" * 64,
+            model_repository="mlx-community/example",
+            model_revision="3" * 40,
+            trust_grants=(),
+            service_name="not safe",
+            gateway_endpoint="http://127.0.0.1:8766/v1",
+        )
+        with self.assertRaisesRegex(ValueError, "resource name"):
+            self.planner.plan(facts, SetupRequest(selection=invalid_name))
+
+        with self.assertRaisesRegex(ValueError, "service_options"):
+            ExactSetupSelection(
+                runtime_name="optiq",
+                runtime_version="0.3.3",
+                runtime_lock_digest="sha256:" + "a" * 64,
+                model_repository="mlx-community/example",
+                model_revision="3" * 40,
+                trust_grants=(),
+                service_name="coding",
+                gateway_endpoint="http://127.0.0.1:8766/v1",
+                service_options={"bad": {1, 2}},
+            )
 
     def test_exact_noninteractive_setup_requires_explicit_trust_and_confirmation(
         self,

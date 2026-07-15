@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from ipaddress import ip_address
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
+
+from mlxctl.domain.resources import ActivationPolicy, ResourceName
 
 
 class StepState(StrEnum):
@@ -43,11 +46,20 @@ class ExactSetupSelection:
     trust_grants: tuple[str, ...] | None
     service_name: str
     gateway_endpoint: str
+    model_alias: str | None = None
+    service_route: str | None = None
+    activation: str = "manual"
+    pinned: bool = False
+    service_options: Mapping[str, object] = field(default_factory=dict)
     clients: tuple[str, ...] = ()
     sampling_profiles: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     context_window: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "model_alias", self.model_alias or self.service_name)
+        object.__setattr__(
+            self, "service_route", self.service_route or self.service_name
+        )
         object.__setattr__(self, "clients", tuple(self.clients))
         if self.trust_grants is not None:
             object.__setattr__(self, "trust_grants", tuple(self.trust_grants))
@@ -60,6 +72,13 @@ class ExactSetupSelection:
                     for name, settings in self.sampling_profiles.items()
                 }
             ),
+        )
+        if not isinstance(self.service_options, Mapping):
+            raise ValueError("service_options must be a JSON-like object")
+        object.__setattr__(
+            self,
+            "service_options",
+            _freeze_json_mapping(self.service_options, "service_options"),
         )
 
     def validate_exact(self) -> None:
@@ -77,6 +96,14 @@ class ExactSetupSelection:
             raise ValueError(f"exact setup selection requires {', '.join(missing)}")
         if self.trust_grants is None:
             raise ValueError("exact setup selection requires explicit trust_grants")
+        for name in (self.service_name, self.model_alias, self.service_route):
+            ResourceName(name or "")
+        try:
+            ActivationPolicy(self.activation)
+        except (TypeError, ValueError) as error:
+            raise ValueError("activation must be manual or supervisor") from error
+        if type(self.pinned) is not bool:
+            raise ValueError("pinned must be boolean")
         lock_algorithm, separator, lock_value = self.runtime_lock_digest.partition(":")
         if (
             separator != ":"
@@ -173,6 +200,11 @@ class SetupPreview:
     model_revision: str
     trust_grants: tuple[str, ...]
     service_name: str
+    model_alias: str
+    service_route: str
+    activation: str
+    pinned: bool
+    service_options: Mapping[str, object]
     gateway_endpoint: str
     clients: tuple[str, ...]
     sampling_profiles: Mapping[str, Mapping[str, object]]
@@ -318,6 +350,11 @@ class SetupPlanner:
             model_revision=selection.model_revision,
             trust_grants=selection.trust_grants or (),
             service_name=selection.service_name,
+            model_alias=selection.model_alias or selection.service_name,
+            service_route=selection.service_route or selection.service_name,
+            activation=selection.activation,
+            pinned=selection.pinned,
+            service_options=selection.service_options,
             gateway_endpoint=selection.gateway_endpoint,
             clients=selection.clients,
             sampling_profiles=selection.sampling_profiles,
@@ -466,6 +503,11 @@ class SetupPlanner:
             "model_repository": selection.model_repository,
             "model_revision": selection.model_revision,
             "service": selection.service_name,
+            "model_alias": selection.model_alias,
+            "route": selection.service_route,
+            "activation": selection.activation,
+            "pinned": selection.pinned,
+            "options": selection.service_options,
         }
         return (
             (
@@ -495,6 +537,7 @@ class SetupPlanner:
                 {
                     "repository": selection.model_repository,
                     "revision": selection.model_revision,
+                    "alias": selection.model_alias,
                     "trust_grants": selection.trust_grants,
                 },
                 True,
@@ -506,6 +549,7 @@ class SetupPlanner:
                 {
                     "endpoint": selection.gateway_endpoint,
                     "service": selection.service_name,
+                    "route": selection.service_route,
                 },
                 False,
             ),
@@ -515,6 +559,7 @@ class SetupPlanner:
                 {
                     "clients": selection.clients,
                     "service": selection.service_name,
+                    "route": selection.service_route,
                     "endpoint": selection.gateway_endpoint,
                     "sampling_profiles": selection.sampling_profiles,
                 },
@@ -526,7 +571,7 @@ class SetupPlanner:
                 "Send the first real inference request through the Gateway",
                 {
                     "endpoint": selection.gateway_endpoint,
-                    "model": selection.service_name,
+                    "model": selection.service_route,
                     "request": "Respond with exactly: mlxctl ready",
                 },
                 False,
@@ -550,3 +595,31 @@ def _json_default(value: object) -> object:
     if isinstance(value, tuple):
         return list(value)
     raise TypeError(f"unsupported plan value: {type(value).__name__}")
+
+
+def _freeze_json_mapping(
+    value: Mapping[str, object], scope: str
+) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError(f"{scope} keys must be strings")
+        frozen[key] = _freeze_json_value(item, f"{scope}.{key}")
+    return MappingProxyType(frozen)
+
+
+def _freeze_json_value(value: object, scope: str) -> object:
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    if type(value) is float:
+        if math.isfinite(value):
+            return value
+        raise ValueError(f"{scope} must be finite")
+    if isinstance(value, Mapping):
+        return _freeze_json_mapping(value, scope)
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            _freeze_json_value(item, f"{scope}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise ValueError(f"{scope} contains a non-JSON value")

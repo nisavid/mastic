@@ -26,7 +26,7 @@ class Dispatcher(Protocol):
     def execute(self, request: OperationRequest) -> OperationResult: ...
 
 
-_ROOT_COMMANDS = ("setup", "status", "check", "doctor", "logs", "metrics")
+_ROOT_COMMANDS = ("setup", "remove", "status", "check", "doctor", "logs", "metrics")
 _GROUPS = (
     "supervisor",
     "gateway",
@@ -125,25 +125,24 @@ def _add_command(
             for key, value in values.items()
             if value is not None and value is not False
         }
+        parameters = _coerce_parameters(operation.parameters, parameters)
         _validate_accepted(operation.parameters, parameters)
         if operation.confirmation:
+            if not confirmed and (json_output or json_lines):
+                raise typer.Abort()
+            try:
+                plan = dispatcher.preview(OperationRequest(operation.name, parameters))
+            except ApplicationError as error:
+                _render_error(error, json_output=json_output or json_lines)
+                raise typer.Exit(1) from error
+            fingerprint = plan.value.get("plan_fingerprint")
+            if isinstance(fingerprint, str):
+                parameters["plan_fingerprint"] = fingerprint
             if not confirmed:
-                if json_output or json_lines:
-                    raise typer.Abort()
-                try:
-                    plan = dispatcher.preview(
-                        OperationRequest(operation.name, parameters)
-                    )
-                except ApplicationError as error:
-                    _render_error(error, json_output=False)
-                    raise typer.Exit(1) from error
                 Console().print("[bold]Resolved mutation plan[/bold]")
                 Console().print(Pretty(_plain(plan.value), expand_all=True))
                 if not typer.confirm("Apply this exact plan?"):
                     raise typer.Abort()
-                fingerprint = plan.value.get("plan_fingerprint")
-                if isinstance(fingerprint, str):
-                    parameters["plan_fingerprint"] = fingerprint
             parameters["confirmed"] = True
         _invoke(
             dispatcher,
@@ -263,6 +262,27 @@ def _validate_accepted(
                 f"{specification.name} must be one of: {accepted}",
                 param_hint=specification.flag or specification.name.upper(),
             )
+
+
+def _coerce_parameters(
+    specifications: tuple[Parameter, ...], values: Mapping[str, object]
+) -> dict[str, object]:
+    """Parse structured interface values according to the shared catalogue."""
+    result = dict(values)
+    for specification in specifications:
+        if specification.value_type != "json" or specification.name not in result:
+            continue
+        raw = result[specification.name]
+        if not isinstance(raw, str):
+            continue
+        try:
+            result[specification.name] = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise typer.BadParameter(
+                f"{specification.name} must be valid JSON: {error.msg}",
+                param_hint=specification.flag or specification.name.upper(),
+            ) from error
+    return result
 
 
 def _invoke(

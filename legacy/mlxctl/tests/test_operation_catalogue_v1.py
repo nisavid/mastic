@@ -15,6 +15,7 @@ class OperationCatalogueTests(unittest.TestCase):
     def test_contains_the_complete_approved_command_tree(self) -> None:
         required = {
             "setup",
+            "remove",
             "status",
             "check",
             "doctor",
@@ -49,6 +50,7 @@ class OperationCatalogueTests(unittest.TestCase):
 
     def test_local_desired_state_mutations_do_not_require_supervisor(self) -> None:
         for name in (
+            "remove",
             "gateway.configure",
             "model.trust",
             "service.create",
@@ -93,6 +95,13 @@ class OperationCatalogueTests(unittest.TestCase):
             self.catalogue["client.configure"].parameters[0].accepted,
             ("codex", "hindsight"),
         )
+        setup = {
+            parameter.name: parameter
+            for parameter in self.catalogue["setup"].parameters
+        }
+        self.assertEqual(setup["service_options"].value_type, "json")
+        self.assertEqual(setup["clients"].value_type, "json")
+        self.assertEqual(setup["activation"].accepted, ("manual", "supervisor"))
 
     def test_cli_and_tui_capabilities_are_derived_from_same_entries(self) -> None:
         for operation in self.catalogue.values():

@@ -64,6 +64,15 @@ def selection(*, revision="2" * 40, trust=()):
         model_revision=revision,
         trust_grants=trust,
         service_name="coding",
+        model_alias="qwen-optiq",
+        service_route="engineering",
+        activation="supervisor",
+        pinned=True,
+        service_options={
+            "kv_config": "kv_config.json",
+            "mtp": True,
+            "runtime": {"draft_tokens": 4},
+        },
         gateway_endpoint="http://127.0.0.1:8766/v1",
         clients=("codex", "hindsight"),
         sampling_profiles={
@@ -150,6 +159,11 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertTrue(preview["editable"])
         self.assertEqual(preview["selection"]["runtime"], "optiq==0.3.3")
         self.assertEqual(preview["selection"]["model_revision"], "2" * 40)
+        self.assertEqual(preview["selection"]["model_alias"], "qwen-optiq")
+        self.assertEqual(preview["selection"]["service_route"], "engineering")
+        self.assertEqual(preview["selection"]["activation"], "supervisor")
+        self.assertTrue(preview["selection"]["pinned"])
+        self.assertTrue(preview["selection"]["service_options"]["mtp"])
         self.assertEqual(len(preview["plan_fingerprint"]), 64)
         self.assertEqual(preview["steps"][-1]["id"], "verify.request")
         self.assertEqual(
@@ -189,20 +203,47 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(self.model.calls[0][0], "model.install")
         self.assertEqual(self.model.calls[0][1]["revision"], "2" * 40)
+        self.assertEqual(self.model.calls[0][1]["alias"], "qwen-optiq")
         service = next(
             call for call in self.config.calls if call[0] == "service.create"
         )
         self.assertEqual(service[1]["resource"], "coding")
         self.assertEqual(service[1]["runtime"], "optiq-0.3.3-tested")
-        self.assertEqual(service[1]["model_alias"], "coding")
+        self.assertEqual(service[1]["model_alias"], "qwen-optiq")
+        self.assertEqual(service[1]["route"], "engineering")
+        self.assertEqual(service[1]["activation"], "supervisor")
+        self.assertTrue(service[1]["pinned"])
+        self.assertEqual(
+            service[1]["options"],
+            {
+                "kv_config": "kv_config.json",
+                "mtp": True,
+                "runtime": {"draft_tokens": 4},
+            },
+        )
         self.assertEqual(
             self.supervisor.calls[-1], ("service.start", {"resource": "coding"})
         )
         self.assertEqual(self.verifier.calls[-1][0], "verify.request")
+        self.assertEqual(self.verifier.calls[-1][1]["model"], "engineering")
+        self.assertEqual(
+            {call[1]["service"] for call in self.clients.calls}, {"engineering"}
+        )
         self.assertEqual(len(self.evidence.items["setup"]), 8)
         verification_evidence = self.evidence.items["setup"][-1].detail
         self.assertNotIn("mlxctl ready", verification_evidence)
         self.assertIn("response_sha256", verification_evidence)
+
+    def test_editing_service_identity_or_options_changes_plan_identity(self):
+        port = self.port()
+        baseline = port.preview({})
+        route = port.preview({"service_route": "assistant"})
+        options = port.preview(
+            {"service_options": {"kv_config": "kv_config.json", "mtp": False}}
+        )
+
+        self.assertNotEqual(baseline["plan_fingerprint"], route["plan_fingerprint"])
+        self.assertNotEqual(baseline["plan_fingerprint"], options["plan_fingerprint"])
 
     def test_explicit_revision_scoped_trust_is_applied_but_never_inferred(self):
         trusted = selection(trust=("remote_code",))

@@ -62,6 +62,7 @@ class CliV1Tests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("setup", result.output)
+        self.assertIn("remove", result.output)
         self.assertIn("supervisor", result.output)
         self.assertIn("runtime", result.output)
         self.assertIn("model", result.output)
@@ -159,6 +160,28 @@ class CliV1Tests(unittest.TestCase):
             self.dispatcher.requests[-1].parameters["plan_fingerprint"],
             "sha256:exact",
         )
+
+    def test_noninteractive_setup_previews_and_parses_structured_inputs(self) -> None:
+        result = self.runner.invoke(
+            self.app,
+            [
+                "setup",
+                "--service-options",
+                '{"kv_config":"kv_config.json","mtp":true}',
+                "--clients",
+                '["codex","hindsight"]',
+                "--yes",
+                "--json",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.dispatcher.previews[-1].name, "setup")
+        parameters = self.dispatcher.requests[-1].parameters
+        self.assertEqual(parameters["service_options"]["kv_config"], "kv_config.json")
+        self.assertTrue(parameters["service_options"]["mtp"])
+        self.assertEqual(parameters["clients"], ["codex", "hindsight"])
+        self.assertEqual(parameters["plan_fingerprint"], "sha256:exact")
 
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])

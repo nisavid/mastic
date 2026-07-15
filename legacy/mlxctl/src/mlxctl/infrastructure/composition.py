@@ -51,6 +51,7 @@ def compose_application(
     runtime_catalogue: RuntimeCatalogue | None = None,
     logs=None,
     metrics=None,
+    model_intelligence=None,
 ) -> ApplicationComposition:
     """Bind concrete owners without activating any managed process."""
 
@@ -73,6 +74,7 @@ def compose_application(
         setup=setup,
         clients=clients,
         config_path=paths.config_file,
+        model_intelligence=model_intelligence,
     )
     ApplicationManager(catalogue, backend).register(dispatcher)
     return ApplicationComposition(

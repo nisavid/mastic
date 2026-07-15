@@ -82,6 +82,7 @@ _MODEL_LONG_MUTATIONS = frozenset(
 )
 _LOCAL_MUTATIONS = frozenset(
     {
+        "remove",
         "gateway.configure",
         "model.uninstall",
         "model.trust",
@@ -139,15 +140,22 @@ class LocalOperationBackend:
         self._validate_request(request)
         if operation.kind is OperationKind.QUERY:
             return PreparedOperation(False, lambda: self._query(request))
-        preview_method = (
-            getattr(self._setup, "preview", None) if request.name == "setup" else None
-        )
+        preview_method = None
+        if request.name == "setup":
+            preview_method = getattr(self._setup, "preview", None)
+        elif request.name == "remove":
+            preview_method = getattr(self._setup, "preview_removal", None)
         if callable(preview_method):
+            resolved = (
+                preview_method()
+                if request.name == "remove"
+                else preview_method(request.parameters)
+            )
             preview = {
                 "schema_version": 1,
                 "operation": request.name,
                 "confirmation_required": operation.confirmation,
-                **_plain(preview_method(request.parameters)),
+                **_plain(resolved),
             }
         else:
             preview = {
@@ -641,6 +649,13 @@ class LocalOperationBackend:
         parameters = dict(request.parameters)
         if name == "setup":
             value = self._setup.execute(name, parameters)
+        elif name == "remove":
+            remove = getattr(self._setup, "remove", None)
+            if not callable(remove):
+                raise ApplicationError(
+                    "operation_unavailable", "product removal is not configured"
+                )
+            value = remove(parameters)
         elif name in _SUPERVISOR_MUTATIONS:
             if name.startswith("service."):
                 config = self._config()

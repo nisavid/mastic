@@ -270,6 +270,11 @@ class SetupOperationPort:
                 "model_revision": preview.model_revision,
                 "trust_grants": list(preview.trust_grants),
                 "service_name": preview.service_name,
+                "model_alias": preview.model_alias,
+                "service_route": preview.service_route,
+                "activation": preview.activation,
+                "pinned": preview.pinned,
+                "service_options": _plain(preview.service_options),
                 "gateway_endpoint": preview.gateway_endpoint,
                 "clients": list(preview.clients),
                 "sampling_profiles": _plain(preview.sampling_profiles),
@@ -310,7 +315,7 @@ class SetupOperationPort:
                 {
                     "repository": selection.model_repository,
                     "revision": selection.model_revision,
-                    "alias": selection.service_name,
+                    "alias": selection.model_alias,
                     "offline": plan.offline,
                     "confirmed": True,
                 },
@@ -332,20 +337,17 @@ class SetupOperationPort:
         if step.id == "service.configure":
             runtime = _material_result(material, "runtime.install")
             _material_result(material, "model.install")
-            options: dict[str, object] = {}
-            if selection.context_window is not None:
-                options["context_window"] = selection.context_window
             return self._config.execute(
                 "service.create",
                 {
                     "service": selection.service_name,
                     "resource": selection.service_name,
-                    "model_alias": selection.service_name,
+                    "model_alias": selection.model_alias,
                     "runtime": str(runtime["installation_id"]),
-                    "route": selection.service_name,
-                    "activation": "manual",
-                    "pinned": False,
-                    "options": options,
+                    "route": selection.service_route,
+                    "activation": selection.activation,
+                    "pinned": selection.pinned,
+                    "options": _plain(selection.service_options),
                     "confirmed": True,
                 },
             )
@@ -366,7 +368,7 @@ class SetupOperationPort:
                     "client.configure",
                     {
                         "client": client,
-                        "service": selection.service_name,
+                        "service": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
                         "sampling_profiles": selection.sampling_profiles,
                         "context_window": selection.context_window,
@@ -480,6 +482,11 @@ def _selection(
                 "model_revision",
                 "trust_grants",
                 "service_name",
+                "model_alias",
+                "service_route",
+                "activation",
+                "pinned",
+                "service_options",
                 "gateway_endpoint",
                 "clients",
                 "sampling_profiles",
@@ -514,6 +521,23 @@ def _selection(
     sampling = overrides.get("sampling_profiles", baseline.sampling_profiles)
     if not isinstance(sampling, Mapping):
         raise ApplicationError("invalid_setup", "sampling_profiles must be an object")
+    service_options = overrides.get("service_options", baseline.service_options)
+    if not isinstance(service_options, Mapping):
+        raise ApplicationError("invalid_setup", "service_options must be an object")
+    service_name = str(overrides.get("service_name", baseline.service_name))
+    model_alias = overrides.get("model_alias", baseline.model_alias)
+    service_route = overrides.get("service_route", baseline.service_route)
+    if "service_name" in overrides:
+        if (
+            "model_alias" not in overrides
+            and baseline.model_alias == baseline.service_name
+        ):
+            model_alias = service_name
+        if (
+            "service_route" not in overrides
+            and baseline.service_route == baseline.service_name
+        ):
+            service_route = service_name
     return ExactSetupSelection(
         runtime_name=str(overrides.get("runtime_name", baseline.runtime_name)),
         runtime_version=str(overrides.get("runtime_version", baseline.runtime_version)),
@@ -525,7 +549,12 @@ def _selection(
         ),
         model_revision=str(overrides.get("model_revision", baseline.model_revision)),
         trust_grants=trust,
-        service_name=str(overrides.get("service_name", baseline.service_name)),
+        service_name=service_name,
+        model_alias=str(model_alias) if model_alias is not None else None,
+        service_route=str(service_route) if service_route is not None else None,
+        activation=str(overrides.get("activation", baseline.activation)),
+        pinned=overrides.get("pinned", baseline.pinned),  # type: ignore[arg-type]
+        service_options=service_options,
         gateway_endpoint=str(
             overrides.get("gateway_endpoint", baseline.gateway_endpoint)
         ),
@@ -548,6 +577,11 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
             "model_revision",
             "trust_grants",
             "service_name",
+            "model_alias",
+            "service_route",
+            "activation",
+            "pinned",
+            "service_options",
             "gateway_endpoint",
             "clients",
             "sampling_profiles",
@@ -638,6 +672,11 @@ def _selection_value(selection: ExactSetupSelection) -> Mapping[str, object]:
         "model_revision": selection.model_revision,
         "trust_grants": selection.trust_grants,
         "service_name": selection.service_name,
+        "model_alias": selection.model_alias,
+        "service_route": selection.service_route,
+        "activation": selection.activation,
+        "pinned": selection.pinned,
+        "service_options": selection.service_options,
         "gateway_endpoint": selection.gateway_endpoint,
         "clients": selection.clients,
         "sampling_profiles": selection.sampling_profiles,

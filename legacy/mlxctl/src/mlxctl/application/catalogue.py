@@ -50,7 +50,7 @@ class Operation:
 
 
 _TREE: Mapping[str, tuple[str, ...]] = {
-    "": ("setup", "status", "check", "doctor", "logs", "metrics", "tui"),
+    "": ("setup", "remove", "status", "check", "doctor", "logs", "metrics", "tui"),
     "supervisor": ("status", "start", "stop", "restart", "logs", "inspect"),
     "gateway": (
         "status",
@@ -175,6 +175,7 @@ _NO_CONFIRM = frozenset(
 
 _LOCAL_MUTATIONS = frozenset(
     {
+        "remove",
         "gateway.configure",
         "model.trust",
         "service.create",
@@ -286,12 +287,70 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "Use only installed definitions, local evidence, and cached bytes.",
                 value_type="boolean",
             ),
+            _option("runtime_name", "Runtime Definition name."),
+            _option("runtime_version", "Exact runtime package version."),
+            _option(
+                "runtime_lock_digest",
+                "Exact sha256 lock digest for the Runtime Installation.",
+            ),
+            _option("model_repository", "Hugging Face model repository ID."),
+            _option("model_revision", "Exact model commit SHA."),
+            _option(
+                "trust_grants",
+                "JSON array of revision-scoped risks explicitly accepted.",
+                value_type="json",
+            ),
+            _option("service_name", "Internal Inference Service name."),
+            _option(
+                "model_alias",
+                "Stable Model Alias; defaults to the service name.",
+            ),
+            _option(
+                "service_route",
+                "Public Gateway model route; defaults to the service name.",
+            ),
+            _option(
+                "activation",
+                "Service activation policy.",
+                accepted=("manual", "supervisor"),
+            ),
+            _option(
+                "pinned",
+                "Never auto-stop this service under memory pressure.",
+                value_type="boolean",
+            ),
+            _option(
+                "service_options",
+                "JSON object of runtime-specific launch options, such as OptiQ KV config and MTP.",
+                value_type="json",
+            ),
+            _option(
+                "gateway_endpoint",
+                "Stable literal loopback Gateway URL, including /v1.",
+            ),
+            _option(
+                "clients",
+                "JSON array of Client Integrations to configure.",
+                value_type="json",
+            ),
+            _option(
+                "sampling_profiles",
+                "JSON object of per-client or per-operation sampling profiles.",
+                value_type="json",
+            ),
+            _option(
+                "context_window",
+                "Client and inference context window.",
+                value_type="integer",
+            ),
             _option(
                 "yes",
                 "Apply an exact noninteractive plan after all required values are supplied.",
                 value_type="boolean",
             ),
         )
+    if name == "remove":
+        return ()
     if name == "model.inspect":
         return (
             _argument(
