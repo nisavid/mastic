@@ -91,6 +91,8 @@ class OptiqAdapter:
             str(upstream.port),
         ]
         _append_mlx_lm_options(argv, definition.options)
+        if definition.options.get("mtp") is True:
+            argv.append("--mtp")
         for key in ("kv_bits", "kv_group_size", "quantized_kv_start", "kv_config"):
             if key in definition.options:
                 _append_value(argv, key, definition.options[key])

@@ -171,7 +171,9 @@ values and an `[servers.NAME.options]` table. `mlx_lm` accepts
 `draft_model`, `prompt_cache_size`, `prompt_concurrency`, `pipeline`, `temp`,
 `top_p`, and `top_k`. `optiq` accepts those options plus `adapter`,
 `allow_model_switch`, `anthropic`, `idle_timeout`, `kv_bits`, `kv_config`,
-`kv_group_size`, `max_context`, and `quantized_kv_start`.
+`kv_group_size`, `max_context`, `mtp`, and `quantized_kv_start`. When `mtp` is
+`true`, mlxctl passes `--mtp` to OptiQ; when it is `false` or omitted, OptiQ's
+default MTP-disabled behavior applies.
 
 Aliases must match `[A-Za-z0-9][A-Za-z0-9._-]*`. Hosts must be `localhost` or
 a literal loopback IP address, client host/port pairs must be unique, and

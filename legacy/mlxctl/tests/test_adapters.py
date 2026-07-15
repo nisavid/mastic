@@ -66,6 +66,7 @@ port = 9090
 [servers.code.options]
 prompt_concurrency = 2
 top_k = 40
+mtp = true
 kv_bits = 4
 kv_group_size = 64
 quantized_kv_start = 128
@@ -99,6 +100,7 @@ max_context = 8192
                 "2",
                 "--top-k",
                 "40",
+                "--mtp",
                 "--kv-bits",
                 "4",
                 "--kv-group-size",
@@ -119,6 +121,46 @@ max_context = 8192
                 "8192",
             ),
         )
+
+    def test_omits_optiq_mtp_flag_when_disabled_or_unspecified(self) -> None:
+        option_tables = {
+            "disabled": "[servers.code.options]\nmtp = false\n",
+            "unspecified": "",
+        }
+        for case, option_table in option_tables.items():
+            with self.subTest(case=case):
+                config = self._load(
+                    f"""
+schema_version = 1
+[models.code]
+reference = "/models/code"
+[servers.code]
+type = "optiq"
+model = "code"
+port = 9090
+{option_table}
+"""
+                )
+
+                prepared = AdapterRegistry().prepare(
+                    config.servers["code"],
+                    config.models["code"],
+                    Endpoint("127.0.0.10", 49153),
+                )
+
+                self.assertEqual(
+                    prepared.argv,
+                    (
+                        "optiq",
+                        "serve",
+                        "--model",
+                        "/models/code",
+                        "--host",
+                        "127.0.0.10",
+                        "--port",
+                        "49153",
+                    ),
+                )
 
     def test_rejects_a_non_loopback_endpoint(self) -> None:
         with self.assertRaisesRegex(

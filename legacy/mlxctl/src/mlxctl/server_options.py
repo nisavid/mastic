@@ -23,6 +23,7 @@ OPTIQ_OPTION_TYPES = {
     "kv_config": "string",
     "kv_group_size": "integer",
     "max_context": "integer",
+    "mtp": "boolean",
     "quantized_kv_start": "integer",
 }
 

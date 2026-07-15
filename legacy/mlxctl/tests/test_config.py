@@ -123,6 +123,23 @@ adapter = ["/models/a"]
         with self.assertRaises(AttributeError):
             adapters.append("/models/b")  # type: ignore[attr-defined]
 
+    def test_loads_boolean_optiq_mtp_option(self) -> None:
+        config = self._load(
+            """
+schema_version = 1
+[models.code]
+reference = "repo/code"
+[servers.code]
+type = "optiq"
+model = "code"
+port = 8080
+[servers.code.options]
+mtp = true
+"""
+        )
+
+        self.assertIs(config.servers["code"].options["mtp"], True)
+
     def test_rejects_non_positive_metrics_retention(self) -> None:
         with self.assertRaisesRegex(
             ConfigError, "metrics retention_days must be a positive integer"
