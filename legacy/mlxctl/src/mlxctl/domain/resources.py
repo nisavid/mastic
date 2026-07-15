@@ -1,0 +1,132 @@
+"""Desired, physical, and observed local-inference resources."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Mapping
+
+
+_RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_INSTALLATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]*\Z")
+_IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}\Z")
+
+
+class ResourceName(str):
+    """A stable user-facing resource identity safe for paths and routing."""
+
+    def __new__(cls, value: str) -> ResourceName:
+        if not isinstance(value, str) or _RESOURCE_NAME.fullmatch(value) is None:
+            raise ValueError("resource name must match [A-Za-z0-9][A-Za-z0-9._-]*")
+        return str.__new__(cls, value)
+
+
+class RuntimeFamily(StrEnum):
+    MLX_LM = "mlx-lm"
+    MLX_VLM = "mlx-vlm"
+    OPTIQ = "optiq"
+
+
+class ActivationPolicy(StrEnum):
+    MANUAL = "manual"
+    SUPERVISOR = "supervisor"
+
+
+class ServiceRunState(StrEnum):
+    STARTING = "starting"
+    READY = "ready"
+    UNHEALTHY = "unhealthy"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeInstallation:
+    installation_id: str
+    family: RuntimeFamily
+    version: str
+    provenance: str
+    capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if _INSTALLATION_ID.fullmatch(self.installation_id) is None:
+            raise ValueError("runtime installation ID contains unsafe characters")
+        if not self.version or not self.provenance:
+            raise ValueError("runtime version and provenance are required")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRevision:
+    repository: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        if not self.repository or self.repository.startswith(("/", ".")):
+            raise ValueError("model repository must be a repository ID")
+        if _IMMUTABLE_REVISION.fullmatch(self.revision) is None:
+            raise ValueError("model revision must be an immutable commit SHA")
+
+
+@dataclass(frozen=True, slots=True)
+class CachedRevision:
+    revision: ModelRevision
+    complete: bool
+    size_bytes: int | None = None
+    cache_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.size_bytes is not None and self.size_bytes < 0:
+            raise ValueError("cached size must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInstallation:
+    name: str
+    revision: ModelRevision
+
+    def __post_init__(self) -> None:
+        ResourceName(self.name)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelAlias:
+    name: ResourceName
+    installation_name: str
+
+    def __post_init__(self) -> None:
+        ResourceName(self.installation_name)
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceService:
+    name: ResourceName
+    model_alias: ResourceName
+    runtime_installation: str
+    route: ResourceName
+    activation: ActivationPolicy = ActivationPolicy.MANUAL
+    pinned: bool = False
+    options: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if _INSTALLATION_ID.fullmatch(self.runtime_installation) is None:
+            raise ValueError("runtime installation ID contains unsafe characters")
+        object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceRun:
+    run_id: str
+    service_name: ResourceName
+    state: ServiceRunState
+    upstream_port: int | None = None
+    pid: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.run_id:
+            raise ValueError("run ID is required")
+        if self.upstream_port is not None and not 1 <= self.upstream_port <= 65535:
+            raise ValueError("upstream port must be in 1..65535")
