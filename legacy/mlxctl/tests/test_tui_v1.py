@@ -49,6 +49,7 @@ class _Snapshots:
                     state="blocked",
                     model="qwen-optiq",
                     runtime="optiq@0.2.15",
+                    route="coding",
                     pinned=True,
                     detail="--max-context is not advertised",
                 ),
@@ -88,6 +89,15 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#nav-topology")
             topology = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Model → Runtime → Service → Gateway", topology)
+            self.assertIn("qwen-optiq → optiq@0.2.15", topology)
+
+    async def test_resource_views_query_live_read_only_operations(self) -> None:
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await pilot.click("#nav-models")
+
+            self.assertEqual(self.dispatcher.requests[-1].name, "model.list")
+            body = str(self.app.query_one("#view-body", Static).content)
+            self.assertIn('"state": "complete"', body)
 
     async def test_first_run_is_intent_first_and_shows_exact_plan_before_change(
         self,
@@ -237,13 +247,15 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("inspect the runtime probe", failure)
             self.assertIn("install the tested runtime", failure)
 
-    async def test_read_only_browsing_never_dispatches_an_operation(self) -> None:
+    async def test_read_only_browsing_dispatches_only_safe_queries(self) -> None:
         async with self.app.run_test(size=(120, 45)) as pilot:
             await pilot.click("#nav-models")
             await pilot.click("#nav-topology")
             await self.app.open_operation("model.search")
 
-            self.assertEqual(self.dispatcher.requests, [])
+            self.assertEqual(
+                [request.name for request in self.dispatcher.requests], ["model.list"]
+            )
 
     async def test_cancelled_plan_makes_no_change_and_preserves_inputs(self) -> None:
         async with self.app.run_test(size=(100, 40)) as pilot:

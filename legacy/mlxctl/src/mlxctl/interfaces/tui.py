@@ -26,6 +26,7 @@ class ServiceSnapshot:
     state: str
     model: str
     runtime: str
+    route: str | None = None
     pinned: bool = False
     detail: str | None = None
 
@@ -551,10 +552,16 @@ class MlxctlApp(App[None]):
                 or "No services. Create one through guided setup or the service builder.",
             )
         if name == "topology":
+            topology = "\n".join(
+                f"{item.model} → {item.runtime} → {item.name} "
+                f"[{item.state.upper()}] → route:{item.route or item.name}"
+                for item in snapshot.services
+            )
             return (
                 "Resource topology",
                 "Model → Runtime → Service → Gateway\n\n"
-                "qwen-optiq → optiq@0.2.15 → coding [BLOCKED] → route:coding\n\n"
+                + (topology or "No configured topology yet.")
+                + "\n\n"
                 "Desired state and the latest Service Run stay separate. Open a "
                 "node for evidence, configuration, runs, logs, metrics, and repair.",
             )
@@ -579,33 +586,29 @@ class MlxctlApp(App[None]):
                 "color. Narrow terminals collapse panes without removing operations. "
                 "Read-only screens never start the Supervisor.",
             )
-        generic = {
-            "runtimes": (
-                "Runtime Installations",
-                "Known: mlx-lm · MLX-VLM · OptiQ\n\nList tested definitions, exact installed versions, provenance, capabilities, references, updates, rollback, and repair.",
-            ),
-            "models": (
-                "Models",
-                "Search mlx-community or all compatible candidates. Keep exact Model Revisions, managed installations, aliases, and shared cache bytes distinct.",
-            ),
-            "operations": (
-                "Durable operations",
-                "No active operations. Install, update, verify, repair, move, and prune jobs appear here with phase, progress, resume, cancel, and causal failure details.",
-            ),
-            "clients": (
-                "Client Integrations",
-                "Configure, preview, test, and remove Gateway integrations for Codex and Hindsight without disturbing unrelated settings.",
-            ),
-            "configuration": (
-                "Configuration",
-                "Edit typed desired state, validate it, preview semantic diffs, inspect history, import or export, and restore a backup without leaving mlxctl.",
-            ),
-            "doctor": (
-                "Doctor",
-                "One blocking issue: optiq@0.2.15 does not advertise --max-context. Install a tested compatible runtime side by side, probe it, dry-run coding, then switch atomically.",
-            ),
+        query_views = {
+            "runtimes": ("Runtime Installations", "runtime.list"),
+            "models": ("Models", "model.list"),
+            "operations": ("Durable operations", "operation.list"),
+            "clients": ("Client Integrations", "client.list"),
+            "configuration": ("Configuration", "config.show"),
+            "doctor": ("Doctor", "doctor"),
         }
-        return generic.get(name, (name.replace("-", " ").title(), "No data."))
+        if name in query_views:
+            title, operation = query_views[name]
+            try:
+                result = self.dispatcher.execute(OperationRequest(operation))
+                body = json.dumps(
+                    dict(result.value), indent=2, sort_keys=True, default=str
+                )
+            except ApplicationError as error:
+                body = f"{error.code}\n\n{error.message}"
+                if error.next_actions:
+                    body += "\n\nNext actions\n" + "\n".join(
+                        f"  → {action}" for action in error.next_actions
+                    )
+            return title, body
+        return name.replace("-", " ").title(), "No data."
 
     @staticmethod
     def _service_rows(snapshot: TuiSnapshot) -> str:

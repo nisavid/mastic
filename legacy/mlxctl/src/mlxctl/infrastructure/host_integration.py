@@ -117,6 +117,7 @@ class LocalSnapshotProvider:
             state=str(run.get("state", "stopped")),
             model=str(desired.get("model_alias", "unconfigured")),
             runtime=str(desired.get("runtime_installation", "unconfigured")),
+            route=str(desired.get("route")) if desired.get("route") else None,
             pinned=bool(desired.get("pinned", False)),
             detail=str(run["error"]) if run.get("error") else None,
         )
