@@ -4,8 +4,13 @@ from types import SimpleNamespace
 from mlxctl.application.dispatch import ApplicationError
 from mlxctl.infrastructure.control_client import SupervisorUnavailableError
 from mlxctl.infrastructure.operation_ports import (
+    ClientOperationPort,
     RemoteOperationPort,
     SupervisorOperationPort,
+)
+from mlxctl.infrastructure.client_integrations import (
+    ClientConfiguration,
+    SamplingProfile,
 )
 
 
@@ -51,6 +56,31 @@ class FakeSupervisor:
         self.calls.append(("start_service", resource))
         return {"service": resource, "state": "ready"}
 
+
+class FakeClientAdapter:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def preview(self, configuration):
+        self.calls.append(("preview", configuration.service_name))
+        return ("model",)
+
+    def apply(self, configuration):
+        self.calls.append(("apply", configuration.service_name))
+        return {"changed": True}
+
+    def remove(self):
+        self.calls.append(("remove",))
+        return {"changed": True}
+
+    def test(self, configuration, request, *, profile):
+        self.calls.append(("test", profile))
+        return request(
+            configuration.gateway_endpoint,
+            configuration.service_name,
+            configuration.sampling_profiles[profile].values(),
+        )
+
     def stop_service(self, resource):
         self.calls.append(("stop_service", resource))
         return {"service": resource, "state": "stopped"}
@@ -94,6 +124,41 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(started, {"service": "coding", "state": "ready"})
         self.assertEqual(stopped["state"], "stopped")
         self.assertEqual(supervisor.calls, [("start_service", "coding"), ("stop",)])
+
+    def test_client_port_uses_one_preview_apply_test_remove_contract(self) -> None:
+        adapter = FakeClientAdapter()
+        records = []
+
+        def configuration(name, parameters):
+            return ClientConfiguration(
+                "http://127.0.0.1:8766/v1",
+                str(parameters.get("service", "coding")),
+                sampling_profiles={
+                    "coding": SamplingProfile(temperature=0.0),
+                    "reflect": SamplingProfile(temperature=0.9),
+                },
+            )
+
+        port = ClientOperationPort(
+            {"codex": adapter},
+            configuration,
+            request=lambda endpoint, model, sampling: {"model": model, **sampling},
+            record=lambda name, value: records.append((name, value)),
+        )
+
+        configured = port.execute(
+            "client.configure", {"client": "codex", "service": "coding"}
+        )
+        tested = port.execute("client.test", {"resource": "codex"})
+        removed = port.execute("client.remove", {"resource": "codex"})
+
+        self.assertTrue(configured["result"]["changed"])
+        self.assertEqual(tested["response"]["model"], "coding")
+        self.assertTrue(removed["changed"])
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["preview", "apply", "test", "remove"]
+        )
+        self.assertEqual(records[-1], ("codex", None))
 
 
 if __name__ == "__main__":
