@@ -97,7 +97,20 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(self.dispatcher.requests[-1].name, "model.list")
             body = str(self.app.query_one("#view-body", Static).content)
-            self.assertIn('"state": "complete"', body)
+            self.assertIn("State", body)
+            self.assertIn("complete", body)
+
+    async def test_context_actions_and_command_catalogue_are_discoverable(self) -> None:
+        async with self.app.run_test(size=(140, 45)) as pilot:
+            await pilot.click("#find-model")
+            self.assertEqual(self.app.selected_operation, "model.search")
+
+            self.app.show_view("commands")
+            body = str(self.app.query_one("#view-body", Static).content)
+            self.assertIn("Every CLI operation is available here", body)
+            self.assertIn("model.search", body)
+            self.assertIn("service.stop", body)
+            self.assertIn("supervisor.stop", body)
 
     async def test_first_run_is_intent_first_and_shows_exact_plan_before_change(
         self,
@@ -246,7 +259,8 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.app.query_one("#operation-submit").press()
             await pilot.pause()
             success = str(self.app.query_one("#view-body", Static).content)
-            self.assertIn('"state": "ready"', success)
+            self.assertIn("State", success)
+            self.assertIn("ready", success)
             self.assertIn("Next actions", success)
             self.assertIn("mlxctl service start coding", success)
 

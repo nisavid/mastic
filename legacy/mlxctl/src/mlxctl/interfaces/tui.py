@@ -83,16 +83,16 @@ class MlxctlApp(App[None]):
     #topbar {
         height: 3;
         padding: 1 2;
-        background: #0c1210;
-        border-bottom: solid #2b3733;
-        color: #89e2a2;
+        background: #101916;
+        border-bottom: tall #2f5144;
+        color: #a6f4c5;
         text-style: bold;
     }
     #machine-state {
         height: 2;
         padding: 0 2;
-        background: #0c1210;
-        color: #8a9691;
+        background: #101916;
+        color: #b6c5bf;
     }
     #shell { height: 1fr; }
     #resource-nav {
@@ -122,18 +122,18 @@ class MlxctlApp(App[None]):
     }
     #view-title {
         height: 3;
-        color: #e7ecea;
+        color: #a6f4c5;
         text-style: bold;
     }
     #view-body {
         width: 100%;
         min-height: 12;
         padding: 1;
-        background: #111715;
-        border: solid #2b3733;
+        background: #111a17;
+        border: round #2f5144;
     }
     #workspace-actions {
-        height: 4;
+        height: 7;
         margin-top: 1;
     }
     #workspace-actions Button {
@@ -173,7 +173,7 @@ class MlxctlApp(App[None]):
         margin-right: 1;
     }
     #first-run {
-        background: #e7ecea;
+        background: #a6f4c5;
         color: #090d0c;
         text-style: bold;
     }
@@ -206,7 +206,10 @@ class MlxctlApp(App[None]):
         return tuple(self.catalogue)
 
     def compose(self) -> ComposeResult:
-        yield Static("◈  mlxctl", id="topbar")
+        yield Static(
+            "◈  mlxctl   LOCAL INFERENCE ON THIS MAC                  Ctrl+P  anything",
+            id="topbar",
+        )
         yield Static("", id="machine-state")
         with Horizontal(id="shell"):
             with Vertical(id="resource-nav"):
@@ -215,6 +218,7 @@ class MlxctlApp(App[None]):
                 yield Button("▱  Models", id="nav-models")
                 yield Button("◆  Services", id="nav-services")
                 yield Button("↻  Operations", id="nav-operations")
+                yield Button("⌘  Commands", id="nav-commands")
                 yield Button("⇄  Clients", id="nav-clients")
                 yield Button("⌁  Topology", id="nav-topology")
                 yield Button("⚙  Configuration", id="nav-configuration")
@@ -224,8 +228,10 @@ class MlxctlApp(App[None]):
                 yield Static("", id="view-body")
                 yield Vertical(id="operation-form")
                 with Horizontal(id="workspace-actions"):
-                    yield Button("Create service", id="first-run")
-                    yield Button("Open topology", id="open-topology")
+                    yield Button("Guided setup", id="first-run")
+                    yield Button("Find a model", id="find-model")
+                    yield Button("Add runtime", id="add-runtime")
+                    yield Button("New service", id="new-service")
                     yield Button("Refresh", id="refresh")
             yield Static("", id="inspector")
         yield Footer()
@@ -243,8 +249,12 @@ class MlxctlApp(App[None]):
             self.show_view(identity.removeprefix("nav-"))
         elif identity == "first-run":
             await self.open_operation("setup")
-        elif identity == "open-topology":
-            self.show_view("topology")
+        elif identity == "find-model":
+            await self.open_operation("model.search")
+        elif identity == "add-runtime":
+            await self.open_operation("runtime.install")
+        elif identity == "new-service":
+            await self.open_operation("service.create")
         elif identity == "refresh":
             self.show_view(self.current_view)
         elif identity == "operation-submit":
@@ -373,7 +383,7 @@ class MlxctlApp(App[None]):
             + (" · Supervisor started" if result.supervisor_started else ""),
             title="mlxctl",
         )
-        rendered = json.dumps(dict(result.value), indent=2, sort_keys=True, default=str)
+        rendered = self._render_result(result.value)
         events = ""
         if result.events:
             events = "\n\nEvents\n" + "\n".join(
@@ -394,7 +404,7 @@ class MlxctlApp(App[None]):
             f"{name.replace('.', '  ›  ')} · complete"
         )
         self.query_one("#view-body", Static).update(
-            f"Result\n{rendered}{events}\n\nNext actions\n{next_text}"
+            f"Result\n\n{rendered}{events}\n\nNext actions\n{next_text}"
         )
         self.pending_parameters = None
         self.query_one("#operation-confirm", Button).styles.display = "none"
@@ -410,8 +420,9 @@ class MlxctlApp(App[None]):
         snapshot = self.snapshots.snapshot()
         self.current_view = name
         self.query_one("#machine-state", Static).update(
-            f"● Supervisor {snapshot.supervisor}   ● Gateway {snapshot.gateway}   "
-            f"Pressure {snapshot.pressure}   Operations {snapshot.active_operations}"
+            f"{self._state_mark(snapshot.supervisor)} Supervisor {snapshot.supervisor}   "
+            f"{self._state_mark(snapshot.gateway)} Gateway {snapshot.gateway}   "
+            f"◆ Pressure {snapshot.pressure}   ↻ {snapshot.active_operations} active"
         )
         title, body = self._content(name, snapshot)
         self.query_one("#view-title", Static).update(title)
@@ -597,6 +608,25 @@ class MlxctlApp(App[None]):
                 "color. Narrow terminals collapse panes without removing operations. "
                 "Read-only screens never start the Supervisor.",
             )
+        if name == "commands":
+            groups: dict[str, list[Operation]] = {}
+            for operation in self.catalogue.values():
+                family = operation.name.partition(".")[0]
+                groups.setdefault(family, []).append(operation)
+            body = []
+            for family, operations in groups.items():
+                body.append(family.upper())
+                body.extend(
+                    f"  {operation.name:<24} {operation.summary}"
+                    for operation in operations
+                )
+                body.append("")
+            return (
+                "Command catalogue",
+                "Every CLI operation is available here. Press Ctrl+P and type any "
+                "command or intent to open its complete workbench.\n\n"
+                + "\n".join(body).rstrip(),
+            )
         query_views = {
             "runtimes": ("Runtime Installations", "runtime.list"),
             "models": ("Models", "model.list"),
@@ -609,9 +639,7 @@ class MlxctlApp(App[None]):
             title, operation = query_views[name]
             try:
                 result = self.dispatcher.execute(OperationRequest(operation))
-                body = json.dumps(
-                    dict(result.value), indent=2, sort_keys=True, default=str
-                )
+                body = self._render_result(result.value)
             except ApplicationError as error:
                 body = f"{error.code}\n\n{error.message}"
                 if error.next_actions:
@@ -641,5 +669,68 @@ class MlxctlApp(App[None]):
         return (
             f"SELECTED SERVICE\n\n{service.name}\n{service.state.upper()}\n\n"
             f"Model\n{service.model}\n\nRuntime\n{service.runtime}\n\n"
+            f"Gateway route\n{service.route or service.name}\n\n"
             f"Pressure policy\n{'📌 Pinned · never auto-stopped' if service.pinned else 'LRU idle eviction allowed'}"
         )
+
+    @classmethod
+    def _render_result(cls, value: Mapping[str, object]) -> str:
+        """Render operation results for people while retaining all public fields."""
+
+        rows = []
+        priority = ("state", "healthy", "pressure", "endpoint", "resource")
+        rendered = set()
+        for key in priority:
+            if key in value:
+                rows.extend(cls._render_field(key, value[key]))
+                rendered.add(key)
+        for key, item in value.items():
+            if key in rendered or key in {
+                "schema_version",
+                "operation",
+                "next_actions",
+            }:
+                continue
+            rows.extend(cls._render_field(key, item))
+        evidence = value.get("evidence")
+        if evidence:
+            rows.extend(("", "Evidence", *[f"  ✓ {item}" for item in evidence]))
+        return "\n".join(rows) if rows else "No information returned."
+
+    @classmethod
+    def _render_field(cls, key: str, value: object, indent: int = 0) -> list[str]:
+        label = key.replace("_", " ").title()
+        pad = "  " * indent
+        if isinstance(value, Mapping):
+            rows = [f"{pad}{label}"]
+            for child, item in value.items():
+                rows.extend(cls._render_field(str(child), item, indent + 1))
+            return rows
+        if isinstance(value, (tuple, list)):
+            rows = [f"{pad}{label}  {len(value)}"]
+            for item in value:
+                if isinstance(item, Mapping):
+                    rows.append(f"{pad}  ─")
+                    for child, child_value in item.items():
+                        rows.extend(
+                            cls._render_field(str(child), child_value, indent + 2)
+                        )
+                else:
+                    rows.append(f"{pad}  • {item}")
+            return rows
+        if isinstance(value, bool):
+            shown = "yes" if value else "no"
+        elif value is None:
+            shown = "not observed"
+        else:
+            shown = str(value)
+        return [f"{pad}{label:<20} {shown}"]
+
+    @staticmethod
+    def _state_mark(state: str) -> str:
+        normalized = state.casefold()
+        if any(word in normalized for word in ("failed", "blocked", "unhealthy")):
+            return "✕"
+        if any(word in normalized for word in ("ready", "running", "ok")):
+            return "●"
+        return "○"
