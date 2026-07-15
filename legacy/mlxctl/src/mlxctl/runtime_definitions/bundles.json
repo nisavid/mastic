@@ -1,0 +1,31 @@
+{
+  "bundles": [
+    {
+      "bundle_id": "mlx_lm-0.31.3-py313-macos-arm64",
+      "runtime": "mlx_lm",
+      "version": "0.31.3",
+      "python": "3.13",
+      "platform": "macos-arm64",
+      "lock": "mlx_lm.lock",
+      "lock_sha256": "c7d11e5782d1c48cb55ed3499d93b0b956d9d220b3394ae3003bc0d5e9414949"
+    },
+    {
+      "bundle_id": "mlx_vlm-0.6.4-py313-macos-arm64",
+      "runtime": "mlx_vlm",
+      "version": "0.6.4",
+      "python": "3.13",
+      "platform": "macos-arm64",
+      "lock": "mlx_vlm.lock",
+      "lock_sha256": "b8140beefd3cdf3094f657b5e6419fa6ff63ccfe04b643f14d833eaf5e0dc6c4"
+    },
+    {
+      "bundle_id": "optiq-0.3.3-py313-macos-arm64",
+      "runtime": "optiq",
+      "version": "0.3.3",
+      "python": "3.13",
+      "platform": "macos-arm64",
+      "lock": "optiq.lock",
+      "lock_sha256": "88806baea2bac63ade9e90ee928affe408cd15119e6ae4a9707fd85bbf3789ae"
+    }
+  ]
+}

@@ -52,7 +52,17 @@ class RuntimeCatalogueTests(unittest.TestCase):
             [definition.key for definition in catalogue.definitions],
             ["mlx_lm", "mlx_vlm", "optiq"],
         )
-        self.assertEqual(catalogue.tested_bundles, ())
+        self.assertEqual(
+            [bundle.runtime for bundle in catalogue.tested_bundles],
+            ["mlx_lm", "mlx_vlm", "optiq"],
+        )
+        self.assertTrue(
+            all(
+                sha256(Path(bundle.lock_path).read_bytes()).hexdigest()
+                == bundle.lock_sha256
+                for bundle in catalogue.tested_bundles
+            )
+        )
         self.assertEqual(catalogue.definition("optiq").launcher, ("optiq", "serve"))
 
     def test_capabilities_are_normalized_from_the_exact_installation_flags(

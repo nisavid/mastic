@@ -110,10 +110,12 @@ class RuntimeCatalogue:
 
     @classmethod
     def load_builtin(
-        cls, *, tested_bundles: tuple[TestedRuntimeBundle, ...] = ()
+        cls, *, tested_bundles: tuple[TestedRuntimeBundle, ...] | None = None
     ) -> RuntimeCatalogue:
-        resource = files("mlxctl.runtime_definitions").joinpath("definitions.json")
-        payload = json.loads(resource.read_text(encoding="utf-8"))
+        resources = files("mlxctl.runtime_definitions")
+        payload = json.loads(
+            resources.joinpath("definitions.json").read_text(encoding="utf-8")
+        )
         definitions = []
         for item in payload["runtimes"]:
             options = {
@@ -133,6 +135,22 @@ class RuntimeCatalogue:
                     launcher=tuple(item["launcher"]),
                     options=MappingProxyType(options),
                 )
+            )
+        if tested_bundles is None:
+            bundle_payload = json.loads(
+                resources.joinpath("bundles.json").read_text(encoding="utf-8")
+            )
+            tested_bundles = tuple(
+                TestedRuntimeBundle(
+                    bundle_id=item["bundle_id"],
+                    runtime=item["runtime"],
+                    version=item["version"],
+                    python=item["python"],
+                    platform=item["platform"],
+                    lock_path=str(resources.joinpath("locks").joinpath(item["lock"])),
+                    lock_sha256=item["lock_sha256"],
+                )
+                for item in bundle_payload["bundles"]
             )
         return cls(tuple(definitions), tested_bundles)
 
