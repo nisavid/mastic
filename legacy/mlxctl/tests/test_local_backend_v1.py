@@ -1,0 +1,479 @@
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from mlxctl.application.catalogue import OperationKind, build_operation_catalogue
+from mlxctl.application.config_schema import validate_config
+from mlxctl.application.dispatch import ApplicationError, OperationRequest
+from mlxctl.infrastructure.config_store import ConfigStore
+from mlxctl.infrastructure.local_backend import LocalOperationBackend
+from mlxctl.infrastructure.model_supply import (
+    CacheInventory,
+    CachedRevision,
+    CatalogCandidate,
+    ModelSupply,
+    VerificationResult,
+)
+from mlxctl.infrastructure.runtime_supply import RuntimeCatalogue
+from mlxctl.infrastructure.state_store import OperationalStateStore
+
+
+_EMPTY_CONFIG = """\
+schema_version = 1
+
+[gateway]
+host = "127.0.0.1"
+port = 8766
+"""
+
+_CONFIG = """\
+schema_version = 1
+
+[gateway]
+host = "127.0.0.1"
+port = 8766
+
+[runtimes."optiq-0.2.18"]
+definition = "optiq"
+version = "0.2.18"
+provenance = "tested"
+
+[models.qwen]
+repository = "mlx-community/Qwen-OptiQ"
+revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[aliases.coding]
+installation = "qwen"
+
+[services.coding]
+model_alias = "coding"
+runtime = "optiq-0.2.18"
+route = "coding"
+activation = "manual"
+pinned = true
+
+[services.chat]
+model_alias = "coding"
+runtime = "optiq-0.2.18"
+route = "chat"
+activation = "manual"
+pinned = false
+
+[clients.codex]
+kind = "codex"
+service = "coding"
+
+[clients.codex.sampling]
+temperature = 0.0
+"""
+
+
+class _NeverCalled:
+    def __getattr__(self, name):
+        raise AssertionError(f"unexpected port call: {name}")
+
+
+class _Port:
+    def __init__(self, result=None):
+        self.calls = []
+        self.result = result or {"state": "accepted"}
+
+    def execute(self, operation, parameters):
+        self.calls.append((operation, dict(parameters)))
+        return self.result
+
+
+class _Telemetry:
+    def __init__(self, items=()):
+        self.calls = []
+        self.items = items
+
+    def read(self, scope, resource=None):
+        self.calls.append((scope, resource))
+        return self.items
+
+    def query(self, scope, resource=None):
+        self.calls.append((scope, resource))
+        return self.items
+
+
+class _ModelSupply:
+    revision_id = "mlx-community/Qwen-OptiQ@" + "a" * 40
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query, *, mode="curated", limit=20):
+        self.calls.append(("search", query, mode, limit))
+        return (
+            CatalogCandidate(
+                repo_id="mlx-community/Qwen-OptiQ",
+                source="hub",
+                evidence="hub-declared",
+                reported_sha="a" * 40,
+            ),
+        )
+
+    def inventory(self):
+        return CacheInventory(
+            revisions=(
+                CachedRevision(
+                    revision_id=self.revision_id,
+                    repo_id="mlx-community/Qwen-OptiQ",
+                    commit_sha="a" * 40,
+                    snapshot_path=Path("/cache/qwen"),
+                    size_on_disk=42,
+                    evidence="local-observed",
+                    complete=True,
+                ),
+            ),
+            evidence="local-observed",
+            warnings=(),
+        )
+
+    def execute(self, operation, parameters):
+        self.calls.append((operation, dict(parameters)))
+        return {"job": "model-job", "state": "queued"}
+
+    def verify(self, installation):
+        self.calls.append(("verify", installation.installation_id))
+        return VerificationResult("complete", "cache-completeness", ())
+
+
+class LocalOperationBackendTests(unittest.TestCase):
+    def _backend(self, root: Path, config: str = _CONFIG, **ports):
+        config_path = root / "config.toml"
+        config_path.write_text(config, encoding="utf-8")
+        state = OperationalStateStore(root / "state.sqlite3")
+        backend = LocalOperationBackend(
+            catalogue=build_operation_catalogue(),
+            config_store=ConfigStore(config_path, validate_config),
+            state_store=state,
+            runtime_catalogue=RuntimeCatalogue.load_builtin(),
+            runtime_supply=ports.get("runtime_supply", _NeverCalled()),
+            model_supply=ports.get("model_supply", ModelSupply(_NeverCalled())),
+            supervisor=ports.get("supervisor", _NeverCalled()),
+            logs=ports.get("logs", _NeverCalled()),
+            metrics=ports.get("metrics", _NeverCalled()),
+            setup=ports.get("setup", _NeverCalled()),
+            clients=ports.get("clients", _NeverCalled()),
+            config_path=config_path,
+        )
+        return backend, state
+
+    def test_empty_status_reports_stopped_without_activating_supervisor(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text(_EMPTY_CONFIG, encoding="utf-8")
+            backend = LocalOperationBackend(
+                catalogue=build_operation_catalogue(),
+                config_store=ConfigStore(config_path, validate_config),
+                state_store=OperationalStateStore(root / "state.sqlite3"),
+                runtime_catalogue=RuntimeCatalogue.load_builtin(),
+                runtime_supply=_NeverCalled(),
+                model_supply=ModelSupply(_NeverCalled()),
+                supervisor=_NeverCalled(),
+                logs=_NeverCalled(),
+                metrics=_NeverCalled(),
+                setup=_NeverCalled(),
+                clients=_NeverCalled(),
+                config_path=config_path,
+            )
+
+            prepared = backend.prepare(OperationRequest("status"))
+            result = prepared.execute()
+
+            self.assertFalse(prepared.requires_supervisor)
+            self.assertEqual(result["schema_version"], 1)
+            self.assertEqual(result["supervisor"]["state"], "stopped")
+            self.assertEqual(result["services"], [])
+            self.assertIn("mlxctl supervisor start", result["next_actions"])
+
+    def test_service_list_keeps_desired_and_run_state_distinct(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(Path(directory))
+            state.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "run-1",
+                    "version": 1,
+                    "service": "coding",
+                    "state": "ready",
+                    "upstream_port": 49152,
+                }
+            )
+
+            result = backend.prepare(OperationRequest("service.list")).execute()
+
+            self.assertEqual(
+                [item["name"] for item in result["items"]], ["chat", "coding"]
+            )
+            coding = next(item for item in result["items"] if item["name"] == "coding")
+            self.assertTrue(coding["desired"]["pinned"])
+            self.assertEqual(coding["run"]["id"], "run-1")
+            chat = next(item for item in result["items"] if item["name"] == "chat")
+            self.assertIsNone(chat["run"])
+
+    def test_strict_resource_lookup_reports_unknown_service(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            with self.assertRaises(ApplicationError) as raised:
+                backend.prepare(
+                    OperationRequest("service.inspect", {"resource": "missing"})
+                ).execute()
+
+            self.assertEqual(raised.exception.code, "resource_not_found")
+
+    def test_empty_metrics_are_reported_as_absent_not_invented(self) -> None:
+        with TemporaryDirectory() as directory:
+            metrics = _Telemetry()
+            backend, _ = self._backend(Path(directory), metrics=metrics)
+
+            result = backend.prepare(OperationRequest("metrics")).execute()
+
+            self.assertEqual(result["items"], [])
+            self.assertEqual(result["evidence"], ["no-metrics-observed"])
+            self.assertEqual(metrics.calls, [("all", None)])
+
+    def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
+        with TemporaryDirectory() as directory:
+            supervisor = _Port()
+            backend, _ = self._backend(Path(directory), supervisor=supervisor)
+
+            prepared = backend.prepare(
+                OperationRequest(
+                    "service.edit",
+                    {"resource": "chat", "pinned": True},
+                )
+            )
+            result = prepared.execute()
+
+            self.assertFalse(prepared.requires_supervisor)
+            self.assertTrue(prepared.events[0]["confirmation_required"])
+            self.assertEqual(result["preview"]["operation"], "service.edit")
+            self.assertEqual(supervisor.calls, [])
+            inspected = backend.prepare(
+                OperationRequest("service.inspect", {"resource": "chat"})
+            ).execute()
+            self.assertTrue(inspected["resource"]["desired"]["pinned"])
+
+    def test_live_lifecycle_calls_only_supervisor_port(self) -> None:
+        with TemporaryDirectory() as directory:
+            supervisor = _Port({"run_id": "run-2", "state": "starting"})
+            runtime = _Port()
+            model = _ModelSupply()
+            backend, _ = self._backend(
+                Path(directory),
+                supervisor=supervisor,
+                runtime_supply=runtime,
+                model_supply=model,
+            )
+
+            prepared = backend.prepare(
+                OperationRequest("service.start", {"resource": "coding"})
+            )
+            result = prepared.execute()
+
+            self.assertTrue(prepared.requires_supervisor)
+            self.assertEqual(
+                supervisor.calls, [("service.start", {"resource": "coding"})]
+            )
+            self.assertEqual(runtime.calls, [])
+            self.assertEqual(model.calls, [])
+            self.assertEqual(result["resource"]["run_id"], "run-2")
+
+    def test_client_probe_content_is_forwarded_but_never_persisted(self) -> None:
+        with TemporaryDirectory() as directory:
+            clients = _Port({"response": "ephemeral"})
+            backend, state = self._backend(Path(directory), clients=clients)
+
+            result = backend.prepare(
+                OperationRequest(
+                    "client.test",
+                    {"resource": "codex", "prompt": "say hello"},
+                )
+            ).execute()
+
+            self.assertEqual(result["resource"]["response"], "ephemeral")
+            self.assertEqual(state.operations(), ())
+            self.assertEqual(state.events(), ())
+
+    def test_setup_only_requests_activation_when_explicitly_selected(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            local = backend.prepare(OperationRequest("setup"))
+            activating = backend.prepare(
+                OperationRequest("setup", {"start_supervisor": True})
+            )
+
+            self.assertFalse(local.requires_supervisor)
+            self.assertTrue(activating.requires_supervisor)
+
+    def test_runtime_and_model_jobs_call_only_their_supply_ports(self) -> None:
+        with TemporaryDirectory() as directory:
+            runtime = _Port({"job": "runtime-job"})
+            model = _ModelSupply()
+            supervisor = _Port()
+            backend, _ = self._backend(
+                Path(directory),
+                runtime_supply=runtime,
+                model_supply=model,
+                supervisor=supervisor,
+            )
+
+            runtime_result = backend.prepare(
+                OperationRequest("runtime.update", {"resource": "optiq-0.2.18"})
+            ).execute()
+            model_result = backend.prepare(
+                OperationRequest(
+                    "model.repair",
+                    {"resource": "qwen"},
+                )
+            ).execute()
+
+            self.assertEqual(runtime_result["resource"]["job"], "runtime-job")
+            self.assertEqual(model_result["resource"]["job"], "model-job")
+            self.assertEqual(runtime.calls[0][0], "runtime.update")
+            self.assertEqual(model.calls[0][0], "model.repair")
+            self.assertEqual(supervisor.calls, [])
+
+    def test_model_verify_uses_exact_installed_revision_and_cache(self) -> None:
+        with TemporaryDirectory() as directory:
+            model = _ModelSupply()
+            backend, _ = self._backend(Path(directory), model_supply=model)
+
+            result = backend.prepare(
+                OperationRequest("model.verify", {"resource": "coding"})
+            ).execute()
+
+            self.assertEqual(result["resource"]["status"], "complete")
+            self.assertIn(("verify", "qwen"), model.calls)
+            self.assertEqual(result["evidence"], ["cache-completeness"])
+
+    def test_every_catalogue_entry_prepares_with_realistic_prerequisites(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend, state = self._backend(
+                root,
+                runtime_supply=_Port(),
+                model_supply=_ModelSupply(),
+                supervisor=_Port(),
+                logs=_Telemetry(),
+                metrics=_Telemetry(),
+                setup=_Port(),
+                clients=_Port(),
+            )
+            state.put_operation({"id": "job-1", "state": "running"})
+            for name in build_operation_catalogue():
+                with self.subTest(operation=name):
+                    prepared = backend.prepare(
+                        OperationRequest(name, self._parameters(name))
+                    )
+                    self.assertIsNotNone(prepared.execute)
+
+    def test_every_query_executes_without_supervisor_activation(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(
+                Path(directory),
+                runtime_supply=_Port(),
+                model_supply=_ModelSupply(),
+                supervisor=_NeverCalled(),
+                logs=_Telemetry(),
+                metrics=_Telemetry(),
+                setup=_Port(),
+                clients=_Port(),
+            )
+            state.put_operation({"id": "job-1", "state": "running"})
+            for name, operation in build_operation_catalogue().items():
+                if operation.kind is not OperationKind.QUERY:
+                    continue
+                with self.subTest(operation=name):
+                    prepared = backend.prepare(
+                        OperationRequest(name, self._parameters(name))
+                    )
+                    result = prepared.execute()
+                    self.assertFalse(prepared.requires_supervisor)
+                    self.assertEqual(result["schema_version"], 1)
+                    self.assertEqual(result["operation"], name)
+
+    def test_mutation_categories_have_preview_and_exact_activation_policy(self) -> None:
+        supervisor_backed = {
+            "supervisor.start",
+            "supervisor.stop",
+            "supervisor.restart",
+            "gateway.restart",
+            "runtime.install",
+            "runtime.adopt",
+            "runtime.update",
+            "runtime.rollback",
+            "runtime.remove",
+            "runtime.prune",
+            "model.install",
+            "model.repair",
+            "model.update",
+            "model.rollback",
+            "model.cache.move",
+            "model.cache.evict",
+            "model.cache.prune",
+            "service.start",
+            "service.stop",
+            "service.restart",
+            "operation.cancel",
+            "operation.resume",
+        }
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(Path(directory), model_supply=_ModelSupply())
+            state.put_operation({"id": "job-1", "state": "running"})
+            for name, operation in build_operation_catalogue().items():
+                if operation.kind is not OperationKind.MUTATION:
+                    continue
+                with self.subTest(operation=name):
+                    prepared = backend.prepare(
+                        OperationRequest(name, self._parameters(name))
+                    )
+                    self.assertEqual(
+                        prepared.requires_supervisor, name in supervisor_backed
+                    )
+                    self.assertEqual(prepared.events[0]["phase"], "preview")
+                    self.assertEqual(
+                        prepared.events[0]["confirmation_required"],
+                        operation.confirmation,
+                    )
+
+    @staticmethod
+    def _parameters(name):
+        if name.startswith("runtime."):
+            if name in {"runtime.install", "runtime.adopt", "runtime.available"}:
+                return {"runtime": "optiq"}
+            return {"resource": "optiq-0.2.18"}
+        if name == "model.search":
+            return {"query": "Qwen"}
+        if name.startswith("model.cache."):
+            return {"resource": _ModelSupply.revision_id}
+        if name.startswith("model."):
+            return {
+                "resource": "qwen",
+                "alias": "coding",
+                "repository": "mlx-community/Qwen-OptiQ",
+                "revision": "a" * 40,
+            }
+        if name.startswith("service."):
+            return {"resource": "coding"}
+        if name.startswith("operation."):
+            return {"resource": "job-1"}
+        if name.startswith("client."):
+            return {"resource": "codex"}
+        if name == "config.diff":
+            return {"text": _CONFIG}
+        if name == "config.import":
+            return {"text": _CONFIG}
+        if name == "config.restore":
+            return {"revision": "a" * 64}
+        return {}
+
+
+if __name__ == "__main__":
+    unittest.main()
