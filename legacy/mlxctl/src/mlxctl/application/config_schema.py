@@ -1,0 +1,290 @@
+"""Strict supported-v1 desired-state schema."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from ipaddress import ip_address
+from types import MappingProxyType
+from typing import Mapping
+
+from mlxctl.domain.resources import (
+    ActivationPolicy,
+    InferenceService,
+    ModelAlias,
+    ModelInstallation,
+    ModelRevision,
+    ResourceName,
+    RuntimeFamily,
+)
+
+
+class ConfigSchemaError(ValueError):
+    """Desired configuration does not satisfy the supported-v1 schema."""
+
+
+@dataclass(frozen=True, slots=True)
+class GatewaySettings:
+    host: str = "127.0.0.1"
+    port: int = 8766
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredRuntime:
+    installation_id: str
+    definition: str
+    version: str
+    provenance: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClientSettings:
+    name: str
+    kind: str
+    service: str
+    sampling: Mapping[str, int | float | bool]
+
+
+@dataclass(frozen=True, slots=True)
+class MlxctlConfig:
+    schema_version: int
+    gateway: GatewaySettings
+    runtimes: Mapping[str, ConfiguredRuntime]
+    models: Mapping[str, ModelInstallation]
+    aliases: Mapping[str, ModelAlias]
+    services: Mapping[str, InferenceService]
+    clients: Mapping[str, ClientSettings]
+
+
+def validate_config(raw: Mapping[str, object]) -> MlxctlConfig:
+    """Validate one parsed TOML document into immutable desired state."""
+    unwrap = getattr(raw, "unwrap", None)
+    if callable(unwrap):
+        raw = unwrap()
+    _reject_unknown(
+        "root",
+        raw,
+        {
+            "schema_version",
+            "gateway",
+            "runtimes",
+            "models",
+            "aliases",
+            "services",
+            "clients",
+        },
+    )
+    if raw.get("schema_version") != 1 or type(raw.get("schema_version")) is not int:
+        raise ConfigSchemaError("schema_version must be 1")
+    gateway = _gateway(_table(raw.get("gateway", {}), "gateway"))
+    runtimes = _runtimes(_table(raw.get("runtimes", {}), "runtimes"))
+    models = _models(_table(raw.get("models", {}), "models"))
+    aliases = _aliases(_table(raw.get("aliases", {}), "aliases"), models)
+    services = _services(_table(raw.get("services", {}), "services"), aliases, runtimes)
+    clients = _clients(_table(raw.get("clients", {}), "clients"), services)
+    return MlxctlConfig(
+        schema_version=1,
+        gateway=gateway,
+        runtimes=MappingProxyType(runtimes),
+        models=MappingProxyType(models),
+        aliases=MappingProxyType(aliases),
+        services=MappingProxyType(services),
+        clients=MappingProxyType(clients),
+    )
+
+
+def _gateway(raw: Mapping[str, object]) -> GatewaySettings:
+    _reject_unknown("gateway", raw, {"host", "port"})
+    host = raw.get("host", "127.0.0.1")
+    if not isinstance(host, str):
+        raise ConfigSchemaError("Gateway host must be a loopback IP address")
+    try:
+        address = ip_address(host)
+    except ValueError as error:
+        raise ConfigSchemaError("Gateway host must be a loopback IP address") from error
+    if not address.is_loopback:
+        raise ConfigSchemaError("Gateway host must be loopback-only")
+    port = raw.get("port", 8766)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ConfigSchemaError("Gateway port must be an integer in 1..65535")
+    return GatewaySettings(address.compressed, port)
+
+
+def _runtimes(raw: Mapping[str, object]) -> dict[str, ConfiguredRuntime]:
+    result = {}
+    for installation_id, value in raw.items():
+        table = _table(value, f"runtime {installation_id!r}")
+        _reject_unknown(
+            f"runtime {installation_id!r}",
+            table,
+            {"definition", "version", "provenance"},
+        )
+        definition = _string(table, "definition", f"runtime {installation_id!r}")
+        try:
+            RuntimeFamily(definition.replace("_", "-"))
+        except ValueError as error:
+            raise ConfigSchemaError(
+                f"unknown Runtime Definition {definition!r}"
+            ) from error
+        result[installation_id] = ConfiguredRuntime(
+            installation_id=installation_id,
+            definition=definition,
+            version=_string(table, "version", f"runtime {installation_id!r}"),
+            provenance=_string(table, "provenance", f"runtime {installation_id!r}"),
+        )
+    return result
+
+
+def _models(raw: Mapping[str, object]) -> dict[str, ModelInstallation]:
+    result = {}
+    for name, value in raw.items():
+        try:
+            ResourceName(name)
+            table = _table(value, f"model {name!r}")
+            _reject_unknown(f"model {name!r}", table, {"repository", "revision"})
+            revision = ModelRevision(
+                _string(table, "repository", f"model {name!r}"),
+                _string(table, "revision", f"model {name!r}"),
+            )
+            result[name] = ModelInstallation(name, revision)
+        except ValueError as error:
+            raise ConfigSchemaError(str(error)) from error
+    return result
+
+
+def _aliases(
+    raw: Mapping[str, object], models: Mapping[str, ModelInstallation]
+) -> dict[str, ModelAlias]:
+    result = {}
+    for name, value in raw.items():
+        table = _table(value, f"alias {name!r}")
+        _reject_unknown(f"alias {name!r}", table, {"installation"})
+        installation = _string(table, "installation", f"alias {name!r}")
+        if installation not in models:
+            raise ConfigSchemaError(
+                f"Model Alias {name!r} references unknown Model Installation {installation!r}"
+            )
+        try:
+            result[name] = ModelAlias(ResourceName(name), installation)
+        except ValueError as error:
+            raise ConfigSchemaError(str(error)) from error
+    return result
+
+
+def _services(
+    raw: Mapping[str, object],
+    aliases: Mapping[str, ModelAlias],
+    runtimes: Mapping[str, ConfiguredRuntime],
+) -> dict[str, InferenceService]:
+    result = {}
+    routes: dict[str, str] = {}
+    for name, value in raw.items():
+        table = _table(value, f"service {name!r}")
+        _reject_unknown(
+            f"service {name!r}",
+            table,
+            {"model_alias", "runtime", "route", "activation", "pinned", "options"},
+        )
+        alias = _string(table, "model_alias", f"service {name!r}")
+        if alias not in aliases:
+            raise ConfigSchemaError(
+                f"service {name!r} references unknown Model Alias {alias!r}"
+            )
+        runtime = _string(table, "runtime", f"service {name!r}")
+        if runtime not in runtimes:
+            raise ConfigSchemaError(
+                f"service {name!r} references unknown Runtime Installation {runtime!r}"
+            )
+        route = _string(table, "route", f"service {name!r}")
+        if route in routes:
+            raise ConfigSchemaError(
+                f"Gateway route {route!r} is shared by services {routes[route]!r} and {name!r}"
+            )
+        routes[route] = name
+        activation_raw = table.get("activation", "manual")
+        try:
+            activation = ActivationPolicy(activation_raw)
+        except (TypeError, ValueError) as error:
+            raise ConfigSchemaError(
+                f"service {name!r} activation must be manual or supervisor"
+            ) from error
+        pinned = table.get("pinned", False)
+        if type(pinned) is not bool:
+            raise ConfigSchemaError(f"service {name!r} pinned must be boolean")
+        options = _table(table.get("options", {}), f"service {name!r} options")
+        for key, option in options.items():
+            if not isinstance(key, str) or not _option_value(option):
+                raise ConfigSchemaError(
+                    f"service {name!r} option {key!r} has an unsupported value"
+                )
+        try:
+            result[name] = InferenceService(
+                name=ResourceName(name),
+                model_alias=ResourceName(alias),
+                runtime_installation=runtime,
+                route=ResourceName(route),
+                activation=activation,
+                pinned=pinned,
+                options=dict(options),
+            )
+        except ValueError as error:
+            raise ConfigSchemaError(str(error)) from error
+    return result
+
+
+def _clients(
+    raw: Mapping[str, object], services: Mapping[str, InferenceService]
+) -> dict[str, ClientSettings]:
+    result = {}
+    for name, value in raw.items():
+        table = _table(value, f"client {name!r}")
+        _reject_unknown(f"client {name!r}", table, {"kind", "service", "sampling"})
+        kind = _string(table, "kind", f"client {name!r}")
+        if kind not in {"codex", "hindsight"}:
+            raise ConfigSchemaError(f"unsupported client kind {kind!r}")
+        service = _string(table, "service", f"client {name!r}")
+        if service not in services:
+            raise ConfigSchemaError(
+                f"client {name!r} references unknown Inference Service {service!r}"
+            )
+        sampling = _table(table.get("sampling", {}), f"client {name!r} sampling")
+        if not all(
+            isinstance(key, str) and (type(value) in {int, float, bool})
+            for key, value in sampling.items()
+        ):
+            raise ConfigSchemaError(f"client {name!r} sampling values must be numeric")
+        result[name] = ClientSettings(
+            name=name,
+            kind=kind,
+            service=service,
+            sampling=MappingProxyType(dict(sampling)),
+        )
+    return result
+
+
+def _option_value(value: object) -> bool:
+    if type(value) in {str, int, float, bool}:
+        return True
+    return isinstance(value, list) and all(
+        type(item) in {str, int, float, bool} for item in value
+    )
+
+
+def _table(value: object, scope: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ConfigSchemaError(f"{scope} must be a table")
+    return value
+
+
+def _string(table: Mapping[str, object], key: str, scope: str) -> str:
+    value = table.get(key)
+    if not isinstance(value, str) or not value:
+        raise ConfigSchemaError(f"{scope} requires non-empty string {key!r}")
+    return value
+
+
+def _reject_unknown(
+    scope: str, values: Mapping[str, object], allowed: set[str]
+) -> None:
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ConfigSchemaError(f"{scope} contains unknown keys: {', '.join(unknown)}")
