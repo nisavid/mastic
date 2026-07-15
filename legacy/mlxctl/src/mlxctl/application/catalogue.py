@@ -156,6 +156,19 @@ _NO_CONFIRM = frozenset(
     }
 )
 
+_LOCAL_MUTATIONS = frozenset(
+    {
+        "gateway.configure",
+        "model.trust",
+        "service.create",
+        "service.edit",
+        "client.configure",
+        "client.remove",
+        "config.import",
+        "config.restore",
+    }
+)
+
 
 def build_operation_catalogue() -> Mapping[str, Operation]:
     """Return the immutable parity contract used by CLI and TUI builders."""
@@ -166,11 +179,10 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
             kind = OperationKind.QUERY if name in _QUERIES else OperationKind.MUTATION
             supervisor = SupervisorRequirement.NEVER_START
             if kind is OperationKind.MUTATION:
-                supervisor = (
-                    SupervisorRequirement.MAY_START
-                    if name in {"setup", "service.start"}
-                    else SupervisorRequirement.REQUIRED
-                )
+                if name in {"setup", "service.start"}:
+                    supervisor = SupervisorRequirement.MAY_START
+                elif name not in _LOCAL_MUTATIONS:
+                    supervisor = SupervisorRequirement.REQUIRED
             summary = _summary(name)
             operations[name] = Operation(
                 name=name,

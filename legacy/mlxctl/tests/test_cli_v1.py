@@ -55,6 +55,12 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("model", result.output)
         self.assertIn("service", result.output)
 
+    def test_every_catalogue_operation_has_a_cli_help_surface(self) -> None:
+        for name in build_operation_catalogue():
+            with self.subTest(operation=name):
+                result = self.runner.invoke(self.app, [*name.split("."), "--help"])
+                self.assertEqual(result.exit_code, 0, result.output)
+
     def test_status_help_is_machine_overview_not_ambiguous_server_argument(
         self,
     ) -> None:

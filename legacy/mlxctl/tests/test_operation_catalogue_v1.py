@@ -46,6 +46,23 @@ class OperationCatalogueTests(unittest.TestCase):
                         SupervisorRequirement.NEVER_START,
                     )
 
+    def test_local_desired_state_mutations_do_not_require_supervisor(self) -> None:
+        for name in (
+            "gateway.configure",
+            "model.trust",
+            "service.create",
+            "service.edit",
+            "client.configure",
+            "client.remove",
+            "config.import",
+            "config.restore",
+        ):
+            with self.subTest(operation=name):
+                self.assertIs(
+                    self.catalogue[name].supervisor,
+                    SupervisorRequirement.NEVER_START,
+                )
+
     def test_mutations_declare_confirmation_and_machine_help(self) -> None:
         install = self.catalogue["model.install"]
         self.assertTrue(install.confirmation)
