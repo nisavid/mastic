@@ -206,7 +206,9 @@ class CodexClientIntegration:
         document = _load_toml(self.config_path)
         return tuple(_toml_changes(document, _codex_fields(configuration)))
 
-    def apply(self, configuration: ClientConfiguration) -> ClientApplyResult:
+    def apply(
+        self, configuration: ClientConfiguration, *, takeover: bool = False
+    ) -> ClientApplyResult:
         raw, existed = _read(self.config_path)
         document = _parse_toml(raw)
         desired = _codex_fields(configuration)
@@ -244,8 +246,10 @@ class CodexClientIntegration:
                 before = previous.get("before")
             elif not present or plain_current != after:
                 before_present, before = present, current
-            else:
+            elif not takeover:
                 continue
+            else:
+                before_present, before = False, None
             owned.append(
                 {
                     "path": list(path),
@@ -255,7 +259,8 @@ class CodexClientIntegration:
                 }
             )
 
-        if not changes:
+        ownership_changed = bool(owned) and not prior_manifest
+        if not changes and not ownership_changed:
             return ClientApplyResult(False, (), self.backup_path, self.manifest_path)
 
         rendered = document.as_string().encode()
@@ -282,12 +287,16 @@ class CodexClientIntegration:
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
             _write_private(self.manifest_path, _json_bytes(manifest))
-            self._replace(self.config_path, rendered)
+            if changes:
+                self._replace(self.config_path, rendered)
         except Exception:
             _restore_support(self.manifest_path, self.backup_path, support)
             raise
         return ClientApplyResult(
-            True, tuple(changes), self.backup_path, self.manifest_path
+            bool(changes) or ownership_changed,
+            tuple(changes),
+            self.backup_path,
+            self.manifest_path,
         )
 
     def remove(self) -> ClientRemovalResult:
@@ -384,7 +393,9 @@ class HindsightClientIntegration:
         env = _EnvDocument(raw.decode())
         return tuple(env.changes(_hindsight_fields(configuration)))
 
-    def apply(self, configuration: ClientConfiguration) -> ClientApplyResult:
+    def apply(
+        self, configuration: ClientConfiguration, *, takeover: bool = False
+    ) -> ClientApplyResult:
         raw, existed = _read(self.config_path)
         env = _EnvDocument(raw.decode())
         desired = _hindsight_fields(configuration)
@@ -423,8 +434,10 @@ class HindsightClientIntegration:
                 before_line = previous.get("before_line")
             elif not present or current != after:
                 before_present, before, before_line = present, current, current_line
-            else:
+            elif not takeover:
                 continue
+            else:
+                before_present, before, before_line = False, None, None
             owned.append(
                 {
                     "path": [key],
@@ -435,7 +448,8 @@ class HindsightClientIntegration:
                 }
             )
 
-        if not changes:
+        ownership_changed = bool(owned) and not prior_manifest
+        if not changes and not ownership_changed:
             return ClientApplyResult(False, (), self.backup_path, self.manifest_path)
 
         rendered = env.render().encode()
@@ -462,12 +476,16 @@ class HindsightClientIntegration:
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
             _write_private(self.manifest_path, _json_bytes(manifest))
-            self._replace(self.config_path, rendered)
+            if changes:
+                self._replace(self.config_path, rendered)
         except Exception:
             _restore_support(self.manifest_path, self.backup_path, support)
             raise
         return ClientApplyResult(
-            True, tuple(changes), self.backup_path, self.manifest_path
+            bool(changes) or ownership_changed,
+            tuple(changes),
+            self.backup_path,
+            self.manifest_path,
         )
 
     def remove(self) -> ClientRemovalResult:

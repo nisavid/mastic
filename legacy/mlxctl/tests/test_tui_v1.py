@@ -1,4 +1,5 @@
 import unittest
+from threading import Event
 
 from textual.widgets import Checkbox, Input, Label, Select, Static
 
@@ -17,6 +18,7 @@ class _Dispatcher:
         self.previews = []
         self.error = None
         self.result_value = {"state": "complete"}
+        self.execution_gate = None
 
     def preview(self, request):
         self.previews.append(request)
@@ -33,6 +35,8 @@ class _Dispatcher:
 
     def execute(self, request):
         self.requests.append(request)
+        if self.execution_gate is not None:
+            self.execution_gate.wait(timeout=2)
         if self.error is not None:
             raise self.error
         return OperationResult(request.name, self.result_value)
@@ -166,6 +170,43 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             runtime.focus()
             await pilot.press("enter", "o", "p", "t", "i", "q", "enter")
             self.assertEqual(runtime.value, "optiq")
+
+            await self.app.open_operation("service.edit")
+            self.assertIsInstance(self.app.query_one("#parameter-pinned"), Select)
+
+    async def test_service_edit_can_explicitly_clear_a_boolean(self) -> None:
+        async with self.app.run_test(size=(120, 45)) as pilot:
+            await self.app.open_operation("service.edit")
+            self.app.query_one("#parameter-resource", Input).value = "coding"
+            self.app.query_one("#parameter-pinned", Select).value = "false"
+
+            self.app.query_one("#operation-submit").press()
+            await pilot.pause()
+            self.app.query_one("#operation-confirm").press()
+            await pilot.pause()
+
+            self.assertIs(self.dispatcher.requests[-1].parameters["pinned"], False)
+
+    async def test_long_operation_worker_keeps_navigation_responsive(self) -> None:
+        gate = Event()
+        self.dispatcher.execution_gate = gate
+        try:
+            async with self.app.run_test(size=(120, 45)) as pilot:
+                await self.app.open_operation("model.search")
+                self.app.query_one("#operation-submit").press()
+                await pilot.pause()
+
+                await pilot.click("#nav-topology")
+
+                self.assertEqual(
+                    str(self.app.query_one("#view-title", Static).content),
+                    "Resource topology",
+                )
+                self.assertFalse(gate.is_set())
+                gate.set()
+                await pilot.pause()
+        finally:
+            gate.set()
 
     async def test_confirmed_mutation_shows_exact_plan_before_dispatch(self) -> None:
         async with self.app.run_test(size=(120, 45)) as pilot:

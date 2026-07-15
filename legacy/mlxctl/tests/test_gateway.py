@@ -30,9 +30,10 @@ class FakeActivity:
         self.active: dict[str, int] = {}
         self.events: list[tuple[str, str]] = []
 
-    def begin(self, service: str) -> None:
+    def begin(self, service: str) -> bool:
         self.active[service] = self.active.get(service, 0) + 1
         self.events.append(("begin", service))
+        return True
 
     def end(self, service: str) -> None:
         self.active[service] -= 1
@@ -195,7 +196,7 @@ class GatewayTests(unittest.TestCase):
                 httpx.URL("http://127.0.0.1:49152/v1/responses"),
             ],
         )
-        self.assertEqual(upstream.requests[0].headers["authorization"], "Bearer local")
+        self.assertNotIn("authorization", upstream.requests[0].headers)
         self.assertEqual(json.loads(upstream.requests[0].content)["model"], "coding")
 
     def test_stopped_missing_and_unavailable_services_return_actionable_errors(
@@ -349,6 +350,55 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 413)
         self.assertEqual(response.json()["error"]["code"], "request_too_large")
+        self.assertEqual(upstream.requests, [])
+
+    def test_proxy_requires_json_and_rejects_non_loopback_browser_origins(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        app = create_gateway(resolver, client_factory=lambda: upstream)
+
+        with TestClient(app) as client:
+            wrong_type = client.post(
+                "/v1/responses",
+                content='{"model":"coding"}',
+                headers={"content-type": "text/plain"},
+            )
+            hostile_origin = client.post(
+                "/v1/responses",
+                json={"model": "coding", "input": "x"},
+                headers={"origin": "https://attacker.example"},
+            )
+
+        self.assertEqual(wrong_type.status_code, 415)
+        self.assertEqual(wrong_type.json()["error"]["code"], "unsupported_media_type")
+        self.assertEqual(hostile_origin.status_code, 403)
+        self.assertEqual(hostile_origin.json()["error"]["code"], "origin_not_allowed")
+        self.assertEqual(upstream.requests, [])
+
+    def test_bounded_admission_rejects_excess_work_before_upstream(self) -> None:
+        class RejectingActivity(FakeActivity):
+            def begin(self, service: str) -> bool:
+                self.events.append(("rejected", service))
+                return False
+
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        activity = RejectingActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses", json={"model": "coding", "input": "x"}
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["error"]["code"], "service_busy")
         self.assertEqual(upstream.requests, [])
 
 

@@ -85,7 +85,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "uninstall",
         "trust",
     ),
-    "model.cache": ("list", "inspect", "move", "evict", "prune"),
+    "model.cache": ("list", "inspect", "evict", "prune"),
     "service": (
         "list",
         "create",
@@ -258,7 +258,6 @@ def _summary(name: str) -> str:
         "model.trust": "Grant named risks to one exact Model Revision and Runtime Installation.",
         "model.cache.list": "List locally cached model revisions and observed disk usage.",
         "model.cache.inspect": "Inspect one physical Cached Revision and its provenance.",
-        "model.cache.move": "Move one Cached Revision through the cache owner.",
         "model.cache.evict": "Evict one safe, unreferenced Cached Revision.",
         "model.cache.prune": "Evict safe, unreferenced Cached Revisions.",
         "service.list": "List named Inference Services with desired and live state.",
@@ -557,11 +556,6 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 required=True,
             ),
         )
-    if name == "model.cache.move":
-        return (
-            _argument("resource", "Cached Revision identity."),
-            _option("destination", "Existing target cache directory.", required=True),
-        )
     if name.startswith("model.cache.") and name not in {
         "model.cache.list",
         "model.cache.prune",
@@ -618,8 +612,8 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "pinned",
-                "Pin against automatic pressure eviction.",
-                value_type="boolean",
+                "Set or clear protection from automatic pressure eviction.",
+                value_type="tristate_boolean",
             ),
             _option(
                 "options",
@@ -653,6 +647,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "max_concurrent",
                 "Maximum concurrent client requests.",
                 value_type="integer",
+            ),
+            _option(
+                "takeover",
+                "Explicitly adopt already-equal client fields into mlxctl ownership.",
+                value_type="boolean",
             ),
         )
     if name == "client.test":

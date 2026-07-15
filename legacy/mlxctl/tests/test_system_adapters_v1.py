@@ -22,6 +22,7 @@ from mlxctl.infrastructure.system_adapters import (
 )
 from mlxctl.infrastructure.model_supply import (
     ModelInstallation as SuppliedModelInstallation,
+    VerificationResult,
 )
 from mlxctl.infrastructure.model_supply import ModelProvenance as SuppliedProvenance
 from mlxctl.infrastructure.model_supply import ModelRevision as SuppliedRevision
@@ -136,8 +137,28 @@ class _FakePsutilProcess:
         self.running = False
 
 
+class _AllowingModelSecurity:
+    def __init__(self, *, risks=()) -> None:
+        self.risks = list(risks)
+        self.calls = []
+
+    def require(self, repository, revision):
+        self.calls.append(("require", repository, revision))
+        return {"overridable_risks": self.risks}
+
+    def record_cached_verification(self, repository, revision, verification):
+        self.calls.append(("verify", repository, revision, verification.status))
+        if verification.status not in {"complete", "verified"} or verification.issues:
+            raise ValueError("integrity mismatch")
+        return {"overridable_risks": self.risks}
+
+
+def _verified_model(_model):
+    return VerificationResult("complete", "cache-integrity", ())
+
+
 class ProcessLauncherTests(unittest.TestCase):
-    def test_launch_uses_exact_argv_merged_environment_and_private_service_log(
+    def test_launch_uses_exact_argv_allowlisted_environment_and_private_service_log(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -150,13 +171,17 @@ class ProcessLauncherTests(unittest.TestCase):
             log_dir = Path(directory) / "logs"
             launcher = MacOSProcessLauncher(
                 log_dir=log_dir,
-                base_environment={"PATH": "/usr/bin", "INHERITED": "yes"},
+                base_environment={
+                    "PATH": "/usr/bin",
+                    "HOME": "/Users/example",
+                    "GITHUB_TOKEN": "must-not-leak",
+                },
                 popen=popen,
             )
 
             process = launcher.launch(
                 ("/runtime/bin/optiq", "serve", "--port", "49152"),
-                {"MLXCTL_SERVICE_NAME": "coding", "EXTRA": "one"},
+                {"MLXCTL_SERVICE_NAME": "coding", "HF_HUB_OFFLINE": "1"},
             )
 
             self.assertEqual(process.pid, 4123)
@@ -167,15 +192,47 @@ class ProcessLauncherTests(unittest.TestCase):
                 options["env"],
                 {
                     "PATH": "/usr/bin",
-                    "INHERITED": "yes",
+                    "HOME": "/Users/example",
                     "MLXCTL_SERVICE_NAME": "coding",
-                    "EXTRA": "one",
+                    "HF_HUB_OFFLINE": "1",
                 },
             )
             log = log_dir / "coding.log"
             self.assertTrue(log.is_file())
             self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(log_dir.stat().st_mode), 0o700)
+
+            with self.assertRaisesRegex(ValueError, "environment variable"):
+                launcher.launch(("/runtime/bin/optiq",), {"API_TOKEN": "secret"})
+
+    def test_service_logs_rotate_with_bounded_size_and_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+
+            def popen(_argv, **kwargs):
+                import os
+
+                os.write(kwargs["stdout"], b"0123456789abcdef")
+                return _FakePopen()
+
+            log_dir = Path(directory) / "logs"
+            launcher = MacOSProcessLauncher(
+                log_dir=log_dir,
+                base_environment={"PATH": "/usr/bin"},
+                max_log_bytes=8,
+                retained_log_files=2,
+                popen=popen,
+            )
+
+            for _ in range(3):
+                process = launcher.launch(
+                    ("/runtime/bin/optiq",), {"MLXCTL_SERVICE_NAME": "coding"}
+                )
+                process.wait(1)
+
+            files = tuple(sorted(log_dir.glob("coding.log*")))
+            self.assertLessEqual(len(files), 3)
+            self.assertTrue(files)
+            self.assertTrue(all(path.stat().st_size <= 8 for path in files))
 
     def test_launch_refuses_a_symlink_at_the_private_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -338,11 +395,14 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 trust_remote_code=True,
             )
             grants: list[dict[str, object]] = []
+            security = _AllowingModelSecurity(risks=("repository_code",))
             supply = ExactRuntimeLaunchSupply(
                 load_config=lambda: config,
                 runtime_installations={runtime.installation_id: runtime},
                 model_installations={"qwen-exact": model},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=security,
+                model_verifier=_verified_model,
                 trust_grants=lambda: grants,
             )
 
@@ -355,7 +415,7 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                     "repository": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
                     "revision": _REVISION,
                     "runtime_installation": "optiq@0.2.18",
-                    "accepted_risks": ["remote_code"],
+                    "accepted_risks": ["remote_code", "repository_code"],
                 }
             )
             prepared = supply.prepare_launch(
@@ -363,6 +423,44 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
             )
 
             self.assertIn("--trust-remote-code", prepared.argv)
+
+    def test_launch_fails_closed_without_security_or_integrity_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+
+            class MissingSecurity(_AllowingModelSecurity):
+                def require(self, repository, revision):
+                    raise ValueError("assessment absent")
+
+            missing = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=MissingSecurity(),
+                model_verifier=_verified_model,
+            )
+            with self.assertRaisesRegex(CapabilityValidationError, "security gate"):
+                missing.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
+            corrupt = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=lambda _model: VerificationResult(
+                    "incomplete", "cache-integrity", ("hash mismatch",)
+                ),
+            )
+            with self.assertRaisesRegex(CapabilityValidationError, "security gate"):
+                corrupt.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
 
     def test_launch_resolves_current_physical_supply_at_execution_time(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -380,6 +478,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations=lambda: runtimes,
                 model_installations=lambda: models,
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
             )
             runtimes[runtime.installation_id] = runtime
             models["qwen-exact"] = model
@@ -404,6 +504,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations={runtime.installation_id: runtime},
                 model_installations={"qwen-exact": model},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
                 environment={"METAL_DEVICE_WRAPPER_TYPE": "1"},
             )
 
@@ -463,6 +565,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations={runtime.installation_id: mismatched_runtime},
                 model_installations={"qwen-exact": model},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
             )
             with self.assertRaisesRegex(CapabilityValidationError, "runtime version"):
                 supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
@@ -485,6 +589,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations={runtime.installation_id: runtime},
                 model_installations={"qwen-exact": wrong_revision},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
             )
             with self.assertRaisesRegex(CapabilityValidationError, "model revision"):
                 supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
@@ -504,6 +610,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations={runtime.installation_id: runtime},
                 model_installations={"qwen-exact": model},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
             )
             with self.assertRaisesRegex(CapabilityValidationError, "kv_config"):
                 supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
@@ -528,6 +636,8 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 runtime_installations={runtime.installation_id: runtime_without_mtp},
                 model_installations={"qwen-exact": model},
                 launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
             )
             with self.assertRaises(UnsupportedLaunchOption):
                 supply.prepare_launch(

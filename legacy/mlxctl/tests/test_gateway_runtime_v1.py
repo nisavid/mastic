@@ -18,14 +18,19 @@ class FakeServer:
 
 
 class GatewayRuntimeTests(unittest.TestCase):
+    metrics: list[dict[str, object]]
+
     def setUp(self) -> None:
         self.server = FakeServer()
         self.now = 100
+        self.metrics = []
         self.gateway = GatewayRuntime(
             host="127.0.0.1",
             port=8766,
             server_factory=lambda app, host, port: self.server,
             clock_ns=self._clock,
+            max_in_flight_per_service=1,
+            metric_sink=self.metrics.append,
         )
 
     def _clock(self) -> int:
@@ -51,7 +56,8 @@ class GatewayRuntimeTests(unittest.TestCase):
         self.assertFalse(self.server.started and not self.server.should_exit)
 
     def test_activity_prevents_busy_eviction_and_drain_waits(self) -> None:
-        self.gateway.begin("coding")
+        self.assertTrue(self.gateway.begin("coding"))
+        self.assertFalse(self.gateway.begin("coding"))
         self.assertTrue(self.gateway.is_busy("coding"))
         done = threading.Event()
 
@@ -69,6 +75,17 @@ class GatewayRuntimeTests(unittest.TestCase):
         self.assertTrue(done.is_set())
         self.assertFalse(self.gateway.is_busy("coding"))
         self.assertGreater(self.gateway.last_used_ns("coding"), 0)
+        self.assertEqual(
+            [
+                metric["event"]
+                for metric in self.metrics
+                if metric["scope"] == "gateway"
+            ],
+            ["accepted", "rejected", "complete"],
+        )
+        self.assertEqual(
+            {metric["scope"] for metric in self.metrics}, {"gateway", "service"}
+        )
 
     def test_shedding_rejects_new_routes_without_forgetting_identity(self) -> None:
         self.gateway.describe_route(

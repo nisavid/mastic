@@ -142,7 +142,10 @@ class UnixControlServer:
         max_frame_bytes: int = MAX_FRAME_BYTES,
         expected_uid: int | None = None,
         peer_uid_resolver: Callable[[socket.socket], int | None] = resolve_peer_uid,
+        connection_drain_timeout: float = 10.0,
     ) -> None:
+        if connection_drain_timeout <= 0:
+            raise ValueError("connection drain timeout must be positive")
         self.socket_path = Path(socket_path)
         self._handler = handler
         self._cancel_handler = cancel_handler
@@ -150,8 +153,10 @@ class UnixControlServer:
         self._max_frame_bytes = max_frame_bytes
         self._expected_uid = os.getuid() if expected_uid is None else expected_uid
         self._peer_uid_resolver = peer_uid_resolver
+        self._connection_drain_timeout = connection_drain_timeout
         self._server: asyncio.AbstractServer | None = None
         self._bound_socket_identity: tuple[int, int] | None = None
+        self._connections: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Bind the control socket without replacing an unsafe path."""
@@ -190,6 +195,17 @@ class UnixControlServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        await asyncio.sleep(0)
+        connections = tuple(self._connections)
+        if connections:
+            done, pending = await asyncio.wait(
+                connections, timeout=self._connection_drain_timeout
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            del done
         self._unlink_our_socket()
 
     async def _prepare_socket_path(self) -> None:
@@ -234,6 +250,9 @@ class UnixControlServer:
     async def _accept(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        connection = asyncio.current_task()
+        if connection is not None:
+            self._connections.add(connection)
         send_lock = asyncio.Lock()
         tasks: set[asyncio.Task[None]] = set()
 
@@ -294,6 +313,8 @@ class UnixControlServer:
                 await asyncio.gather(*tasks, return_exceptions=True)
             writer.close()
             await writer.wait_closed()
+            if connection is not None:
+                self._connections.discard(connection)
 
     async def _negotiate(self, reader: asyncio.StreamReader, send) -> bool:
         try:

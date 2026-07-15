@@ -7,10 +7,11 @@ import re
 import socket
 import stat
 import subprocess
+import threading
 import time
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,6 +22,7 @@ from mlxctl.domain.admission import PressureLevel
 from mlxctl.domain.resources import InferenceService
 from mlxctl.infrastructure.model_supply import (
     ModelInstallation as SuppliedModelInstallation,
+    VerificationResult,
 )
 from mlxctl.infrastructure.runtime_supply import (
     RuntimeInstallation as SuppliedRuntimeInstallation,
@@ -34,13 +36,37 @@ from mlxctl.infrastructure.supervisor_v1 import (
 
 
 _SAFE_LOG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_ALLOWED_PROCESS_ENVIRONMENT = frozenset(
+    {
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_HUB_OFFLINE",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "METAL_DEVICE_WRAPPER_TYPE",
+        "MLXCTL_SERVICE_NAME",
+        "MLX_METAL_CACHE_DIR",
+        "PATH",
+        "TMPDIR",
+        "TOKENIZERS_PARALLELISM",
+        "TRANSFORMERS_CACHE",
+        "XDG_CACHE_HOME",
+    }
+)
 
 
 class SubprocessManagedProcess:
     """Adapt one directly spawned subprocess to the Supervisor process port."""
 
-    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        output_thread: threading.Thread | None = None,
+    ) -> None:
         self._process = process
+        self._output_thread = output_thread
 
     @property
     def pid(self) -> int:
@@ -57,7 +83,14 @@ class SubprocessManagedProcess:
 
     def wait(self, timeout: float) -> int:
         try:
-            return self._process.wait(timeout=timeout)
+            started = time.monotonic()
+            result = self._process.wait(timeout=timeout)
+            if self._output_thread is not None:
+                remaining = max(0.0, timeout - (time.monotonic() - started))
+                self._output_thread.join(remaining)
+                if self._output_thread.is_alive():
+                    raise TimeoutError
+            return result
         except subprocess.TimeoutExpired as error:
             raise TimeoutError from error
 
@@ -101,13 +134,27 @@ class MacOSProcessLauncher:
         *,
         log_dir: Path,
         base_environment: Mapping[str, str] | None = None,
+        max_log_bytes: int = 10 * 1024 * 1024,
+        retained_log_files: int = 3,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         process_factory: Callable[[int], psutil.Process] = psutil.Process,
     ) -> None:
         self._log_dir = log_dir.expanduser()
-        self._base_environment = dict(
+        source_environment = (
             os.environ if base_environment is None else base_environment
         )
+        self._base_environment = {
+            key: value
+            for key, value in source_environment.items()
+            if key in _ALLOWED_PROCESS_ENVIRONMENT
+        }
+        if type(max_log_bytes) is not int or max_log_bytes <= 0:
+            raise ValueError("maximum service log size must be a positive integer")
+        if type(retained_log_files) is not int or retained_log_files < 0:
+            raise ValueError("retained service log count must be nonnegative")
+        self._max_log_bytes = max_log_bytes
+        self._retained_log_files = retained_log_files
+        self._log_lock = threading.Lock()
         self._popen = popen
         self._process_factory = process_factory
 
@@ -129,28 +176,50 @@ class MacOSProcessLauncher:
         self, argv: Sequence[str], environment: Mapping[str, str]
     ) -> SubprocessManagedProcess:
         exact_argv = _validate_argv(argv)
+        unsupported = sorted(set(environment) - _ALLOWED_PROCESS_ENVIRONMENT)
+        if unsupported:
+            raise ValueError(
+                "process environment variable is not allowlisted: "
+                + ", ".join(unsupported)
+            )
         merged_environment = {**self._base_environment, **dict(environment)}
         _prepare_private_directory(self._log_dir)
         service = merged_environment.get("MLXCTL_SERVICE_NAME", "runtime")
         if _SAFE_LOG_NAME.fullmatch(service) is None:
             service = "runtime"
         log_path = self._log_dir / f"{service}.log"
-        descriptor = _open_private_log(log_path)
-        log = os.fdopen(descriptor, "ab", buffering=0)
+        writer = _RotatingLogWriter(
+            log_path,
+            max_bytes=self._max_log_bytes,
+            retained_files=self._retained_log_files,
+            lock=self._log_lock,
+        )
+        read_descriptor, write_descriptor = os.pipe()
+        pump = threading.Thread(
+            target=_pump_process_log,
+            args=(read_descriptor, writer),
+            name=f"mlxctl-log-{service}",
+            daemon=True,
+        )
+        pump.start()
         try:
             process = self._popen(
                 exact_argv,
                 shell=False,
                 env=merged_environment,
                 stdin=subprocess.DEVNULL,
-                stdout=log,
+                stdout=write_descriptor,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 close_fds=True,
             )
+        except Exception:
+            os.close(write_descriptor)
+            raise
         finally:
-            log.close()
-        return SubprocessManagedProcess(process)
+            if _descriptor_is_open(write_descriptor):
+                os.close(write_descriptor)
+        return SubprocessManagedProcess(process, pump)
 
     def attach(self, pid: int) -> PsutilManagedProcess | None:
         if type(pid) is not int or pid <= 0:
@@ -282,6 +351,17 @@ class ConfigDesiredState:
         )
 
 
+class ModelSecurityPort(Protocol):
+    def require(self, repository: str, revision: str) -> Mapping[str, object]: ...
+
+    def record_cached_verification(
+        self,
+        repository: str,
+        revision: str,
+        verification: VerificationResult,
+    ) -> Mapping[str, object]: ...
+
+
 class ExactRuntimeLaunchSupply:
     """Build a launch from exact configured runtime and cached model identities."""
 
@@ -294,6 +374,8 @@ class ExactRuntimeLaunchSupply:
         model_installations: Mapping[str, SuppliedModelInstallation]
         | Callable[[], Mapping[str, SuppliedModelInstallation]],
         launch_builder: RuntimeLaunchBuilder,
+        model_security: ModelSecurityPort,
+        model_verifier: Callable[[SuppliedModelInstallation], VerificationResult],
         trust_grants: Callable[[], Sequence[Mapping[str, object]]] | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
@@ -301,6 +383,8 @@ class ExactRuntimeLaunchSupply:
         self._runtime_installations = runtime_installations
         self._model_installations = model_installations
         self._launch_builder = launch_builder
+        self._model_security = model_security
+        self._model_verifier = model_verifier
         self._trust_grants = trust_grants or (lambda: ())
         self._environment = dict(environment or {})
 
@@ -338,6 +422,20 @@ class ExactRuntimeLaunchSupply:
                 f"model installation '{alias.installation_name}' is not cached"
             )
         snapshot = self._validate_model(configured_model, model)
+        try:
+            assessment = self._model_security.require(
+                configured_model.revision.repository,
+                configured_model.revision.revision,
+            )
+            assessment = self._model_security.record_cached_verification(
+                configured_model.revision.repository,
+                configured_model.revision.revision,
+                self._model_verifier(model),
+            )
+        except Exception as error:
+            raise CapabilityValidationError(
+                "model launch security gate rejected the exact Model Revision"
+            ) from error
         options = self._resolve_model_artifacts(dict(service.options), snapshot)
         self._require_remote_code_grant(
             options,
@@ -345,6 +443,7 @@ class ExactRuntimeLaunchSupply:
             repository=configured_model.revision.repository,
             revision=configured_model.revision.revision,
             runtime_installation=service.runtime_installation,
+            assessed_risks=assessment.get("overridable_risks", ()),
         )
         required_capabilities = frozenset({"model", "host", "port", *options.keys()})
         argv = self._launch_builder.build(
@@ -436,9 +535,15 @@ class ExactRuntimeLaunchSupply:
         repository: str,
         revision: str,
         runtime_installation: str,
+        assessed_risks: object,
     ) -> None:
         if options.get("trust_remote_code") is not True:
             return
+        if not isinstance(assessed_risks, (tuple, list)) or not all(
+            isinstance(item, str) for item in assessed_risks
+        ):
+            raise CapabilityValidationError("model security risk evidence is invalid")
+        requested_risks = frozenset({"remote_code", *assessed_risks})
         for grant in self._trust_grants():
             accepted = grant.get("accepted_risks", ())
             if (
@@ -447,12 +552,14 @@ class ExactRuntimeLaunchSupply:
                 and grant.get("revision") == revision
                 and grant.get("runtime_installation") == runtime_installation
                 and isinstance(accepted, (tuple, list))
-                and "remote_code" in accepted
+                and requested_risks.issubset(accepted)
             ):
                 return
         raise CapabilityValidationError(
             "remote model code is not trusted for this exact Model Revision and "
-            "Runtime Installation; grant remote_code with mlxctl model trust"
+            "Runtime Installation; grant "
+            + ", ".join(sorted(requested_risks))
+            + " with mlxctl model trust"
         )
 
     @staticmethod
@@ -551,3 +658,87 @@ def _open_private_log(path: Path) -> int:
         os.close(descriptor)
         raise
     return descriptor
+
+
+class _RotatingLogWriter:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_bytes: int,
+        retained_files: int,
+        lock: threading.Lock,
+    ) -> None:
+        self._path = path
+        self._max_bytes = max_bytes
+        self._retained_files = retained_files
+        self._lock = lock
+        descriptor = _open_private_log(path)
+        os.close(descriptor)
+
+    def write(self, payload: bytes) -> None:
+        remaining = memoryview(payload)
+        with self._lock:
+            while remaining:
+                descriptor = _open_private_log(self._path)
+                try:
+                    size = os.fstat(descriptor).st_size
+                    available = self._max_bytes - size
+                    if available > 0:
+                        written = os.write(descriptor, remaining[:available])
+                        remaining = remaining[written:]
+                finally:
+                    os.close(descriptor)
+                if remaining or available <= 0:
+                    _rotate_private_logs(self._path, self._retained_files)
+
+
+def _pump_process_log(descriptor: int, writer: _RotatingLogWriter) -> None:
+    try:
+        while payload := os.read(descriptor, 64 * 1024):
+            writer.write(payload)
+    finally:
+        os.close(descriptor)
+
+
+def _rotate_private_logs(path: Path, retained_files: int) -> None:
+    candidates = [
+        path,
+        *(_log_archive(path, index) for index in range(1, retained_files + 1)),
+    ]
+    for candidate in candidates:
+        _validate_optional_private_log(candidate)
+    if retained_files == 0:
+        path.unlink(missing_ok=True)
+        return
+    oldest = _log_archive(path, retained_files)
+    oldest.unlink(missing_ok=True)
+    for index in range(retained_files - 1, 0, -1):
+        source = _log_archive(path, index)
+        if source.exists():
+            os.replace(source, _log_archive(path, index + 1))
+    if path.exists():
+        os.replace(path, _log_archive(path, 1))
+
+
+def _log_archive(path: Path, index: int) -> Path:
+    return path.with_name(f"{path.name}.{index}")
+
+
+def _validate_optional_private_log(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"private service log is not a regular file: {path}")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"private service log is not user-owned: {path}")
+
+
+def _descriptor_is_open(descriptor: int) -> bool:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return False
+    return True

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import Protocol
 
-from textual import events
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -325,6 +326,19 @@ class MlxctlApp(App[None]):
                 widgets.append(
                     Checkbox(f"Set {parameter.flag or parameter.name}", id=identifier)
                 )
+            elif parameter.value_type == "tristate_boolean":
+                widgets.append(
+                    Select(
+                        [
+                            ("Leave unchanged", "unchanged"),
+                            ("Yes", "true"),
+                            ("No", "false"),
+                        ],
+                        value="unchanged",
+                        allow_blank=False,
+                        id=identifier,
+                    )
+                )
             elif parameter.accepted:
                 widgets.append(
                     Select(
@@ -363,10 +377,14 @@ class MlxctlApp(App[None]):
         )
         self.set_focus(self.query_one(focus_target))
 
-    def execute_operation(self, name: str, **parameters: object) -> None:
+    @work(exclusive=False, group="operation-execution")
+    async def execute_operation(self, name: str, **parameters: object) -> None:
         """Execute one palette or contextual operation through shared dispatch."""
+        self._set_operation_busy(True, name)
         try:
-            result = self.dispatcher.execute(OperationRequest(name, parameters))
+            result = await asyncio.to_thread(
+                self.dispatcher.execute, OperationRequest(name, parameters)
+            )
         except ApplicationError as error:
             actions = "\n".join(f"  → {action}" for action in error.next_actions)
             body = f"{error.code}\n\n{error.message}"
@@ -377,7 +395,11 @@ class MlxctlApp(App[None]):
             )
             self.query_one("#view-body", Static).update(body)
             self.notify(error.message, title="Operation failed", severity="error")
+            self._set_operation_busy(False, name)
             return
+        except Exception:
+            self._set_operation_busy(False, name)
+            raise
         self.notify(
             f"{name}: complete"
             + (" · Supervisor started" if result.supervisor_started else ""),
@@ -410,6 +432,7 @@ class MlxctlApp(App[None]):
         self.query_one("#operation-confirm", Button).styles.display = "none"
         self.query_one("#operation-cancel", Button).styles.display = "none"
         self.query_one("#operation-submit", Button).styles.display = "block"
+        self._set_operation_busy(False, name)
         self.set_focus(self.query_one("#operation-submit", Button))
 
     def show_view(self, name: str) -> None:
@@ -444,9 +467,16 @@ class MlxctlApp(App[None]):
         if not operation.confirmation:
             self.execute_operation(operation.name, **parameters)
             return
+        self._preview_operation(operation, parameters)
+
+    @work(exclusive=True, group="operation-preview")
+    async def _preview_operation(
+        self, operation: Operation, parameters: Mapping[str, object]
+    ) -> None:
+        self._set_operation_busy(True, operation.name)
         try:
-            preview = self.dispatcher.preview(
-                OperationRequest(operation.name, parameters)
+            preview = await asyncio.to_thread(
+                self.dispatcher.preview, OperationRequest(operation.name, parameters)
             )
         except ApplicationError as error:
             actions = "\n".join(f"  → {action}" for action in error.next_actions)
@@ -455,7 +485,11 @@ class MlxctlApp(App[None]):
                 body += f"\n\nNext actions\n{actions}"
             self.query_one("#view-body", Static).update(body)
             self.notify(error.message, title="Plan failed", severity="error")
+            self._set_operation_busy(False, operation.name)
             return
+        except Exception:
+            self._set_operation_busy(False, operation.name)
+            raise
         pending = dict(parameters)
         fingerprint = preview.value.get("plan_fingerprint")
         if isinstance(fingerprint, str):
@@ -471,6 +505,7 @@ class MlxctlApp(App[None]):
         self.query_one("#operation-submit", Button).styles.display = "none"
         self.query_one("#operation-confirm", Button).styles.display = "block"
         self.query_one("#operation-cancel", Button).styles.display = "block"
+        self._set_operation_busy(False, operation.name)
         self.set_focus(self.query_one("#operation-confirm", Button))
 
     def _confirm_operation(self) -> None:
@@ -505,6 +540,8 @@ class MlxctlApp(App[None]):
                 value = control.value
             elif isinstance(control, Select):
                 value = None if control.value is Select.BLANK else control.value
+                if parameter.value_type == "tristate_boolean":
+                    value = {"unchanged": None, "true": True, "false": False}[value]
             elif isinstance(control, Input):
                 value = control.value.strip() or None
                 if value is not None and parameter.value_type == "integer":
@@ -527,9 +564,25 @@ class MlxctlApp(App[None]):
                 raise ValueError(
                     f"{parameter.name.replace('_', ' ').title()} is required."
                 )
-            if value is not None and value is not False:
+            if value is not None and (
+                value is not False or parameter.value_type == "tristate_boolean"
+            ):
                 values[parameter.name] = value
         return values
+
+    def _set_operation_busy(self, busy: bool, operation: str) -> None:
+        submit = self.query_one("#operation-submit", Button)
+        confirm = self.query_one("#operation-confirm", Button)
+        submit.disabled = busy
+        confirm.disabled = busy
+        if busy:
+            self.query_one("#view-title", Static).update(
+                f"{operation.replace('.', '  ›  ')} · working"
+            )
+            self.notify(
+                "The operation is continuing in the background; the interface remains responsive.",
+                title="Working",
+            )
 
     @staticmethod
     def _mutation_plan(operation: Operation, parameters: Mapping[str, object]) -> str:

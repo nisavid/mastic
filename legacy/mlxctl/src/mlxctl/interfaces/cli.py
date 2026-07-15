@@ -120,10 +120,18 @@ def _add_command(
         json_lines = bool(values.pop("json_lines"))
         plain = bool(values.pop("plain"))
         confirmed = bool(values.pop("yes", False))
+        specifications = {item.name: item for item in operation.parameters}
         parameters = {
             key: value
             for key, value in values.items()
-            if value is not None and value is not False
+            if value is not None
+            and (
+                value is not False
+                or (
+                    key in specifications
+                    and specifications[key].value_type == "tristate_boolean"
+                )
+            )
         }
         parameters = _coerce_parameters(operation.parameters, parameters)
         _validate_accepted(operation.parameters, parameters)
@@ -226,6 +234,9 @@ def _signature_parameter(parameter: Parameter) -> SignatureParameter:
     if parameter.value_type == "boolean":
         value_type: object = bool
         default: object = False
+    elif parameter.value_type == "tristate_boolean":
+        value_type = bool | None
+        default = None
     elif parameter.value_type == "integer":
         value_type = int | None
         default = None
@@ -235,9 +246,12 @@ def _signature_parameter(parameter: Parameter) -> SignatureParameter:
     if parameter.kind is ParameterKind.ARGUMENT:
         annotation = Annotated[value_type, typer.Argument(help=help_text)]
     else:
+        option_flag = parameter.flag or "--" + parameter.name
+        if parameter.value_type == "tristate_boolean":
+            option_flag += "/--no-" + parameter.name.replace("_", "-")
         annotation = Annotated[
             value_type,
-            typer.Option(parameter.flag or "--" + parameter.name, help=help_text),
+            typer.Option(option_flag, help=help_text),
         ]
     return SignatureParameter(
         parameter.name,
@@ -321,6 +335,11 @@ def _invoke(
         typer.echo(json.dumps(_plain(result.value), sort_keys=True, indent=2))
     else:
         Console().print(Pretty(_plain(result.value), expand_all=True))
+    if operation in {"check", "service.check"} and result.value.get("state") not in {
+        "ok",
+        "ready",
+    }:
+        raise typer.Exit(1)
 
 
 def _render_error(error: ApplicationError, *, json_output: bool) -> None:

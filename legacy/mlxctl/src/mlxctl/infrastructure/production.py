@@ -65,7 +65,11 @@ from mlxctl.infrastructure.setup_port import (
     SetupOperationPort,
 )
 from mlxctl.infrastructure.state_store import OperationalStateStore
-from mlxctl.infrastructure.supply_ports import ModelSupplyPort, RuntimeSupplyPort
+from mlxctl.infrastructure.supply_ports import (
+    ExactRevisionModelSecurity,
+    ModelSupplyPort,
+    RuntimeSupplyPort,
+)
 from mlxctl.infrastructure.supervisor_v1 import Supervisor
 from mlxctl.infrastructure.system_adapters import (
     ConfigDesiredState,
@@ -91,9 +95,15 @@ class OperationOwner(Protocol):
 class _LocalModelSupply:
     """Keep search/inspection local while sending physical mutations to mlxd."""
 
-    def __init__(self, supply: ModelSupply, remote: OperationOwner) -> None:
+    def __init__(
+        self,
+        supply: ModelSupply,
+        remote: OperationOwner,
+        security: ExactRevisionModelSecurity,
+    ) -> None:
         self._supply = supply
         self._remote = remote
+        self._security = security
 
     def search(self, query: str, *, mode: str = "curated", limit: int = 20):
         return self._supply.search(query, mode=mode, limit=limit)
@@ -101,8 +111,16 @@ class _LocalModelSupply:
     def inventory(self):
         return self._supply.inventory()
 
+    def resolve(self, repo_id: str, revision: str, *, offline: bool = False):
+        return self._supply.resolve(repo_id, revision, offline=offline)
+
     def verify(self, installation: ModelInstallation):
-        return self._supply.verify(installation)
+        assessment = self._security.inspect(
+            installation.revision.repo_id, installation.revision.commit_sha
+        )
+        verification = self._supply.verify(installation)
+        self._security.record_verification(assessment, verification)
+        return verification
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -198,17 +216,12 @@ class _GatewayMutationGuard:
                 socket_running = stat.S_ISSOCK(self._control_socket.lstat().st_mode)
             except FileNotFoundError:
                 pass
-        if request.name in {"gateway.configure", "service.edit"} and (
+        if request.name == "gateway.configure" and (
             self._launchd.status().running or socket_running
         ):
-            resource = (
-                "Gateway endpoint"
-                if request.name == "gateway.configure"
-                else "Inference Service"
-            )
             raise ApplicationError(
                 "supervisor_running",
-                f"Stop the Supervisor before changing the {resource}.",
+                "Stop the Supervisor before changing the Gateway endpoint.",
                 next_actions=(
                     "mlxctl supervisor stop",
                     "retry the Gateway configuration",
@@ -260,6 +273,7 @@ def compose_local(
 
     resolved_home = (home or Path.home()).expanduser().resolve()
     paths = paths or resolve_paths(home=resolved_home)
+    paths.prepare()
     executable = (executable or Path(sys.executable)).expanduser().resolve()
     launchd = make_launchd(
         executable=executable,
@@ -274,9 +288,13 @@ def compose_local(
     )
     activating_remote = _ActivatingOperationOwner(activator, remote)
     hub_supply = ModelSupply(HuggingFaceHubClient())
-    model = _LocalModelSupply(hub_supply, remote)
     config_store = ConfigStore(paths.config_file, validate_config)
     state_store = OperationalStateStore(paths.state_db)
+    intelligence = ModelIntelligence(
+        HuggingFaceModelRepository(), PsutilMachineInventory()
+    )
+    security = ExactRevisionModelSecurity(intelligence, state_store)
+    model = _LocalModelSupply(hub_supply, remote, security)
     client = client_port(resolved_home, paths, config_store)
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
@@ -304,9 +322,7 @@ def compose_local(
         clients=client,
         config_store=config_store,
         state_store=state_store,
-        model_intelligence=ModelIntelligence(
-            HuggingFaceModelRepository(), PsutilMachineInventory()
-        ),
+        model_intelligence=intelligence,
     )
     config_owner.bind(
         _DispatcherOwner(
@@ -354,7 +370,11 @@ def compose_daemon(
         catalogue=catalogue,
     )
     hub_supply = ModelSupply(HuggingFaceHubClient())
-    model = ModelSupplyPort(hub_supply, config_store)
+    security = ExactRevisionModelSecurity(
+        ModelIntelligence(HuggingFaceModelRepository(), PsutilMachineInventory()),
+        state_store,
+    )
+    model = ModelSupplyPort(hub_supply, config_store, security)
 
     def load_config() -> MlxctlConfig:
         if not config_store.exists:
@@ -380,7 +400,11 @@ def compose_daemon(
         return configured_model_installations(load_config(), hub_supply.inventory())
 
     configured = load_config()
-    gateway = GatewayRuntime(host=configured.gateway.host, port=configured.gateway.port)
+    gateway = GatewayRuntime(
+        host=configured.gateway.host,
+        port=configured.gateway.port,
+        metric_sink=state_store.record_metric,
+    )
     pressure = MacOSMemoryPressure()
     supervisor = Supervisor(
         desired_state=ConfigDesiredState(load_config),
@@ -390,6 +414,8 @@ def compose_daemon(
             model_installations=model_installations,
             launch_builder=RuntimeLaunchBuilder(catalogue),
             trust_grants=lambda: state_store.snapshots("trust"),
+            model_security=security,
+            model_verifier=hub_supply.verify,
         ),
         state_store=state_store,
         gateway=gateway,

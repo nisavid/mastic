@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from mlxctl.application.config_schema import validate_config
 from mlxctl.infrastructure.config_store import ConfigStore
@@ -16,12 +17,19 @@ from mlxctl.infrastructure.model_supply import (
     ModelRevision,
     VerificationResult,
 )
+from mlxctl.infrastructure.model_intelligence import (
+    EvidenceState,
+    RuntimeCompatibility,
+    TrustSignal,
+)
+from mlxctl.infrastructure.state_store import OperationalStateStore
 from mlxctl.infrastructure.runtime_supply import (
     RuntimeCatalogue,
     RuntimeInstallation,
 )
 from mlxctl.infrastructure.supply_ports import (
     CacheMovePlan,
+    ExactRevisionModelSecurity,
     ModelSupplyPort,
     RuntimeSupplyPort,
     SupplyPortError,
@@ -48,13 +56,15 @@ class FakeRuntimeManager:
         elif bundle_id.startswith("mlx_vlm"):
             runtime = "mlx_vlm"
         version = bundle_id.removeprefix(f"{runtime}-").split("-py", 1)[0]
-        return self._installation(
+        installation = self._installation(
             bundle_id,
             runtime,
             version,
             "tested",
             bundle_id=bundle_id,
         )
+        installation.root.mkdir(parents=True)
+        return installation
 
     def install_custom(
         self,
@@ -67,9 +77,11 @@ class FakeRuntimeManager:
         self.calls.append(
             ("install_custom", runtime, version, python, installation_root)
         )
-        return self._installation(
+        installation = self._installation(
             f"{runtime}-{version}-custom", runtime, version, "custom"
         )
+        installation.root.mkdir(parents=True)
+        return installation
 
     def adopt_custom(self, runtime: str, root: Path) -> RuntimeInstallation:
         self.calls.append(("adopt_custom", runtime, root))
@@ -164,8 +176,19 @@ class FakeModelSupply:
             VerificationResult("complete", "cache-completeness", ()),
         )
 
+    def resolve(
+        self, repo_id: str, revision: str, *, offline: bool = False
+    ) -> ModelRevision:
+        sha = _SHA_A if revision in {"main", _SHA_A} else _SHA_B
+        self.calls.append(("resolve", repo_id, revision, offline))
+        return ModelRevision(repo_id, sha, revision, "test-resolution")
+
     def repair(self, installation: ModelInstallation) -> VerificationResult:
         self.calls.append(("repair", installation))
+        return VerificationResult("complete", "cache-completeness", ())
+
+    def verify(self, installation: ModelInstallation) -> VerificationResult:
+        self.calls.append(("verify", installation))
         return VerificationResult("complete", "cache-completeness", ())
 
     def search(self, query: str, *, mode: str = "curated", limit: int = 20):
@@ -222,11 +245,40 @@ class FakeCacheMover:
         return plan.destination
 
 
+class FakeModelIntelligence:
+    def __init__(
+        self,
+        *signals: TrustSignal,
+        compatibility: tuple[RuntimeCompatibility, ...] = (),
+    ) -> None:
+        self.signals = signals or (
+            TrustSignal(
+                "hub_security_scan",
+                "info",
+                EvidenceState.OBSERVED,
+                "Hub security status@test",
+                "Hub scans completed with no reported file issues",
+            ),
+        )
+        self.compatibility = compatibility
+
+    def inspect(self, repository: str, revision: str, **_options):
+        return SimpleNamespace(
+            identity=SimpleNamespace(repo_id=repository, commit_sha=revision),
+            trust_signals=self.signals,
+            compatibility=self.compatibility,
+        )
+
+
 class SupplyPortTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.store = ConfigStore(self.root / "config.toml", validate_config)
+        self.security_state = OperationalStateStore(self.root / "state.sqlite3")
+        self.security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(), self.security_state
+        )
         self.store.import_text(
             """schema_version = 1
 
@@ -244,6 +296,12 @@ port = 8766
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _mark_owned(
+        self, port: RuntimeSupplyPort, installation: RuntimeInstallation
+    ) -> None:
+        installation.root.mkdir(parents=True, exist_ok=True)
+        port.record_managed_installation(installation)
 
     def test_runtime_install_uses_tested_bundle_and_persists_exact_probe(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
@@ -354,6 +412,73 @@ route = "coding"
                 {"resource": "optiq-old", "channel": "custom"},
             )
 
+    def test_runtime_update_and_rollback_reject_incompatible_service_options(self):
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        current = RuntimeInstallation(
+            "optiq-current",
+            "optiq",
+            "0.2",
+            "tested",
+            self.root / "runtimes/optiq-current",
+            (str(self.root / "runtimes/optiq-current/bin/optiq"), "serve"),
+            frozenset({"model", "host", "port", "mtp"}),
+        )
+        target = RuntimeInstallation(
+            "optiq-target",
+            "optiq",
+            "0.3",
+            "tested",
+            self.root / "runtimes/optiq-target",
+            (str(self.root / "runtimes/optiq-target/bin/optiq"), "serve"),
+            frozenset({"model", "host", "port"}),
+        )
+        self.store.import_text(
+            f'''schema_version = 1
+[gateway]
+[runtimes.optiq-current]
+definition = "optiq"
+version = "0.2"
+provenance = "tested"
+root = "{current.root}"
+launcher = ["{current.launcher[0]}", "serve"]
+capabilities = ["host", "model", "mtp", "port"]
+[runtimes.optiq-target]
+definition = "optiq"
+version = "0.3"
+provenance = "tested"
+root = "{target.root}"
+launcher = ["{target.launcher[0]}", "serve"]
+capabilities = ["host", "model", "port"]
+[models.qwen]
+repository = "mlx-community/Qwen"
+revision = "{_SHA_A}"
+[aliases.coding]
+installation = "qwen"
+[services.coding]
+model_alias = "coding"
+runtime = "optiq-current"
+route = "coding"
+[services.coding.options]
+mtp = true
+[clients]
+'''
+        )
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        for operation in ("runtime.update", "runtime.rollback"):
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(
+                    SupplyPortError, "missing exact capabilities"
+                ):
+                    port.execute(
+                        operation,
+                        {"resource": "optiq-current", "target": "optiq-target"},
+                    )
+                self.assertEqual(
+                    self.store.load().value.services["coding"].runtime_installation,
+                    "optiq-current",
+                )
+
     def test_runtime_remove_is_reference_gated_and_requires_confirmation(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
         files = FakeRuntimeFiles()
@@ -362,6 +487,7 @@ route = "coding"
         port = RuntimeSupplyPort(
             manager, self.store, self.root / "runtimes", filesystem=files
         )
+        self._mark_owned(port, installation)
 
         with self.assertRaisesRegex(PermissionError, "confirmation"):
             port.execute("runtime.remove", {"resource": "optiq-old"})
@@ -403,6 +529,7 @@ route = "coding"
         port = RuntimeSupplyPort(
             manager, self.store, self.root / "runtimes", filesystem=files
         )
+        self._mark_owned(port, installation)
 
         with self.assertRaisesRegex(SupplyPortError, "coding"):
             port.execute("runtime.remove", {"resource": "optiq-old", "confirmed": True})
@@ -431,6 +558,39 @@ route = "coding"
 
         self.assertEqual(files.removed, [])
 
+    def test_runtime_remove_requires_a_direct_owned_child_and_exact_marker(
+        self,
+    ) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        files = FakeRuntimeFiles()
+        port = RuntimeSupplyPort(
+            manager, self.store, self.root / "runtimes", filesystem=files
+        )
+        outside = manager._installation(
+            "optiq-outside", "optiq", "0.2", "tested", root=self.root / "outside"
+        )
+        outside.root.mkdir()
+        RuntimeSupplyPort.persist_runtime(self.store, outside)
+
+        with self.assertRaisesRegex(SupplyPortError, "direct managed child"):
+            port.execute(
+                "runtime.remove",
+                {"resource": "optiq-outside", "confirmed": True},
+            )
+
+        self.assertEqual(files.removed, [])
+
+        direct = manager._installation("optiq-direct", "optiq", "0.3", "tested")
+        direct.root.mkdir(parents=True)
+        RuntimeSupplyPort.persist_runtime(self.store, direct)
+        with self.assertRaisesRegex(SupplyPortError, "ownership marker"):
+            port.execute(
+                "runtime.remove",
+                {"resource": "optiq-direct", "confirmed": True},
+            )
+
+        self.assertEqual(files.removed, [])
+
     def test_runtime_prune_retains_two_rollback_candidates_per_definition(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
         files = FakeRuntimeFiles()
@@ -443,6 +603,7 @@ route = "coding"
         ]
         for installation in installations:
             RuntimeSupplyPort.persist_runtime(self.store, installation)
+            self._mark_owned(port, installation)
 
         result = port.execute("runtime.prune", {"confirmed": True})
 
@@ -454,7 +615,7 @@ route = "coding"
         self,
     ) -> None:
         supply = FakeModelSupply(self.root / "cache")
-        port = ModelSupplyPort(supply, self.store)
+        port = ModelSupplyPort(supply, self.store, self.security)
 
         installed = port.execute(
             "model.install",
@@ -493,9 +654,152 @@ route = "coding"
             installed["installation_name"],
         )
 
+    def test_optiq_safetensors_install_persists_launchable_exact_security_evidence(
+        self,
+    ) -> None:
+        supply = FakeModelSupply(self.root / "cache")
+        port = ModelSupplyPort(supply, self.store, self.security)
+
+        result = port.execute(
+            "model.install",
+            {
+                "repository": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+                "revision": _SHA_A,
+                "alias": "qwen-optiq",
+            },
+        )
+
+        self.assertEqual(result["security"]["hard_blockers"], [])
+        self.assertEqual(result["security"]["verification"]["status"], "complete")
+        persisted = self.security.require(
+            "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit", _SHA_A
+        )
+        self.assertEqual(persisted["revision"], _SHA_A)
+
+    def test_model_install_hard_blocks_findings_unsafe_serialization_and_unknown_scan(
+        self,
+    ) -> None:
+        scenarios = (
+            TrustSignal(
+                "hub_security_scan",
+                "danger",
+                EvidenceState.CONFLICTING,
+                "Hub security status@test",
+                "infected pickle",
+            ),
+            TrustSignal(
+                "unsafe_serialization",
+                "warning",
+                EvidenceState.OBSERVED,
+                "Hub repository inventory@test",
+                "weights.bin",
+            ),
+            TrustSignal(
+                "hub_security_scan",
+                "unknown",
+                EvidenceState.UNKNOWN,
+                "Hub security status@test",
+                "scan unavailable",
+            ),
+        )
+        for signal in scenarios:
+            with self.subTest(signal=signal.name, severity=signal.severity):
+                supply = FakeModelSupply(self.root / f"cache-{signal.severity}")
+                security = ExactRevisionModelSecurity(
+                    FakeModelIntelligence(signal), self.security_state
+                )
+                port = ModelSupplyPort(supply, self.store, security)
+
+                with self.assertRaisesRegex(SupplyPortError, "security policy"):
+                    port.execute(
+                        "model.install",
+                        {
+                            "repository": "owner/unsafe-model",
+                            "revision": _SHA_A,
+                        },
+                    )
+
+                self.assertFalse(any(call[0] == "install" for call in supply.calls))
+
+    def test_integrity_mismatch_is_persisted_and_cannot_be_granted(self) -> None:
+        assessment = self.security.inspect("owner/model", _SHA_A)
+
+        with self.assertRaisesRegex(SupplyPortError, "integrity_mismatch"):
+            self.security.record_verification(
+                assessment,
+                VerificationResult("incomplete", "cache-check", ("hash mismatch",)),
+            )
+
+        with self.assertRaisesRegex(SupplyPortError, "integrity_mismatch"):
+            self.security.require("owner/model", _SHA_A)
+
+    def test_model_update_and_rollback_block_explicit_runtime_incompatibility(self):
+        supply = FakeModelSupply(self.root / "cache")
+        supply.install(alias="coding", repo_id="mlx-community/Qwen", revision=_SHA_A)
+        supply.install(alias="coding", repo_id="mlx-community/Qwen", revision=_SHA_B)
+        self.store.import_text(
+            f'''schema_version = 1
+[gateway]
+[runtimes.optiq]
+definition = "optiq"
+version = "0.3"
+provenance = "tested"
+root = "{self.root / "runtimes/optiq"}"
+launcher = ["{self.root / "runtimes/optiq/bin/optiq"}", "serve"]
+capabilities = ["host", "model", "port"]
+[models.qwen-old]
+repository = "mlx-community/Qwen"
+revision = "{_SHA_A}"
+[models.qwen-target]
+repository = "mlx-community/Qwen"
+revision = "{_SHA_B}"
+[aliases.coding]
+installation = "qwen-old"
+[services.coding]
+model_alias = "coding"
+runtime = "optiq"
+route = "coding"
+[clients]
+'''
+        )
+        compatibility = RuntimeCompatibility(
+            "optiq",
+            "optiq",
+            "0.3",
+            "unsupported",
+            frozenset({"model", "host", "port"}),
+            "exact runtime and model metadata",
+            "explicit architecture contradiction",
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(compatibility=(compatibility,)),
+            self.security_state,
+        )
+        port = ModelSupplyPort(supply, self.store, security)
+
+        requests = (
+            ("model.update", {"resource": "coding", "revision": _SHA_B}),
+            (
+                "model.rollback",
+                {
+                    "resource": "coding",
+                    "target": "qwen-target",
+                    "confirmed": True,
+                },
+            ),
+        )
+        for operation, parameters in requests:
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(SupplyPortError, "explicitly unsupported"):
+                    port.execute(operation, parameters)
+                self.assertEqual(
+                    self.store.load().value.aliases["coding"].installation_name,
+                    "qwen-old",
+                )
+
     def test_model_repair_delegates_the_exact_pinned_revision(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
-        port = ModelSupplyPort(supply, self.store)
+        port = ModelSupplyPort(supply, self.store, self.security)
         installed = port.execute(
             "model.install",
             {
@@ -515,7 +819,7 @@ route = "coding"
 
     def test_cache_eviction_is_reference_aware_and_requires_confirmation(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
-        port = ModelSupplyPort(supply, self.store)
+        port = ModelSupplyPort(supply, self.store, self.security)
         installed = port.execute(
             "model.install",
             {
@@ -548,7 +852,7 @@ route = "coding"
 
     def test_cache_prune_deletes_only_unreferenced_revisions(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
-        port = ModelSupplyPort(supply, self.store)
+        port = ModelSupplyPort(supply, self.store, self.security)
         port.execute(
             "model.install",
             {
@@ -576,7 +880,7 @@ route = "coding"
     def test_cache_move_exposes_plan_and_confirms_source_cleanup(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
         mover = FakeCacheMover()
-        port = ModelSupplyPort(supply, self.store, cache_mover=mover)
+        port = ModelSupplyPort(supply, self.store, self.security, cache_mover=mover)
         port.execute(
             "model.install",
             {
@@ -634,3 +938,4 @@ route = "coding"
 
 if __name__ == "__main__":
     unittest.main()
+    (ExactRevisionModelSecurity,)

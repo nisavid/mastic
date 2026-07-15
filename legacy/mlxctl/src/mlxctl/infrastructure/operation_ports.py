@@ -31,7 +31,7 @@ class ControlClient(Protocol):
 class ClientAdapter(Protocol):
     def preview(self, configuration: ClientConfiguration): ...
 
-    def apply(self, configuration: ClientConfiguration): ...
+    def apply(self, configuration: ClientConfiguration, *, takeover: bool = False): ...
 
     def remove(self): ...
 
@@ -102,6 +102,8 @@ class SupervisorOperationPort:
             value = self._supervisor.remove_service(resource)
         elif operation == "pressure.reconcile":
             value = self._supervisor.reconcile_pressure()
+        elif operation == "supervisor.maintain":
+            value = self._supervisor.maintain()
         else:
             raise ApplicationError(
                 "operation_unavailable",
@@ -171,7 +173,9 @@ class ClientOperationPort:
         configuration = self._configuration(name, parameters, stored)
         if operation == "client.configure":
             preview = adapter.preview(configuration)
-            result = adapter.apply(configuration)
+            result = adapter.apply(
+                configuration, takeover=bool(parameters.get("takeover", False))
+            )
             self._record(
                 name,
                 _client_settings(name, parameters, configuration, stored),

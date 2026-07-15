@@ -290,21 +290,33 @@ class ModelIntelligenceTests(unittest.TestCase):
                 capabilities=frozenset({"image"}),
                 source="probed installation",
             ),
+            RuntimeObservation(
+                installation_id="optiq@0.3.4-unclassified",
+                runtime="optiq",
+                version="0.3.4",
+                recognized_model_types=frozenset(),
+                capabilities=frozenset({"kv_config", "mtp"}),
+                source="probed installation",
+            ),
         )
 
         report = ModelIntelligence(repository, _Machine()).inspect(
             "acme/Qwen-OptiQ", SHA, runtimes=runtimes
         )
 
-        compatibility = {item.runtime: item for item in report.compatibility}
-        self.assertEqual(compatibility["mlx_lm"].status, "candidate")
-        self.assertEqual(compatibility["optiq"].status, "candidate")
-        self.assertEqual(compatibility["mlx_vlm"].status, "unsupported")
+        compatibility = {item.installation_id: item for item in report.compatibility}
+        self.assertEqual(compatibility["mlx-lm@0.31.3"].status, "candidate")
+        self.assertEqual(compatibility["optiq@0.3.3"].status, "candidate")
+        self.assertEqual(compatibility["mlx-vlm@0.6.4"].status, "unsupported")
+        unclassified = compatibility["optiq@0.3.4-unclassified"]
+        self.assertEqual(unclassified.status, "unknown")
+        self.assertIn("recognition evidence is unavailable", unclassified.detail)
         self.assertEqual(
-            compatibility["optiq"].capabilities, frozenset({"kv_config", "mtp"})
+            compatibility["optiq@0.3.3"].capabilities,
+            frozenset({"kv_config", "mtp"}),
         )
-        self.assertIn("optiq@0.3.3", compatibility["optiq"].source)
-        self.assertIn(SHA, compatibility["optiq"].source)
+        self.assertIn("optiq@0.3.3", compatibility["optiq@0.3.3"].source)
+        self.assertIn(SHA, compatibility["optiq@0.3.3"].source)
 
     def test_estimates_machine_fit_from_selected_weights_and_named_assumptions(
         self,

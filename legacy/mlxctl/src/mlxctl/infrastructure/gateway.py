@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ipaddress
 import json
@@ -19,12 +20,13 @@ from starlette.routing import Route
 
 RouteState = Literal["ready", "stopped", "unavailable"]
 _REQUEST_HEADER_ALLOWLIST = frozenset(
-    {"accept", "authorization", "content-type", "user-agent", "x-request-id"}
+    {"accept", "content-type", "user-agent", "x-request-id"}
 )
 _RESPONSE_HEADER_ALLOWLIST = frozenset(
     {"cache-control", "content-encoding", "content-type", "x-request-id"}
 )
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+DEFAULT_UPSTREAM_RESPONSE_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +51,7 @@ class GatewayRouteResolver(Protocol):
 class GatewayActivity(Protocol):
     """Track in-flight work so pressure policy never evicts a busy service."""
 
-    def begin(self, service: str) -> None: ...
+    def begin(self, service: str) -> bool: ...
 
     def end(self, service: str) -> None: ...
 
@@ -98,15 +100,24 @@ def create_gateway(
     bind_host: str = "127.0.0.1",
     client_factory: Callable[[], Any] | None = None,
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+    upstream_response_timeout: float = DEFAULT_UPSTREAM_RESPONSE_TIMEOUT,
     activity: GatewayActivity | None = None,
 ) -> Starlette:
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
     validate_loopback_bind(bind_host)
-    if max_request_bytes <= 0:
-        raise ValueError("Gateway request limit must be positive.")
+    if max_request_bytes <= 0 or upstream_response_timeout <= 0:
+        raise ValueError("Gateway request limits must be positive.")
     make_client = client_factory or (
-        lambda: httpx.AsyncClient(timeout=None, trust_env=False)
+        lambda: httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=None,
+                write=30.0,
+                pool=5.0,
+            ),
+            trust_env=False,
+        )
     )
 
     @asynccontextmanager
@@ -133,6 +144,21 @@ def create_gateway(
         return JSONResponse({"object": "list", "data": data})
 
     async def proxy(request: Request) -> JSONResponse | StreamingResponse:
+        media_type = request.headers.get("content-type", "").partition(";")[0]
+        if media_type.strip().lower() != "application/json":
+            return _error_response(
+                415,
+                "unsupported_media_type",
+                "The Gateway accepts application/json request bodies only.",
+                action="Set Content-Type to application/json and retry.",
+            )
+        if not _origin_is_allowed(request.headers.get("origin")):
+            return _error_response(
+                403,
+                "origin_not_allowed",
+                "Browser requests must originate from a loopback HTTP origin.",
+                action="Use a native local client or a loopback-hosted application.",
+            )
         try:
             body = await _read_limited_body(request, max_request_bytes)
             payload = json.loads(body)
@@ -204,6 +230,17 @@ def create_gateway(
                 parameter="model",
             )
 
+        admitted = activity is None or activity.begin(service)
+        if not admitted:
+            return _error_response(
+                429,
+                "service_busy",
+                f"Inference Service {service!r} has reached its concurrent request limit.",
+                action="Wait for an active request to finish and retry.",
+                parameter="model",
+                retryable=True,
+            )
+
         client = request.state.http_client
         upstream_request = client.build_request(
             request.method,
@@ -216,11 +253,12 @@ def create_gateway(
             },
             params=request.query_params,
         )
-        if activity is not None:
-            activity.begin(service)
         try:
-            upstream = await client.send(upstream_request, stream=True)
-        except (httpx.HTTPError, OSError):
+            upstream = await asyncio.wait_for(
+                client.send(upstream_request, stream=True),
+                timeout=upstream_response_timeout,
+            )
+        except (TimeoutError, httpx.HTTPError, OSError):
             if activity is not None:
                 activity.end(service)
             return _error_response(
@@ -297,6 +335,26 @@ def _validated_upstream_origin(endpoint: str) -> str:
     if not address.is_loopback or port is None:
         raise ValueError("Upstream Endpoint must be a loopback HTTP origin.")
     return endpoint.rstrip("/")
+
+
+def _origin_is_allowed(origin: str | None) -> bool:
+    if origin is None:
+        return True
+    parsed = urlsplit(origin)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.hostname is None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
 
 
 async def _await_if_needed(value: Any) -> Any:

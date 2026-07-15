@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -65,13 +66,13 @@ class ConfigStore(Generic[ValidatedConfig]):
         """Load and validate the current document without changing it."""
         with self._locked():
             self._reconcile_journal_locked()
-            return self._snapshot(self._path.read_text(encoding="utf-8"))
+            return self._snapshot(_read_private_file(self._path).decode("utf-8"))
 
     @property
     def exists(self) -> bool:
         """Return whether desired state has been initialized, without creating it."""
 
-        return self._path.is_file()
+        return _private_file_exists(self._path)
 
     def save(
         self, document: TOMLDocument, *, action: str = "save"
@@ -88,7 +89,7 @@ class ConfigStore(Generic[ValidatedConfig]):
     ) -> ConfigSnapshot[ValidatedConfig]:
         """Apply one locked semantic edit to the latest desired state."""
         with self._locked():
-            snapshot = self._snapshot(self._path.read_text(encoding="utf-8"))
+            snapshot = self._snapshot(_read_private_file(self._path).decode("utf-8"))
             mutation(snapshot.document)
             edited = self._snapshot(snapshot.document.as_string())
             self._save_locked(edited, "edit")
@@ -102,7 +103,7 @@ class ConfigStore(Generic[ValidatedConfig]):
     def export_text(self) -> str:
         """Export the current document exactly as stored."""
         with self._locked():
-            return self._path.read_text(encoding="utf-8")
+            return _read_private_file(self._path).decode("utf-8")
 
     def diff(self, candidate: TOMLDocument) -> tuple[ConfigChange, ...]:
         """Compare a candidate with current desired state, ignoring TOML trivia."""
@@ -118,7 +119,7 @@ class ConfigStore(Generic[ValidatedConfig]):
         """Restore an exact archived desired-state revision."""
         archive_path = self._archive_path(revision)
         try:
-            text = archive_path.read_text(encoding="utf-8")
+            text = _read_private_file(archive_path).decode("utf-8")
         except FileNotFoundError as error:
             raise KeyError(f"unknown config revision {revision}") from error
         if _revision(text.encode()) != revision:
@@ -134,15 +135,15 @@ class ConfigStore(Generic[ValidatedConfig]):
         )
 
     def _prepare_directory(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self._path.parent, 0o700)
-        self._history_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self._history_path, 0o700)
+        _prepare_private_directory(self._path.parent)
+        _prepare_private_directory(self._history_path)
+        _private_file_exists(self._path)
+        _private_file_exists(self._journal_path)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
         lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = _open_private_file(lock_path, os.O_RDWR | os.O_CREAT)
         try:
             os.fchmod(descriptor, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -153,6 +154,7 @@ class ConfigStore(Generic[ValidatedConfig]):
 
     @staticmethod
     def _atomic_replace(path: Path, payload: bytes) -> None:
+        _private_file_exists(path)
         descriptor, temporary_name = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
@@ -164,8 +166,11 @@ class ConfigStore(Generic[ValidatedConfig]):
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, path)
-            os.chmod(path, 0o600)
-            directory = os.open(path.parent, os.O_RDONLY)
+            os.chmod(path, 0o600, follow_symlinks=False)
+            directory = os.open(
+                path.parent,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
+            )
             try:
                 os.fsync(directory)
             finally:
@@ -175,8 +180,8 @@ class ConfigStore(Generic[ValidatedConfig]):
 
     def _archive(self, revision: str, payload: bytes) -> None:
         archive_path = self._archive_path(revision)
-        if archive_path.exists():
-            if archive_path.read_bytes() != payload:
+        if _private_file_exists(archive_path):
+            if _read_private_file(archive_path) != payload:
                 raise RuntimeError(f"config revision collision for {revision}")
             return
         self._atomic_replace(archive_path, payload)
@@ -199,8 +204,8 @@ class ConfigStore(Generic[ValidatedConfig]):
             separators=(",", ":"),
             sort_keys=True,
         )
-        descriptor = os.open(
-            self._journal_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
+        descriptor = _open_private_file(
+            self._journal_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
         )
         try:
             os.fchmod(descriptor, 0o600)
@@ -216,8 +221,8 @@ class ConfigStore(Generic[ValidatedConfig]):
     ) -> None:
         payload = snapshot.document.as_string().encode()
         previous_revision = None
-        if self._path.exists():
-            previous_payload = self._path.read_bytes()
+        if _private_file_exists(self._path):
+            previous_payload = _read_private_file(self._path)
             previous_revision = _revision(previous_payload)
             self._archive(previous_revision, previous_payload)
         self._atomic_replace(self._path, payload)
@@ -233,9 +238,9 @@ class ConfigStore(Generic[ValidatedConfig]):
 
     def _reconcile_journal_locked(self) -> tuple[ConfigRevision, ...]:
         records = list(self._read_journal_locked())
-        if not self._path.exists():
+        if not _private_file_exists(self._path):
             return tuple(records)
-        payload = self._path.read_bytes()
+        payload = _read_private_file(self._path)
         current_revision = _revision(payload)
         if records and records[-1].revision == current_revision:
             return tuple(records)
@@ -251,9 +256,9 @@ class ConfigStore(Generic[ValidatedConfig]):
         return tuple(records)
 
     def _read_journal_locked(self) -> tuple[ConfigRevision, ...]:
-        if not self._journal_path.exists():
+        if not _private_file_exists(self._journal_path):
             return ()
-        payload = self._journal_path.read_bytes()
+        payload = _read_private_file(self._journal_path)
         records = []
         valid_bytes = 0
         lines = payload.splitlines(keepends=True)
@@ -273,13 +278,63 @@ class ConfigStore(Generic[ValidatedConfig]):
         return tuple(records)
 
     def _truncate_journal(self, length: int) -> None:
-        descriptor = os.open(self._journal_path, os.O_RDWR)
+        descriptor = _open_private_file(self._journal_path, os.O_RDWR)
         try:
             os.fchmod(descriptor, 0o600)
             os.ftruncate(descriptor, length)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+def _prepare_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError(f"private config path is not a directory: {path}")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"private config path is not user-owned: {path}")
+    os.chmod(path, 0o700, follow_symlinks=False)
+
+
+def _private_file_exists(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"private config target is not a regular file: {path}")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"private config target is not user-owned: {path}")
+    return True
+
+
+def _open_private_file(path: Path, flags: int) -> int:
+    descriptor = os.open(
+        path,
+        flags | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"private config target is not a regular file: {path}")
+        if metadata.st_uid != os.getuid():
+            raise PermissionError(f"private config target is not user-owned: {path}")
+        os.fchmod(descriptor, 0o600)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _read_private_file(path: Path) -> bytes:
+    descriptor = _open_private_file(path, os.O_RDONLY)
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
 
 
 def _revision(payload: bytes) -> str:

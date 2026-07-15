@@ -4,6 +4,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from mlxctl.infrastructure.state_store import (
     OperationalStateStore,
@@ -12,6 +13,47 @@ from mlxctl.infrastructure.state_store import (
 
 
 class OperationalStateStoreTests(unittest.TestCase):
+    def test_rejects_a_state_directory_not_owned_by_the_current_user(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "mlxctl.infrastructure.state_store.os.getuid",
+                return_value=Path(directory).stat().st_uid + 1,
+            ):
+                with self.assertRaises(PermissionError):
+                    OperationalStateStore(Path(directory) / "state.sqlite3")
+
+    def test_rejects_symlinked_or_non_regular_database_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.write_text("preserve", encoding="utf-8")
+            database = root / "state.sqlite3"
+            database.symlink_to(outside)
+
+            with self.assertRaises(OSError):
+                OperationalStateStore(database)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "preserve")
+
+    def test_rejects_known_credential_fields_at_any_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(Path(directory) / "state.sqlite3")
+
+            for key in (
+                "api_key",
+                "api_token",
+                "authorization",
+                "password",
+                "access_token",
+            ):
+                with self.subTest(key=key):
+                    with self.assertRaisesRegex(
+                        SensitiveContentError, "cannot persist credential material"
+                    ):
+                        store.put_operation(
+                            {"id": f"op-{key}", "details": {key: "secret"}}
+                        )
+
     def test_persists_operations_progress_events_snapshots_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mlxctl" / "state.sqlite3"

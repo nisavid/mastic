@@ -100,6 +100,33 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(current["model"], "my-new-choice")
             self.assertIn(("model",), result.skipped_paths)
 
+    def test_codex_takeover_records_already_equal_fields_for_precise_removal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            adapter = CodexClientIntegration(
+                config, root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.manifest_path.unlink()
+            adapter.backup_path.unlink()
+
+            adopted = adapter.apply(self.configuration, takeover=True)
+            manifest = json.loads(adapter.manifest_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(adopted.changed)
+            self.assertFalse(adopted.changes)
+            self.assertTrue(manifest["fields"])
+            self.assertTrue(
+                all(not item["before_present"] for item in manifest["fields"])
+            )
+            removed = adapter.remove()
+            self.assertTrue(removed.changed)
+            document = tomlkit.parse(config.read_text(encoding="utf-8"))
+            self.assertNotIn("mlxctl-local", document.get("model_providers", {}))
+
     def test_codex_reconfiguration_keeps_the_original_restore_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -222,6 +249,27 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_BANK_ID=existing-bank", restored)
             self.assertIn("HINDSIGHT_API_LLM_MODEL=cloud", restored)
             self.assertNotIn("HINDSIGHT_API_LLM_BASE_URL", restored)
+
+    def test_hindsight_takeover_records_already_equal_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "profile.env"
+            adapter = HindsightClientIntegration(
+                config, root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.manifest_path.unlink()
+            adapter.backup_path.unlink()
+
+            adopted = adapter.apply(self.configuration, takeover=True)
+
+            self.assertTrue(adopted.changed)
+            self.assertFalse(adopted.changes)
+            owned = json.loads(adapter.manifest_path.read_text(encoding="utf-8"))[
+                "fields"
+            ]
+            self.assertTrue(owned)
+            self.assertTrue(all(not item["before_present"] for item in owned))
 
     def test_client_endpoint_requires_a_literal_loopback_origin(self) -> None:
         with self.assertRaisesRegex(ValueError, "literal HTTP loopback"):

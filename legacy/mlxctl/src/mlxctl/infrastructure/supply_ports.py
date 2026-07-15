@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
+import stat
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -12,6 +15,11 @@ import tomlkit
 
 from mlxctl.application.config_schema import ConfiguredRuntime, MlxctlConfig
 from mlxctl.infrastructure.config_store import ConfigStore
+from mlxctl.infrastructure.model_intelligence import (
+    ModelIntelligence,
+    ModelIntelligenceReport,
+    RuntimeObservation,
+)
 from mlxctl.infrastructure.model_supply import (
     CachedRevision,
     ModelInstallResult,
@@ -19,6 +27,7 @@ from mlxctl.infrastructure.model_supply import (
     ModelProvenance,
     ModelRevision as SuppliedModelRevision,
     ModelSupply,
+    VerificationResult,
 )
 from mlxctl.infrastructure.runtime_supply import (
     RuntimeCatalogue,
@@ -31,6 +40,124 @@ from mlxctl.infrastructure.runtime_supply import (
 
 class SupplyPortError(ValueError):
     """A requested supply transition is invalid or unsafe."""
+
+
+class ModelSecurityPolicyError(SupplyPortError):
+    """Exact-revision model security evidence is absent or disqualifying."""
+
+
+class SecurityEvidenceStore(Protocol):
+    def put_snapshot(self, snapshot: Mapping[str, object]) -> Mapping[str, object]: ...
+
+    def snapshots(
+        self, kind: str | None = None
+    ) -> tuple[Mapping[str, object], ...]: ...
+
+
+class ExactRevisionModelSecurity:
+    """Persist and enforce immutable-identity Hub and cache security evidence."""
+
+    def __init__(
+        self, intelligence: ModelIntelligence, state: SecurityEvidenceStore
+    ) -> None:
+        self._intelligence = intelligence
+        self._state = state
+
+    def inspect(
+        self,
+        repository: str,
+        revision: str,
+        *,
+        runtimes: tuple[RuntimeObservation, ...] = (),
+    ) -> Mapping[str, object]:
+        try:
+            report = self._intelligence.inspect(repository, revision, runtimes=runtimes)
+        except Exception as error:
+            raise ModelSecurityPolicyError(
+                "required exact-revision model security evidence is unavailable"
+            ) from error
+        if (
+            report.identity.repo_id != repository
+            or report.identity.commit_sha.casefold() != revision.casefold()
+        ):
+            raise ModelSecurityPolicyError(
+                "model security evidence does not match the exact requested revision"
+            )
+        assessment = _security_assessment(report)
+        self._persist(assessment)
+        _require_security_allowed(assessment, require_integrity=False)
+        return assessment
+
+    def record_verification(
+        self,
+        assessment: Mapping[str, object],
+        verification: VerificationResult,
+    ) -> Mapping[str, object]:
+        updated = _assessment_with_verification(assessment, verification)
+        self._persist(updated)
+        _require_security_allowed(updated, require_integrity=True)
+        return updated
+
+    def record_cached_verification(
+        self,
+        repository: str,
+        revision: str,
+        verification: VerificationResult,
+    ) -> Mapping[str, object]:
+        return self.record_verification(
+            self.require(repository, revision), verification
+        )
+
+    def require(self, repository: str, revision: str) -> Mapping[str, object]:
+        assessment = next(
+            (
+                item
+                for item in reversed(self._state.snapshots("model_security"))
+                if item.get("repository") == repository
+                and str(item.get("revision", "")).casefold() == revision.casefold()
+            ),
+            None,
+        )
+        if assessment is None:
+            raise ModelSecurityPolicyError(
+                "required exact-revision model security assessment is absent"
+            )
+        _require_security_allowed(assessment, require_integrity=True)
+        return assessment
+
+    @staticmethod
+    def require_compatible(
+        assessment: Mapping[str, object], runtime_installations: tuple[str, ...]
+    ) -> None:
+        compatibility = assessment.get("compatibility", ())
+        if not isinstance(compatibility, (tuple, list)):
+            raise ModelSecurityPolicyError("model compatibility evidence is invalid")
+        by_runtime = {
+            str(item.get("installation_id")): item
+            for item in compatibility
+            if isinstance(item, Mapping)
+        }
+        for installation_id in runtime_installations:
+            item = by_runtime.get(installation_id)
+            if item is not None and item.get("status") == "unsupported":
+                raise ModelSecurityPolicyError(
+                    f"model target is explicitly unsupported by Runtime Installation "
+                    f"{installation_id!r}: {item.get('detail', 'no detail')}"
+                )
+
+    def _persist(self, assessment: Mapping[str, object]) -> None:
+        payload = dict(assessment)
+        fingerprint = hashlib.sha256(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        self._state.put_snapshot(
+            {
+                **payload,
+                "kind": "model_security",
+                "id": f"{payload['repository']}@{payload['revision']}",
+                "version": fingerprint,
+            }
+        )
 
 
 class RuntimeFilesystem(Protocol):
@@ -123,7 +250,7 @@ class RuntimeSupplyPort:
     ) -> None:
         self._manager = manager
         self._config_store = config_store
-        self._installation_root = installation_root.expanduser().resolve()
+        self._installation_root = _prepare_runtime_root(installation_root)
         self._catalogue = catalogue or RuntimeCatalogue.load_builtin()
         self._planner = planner or RuntimeChangePlanner()
         self._filesystem = filesystem or LocalRuntimeFilesystem()
@@ -203,6 +330,7 @@ class RuntimeSupplyPort:
             lock_sha256 = None
         else:
             raise SupplyPortError(f"unknown runtime installation channel: {channel}")
+        self.record_managed_installation(installation)
         self.persist_runtime(self._config_store, installation)
         result = _runtime_result(installation, plan)
         result["lock_sha256"] = lock_sha256
@@ -281,6 +409,7 @@ class RuntimeSupplyPort:
         plan = self._planner.plan_update(
             current, target, referenced_services=references
         )
+        _validate_runtime_service_options(config, resource, target)
         self._switch_runtime_references(resource, target.installation_id)
         return _runtime_result(target, plan)
 
@@ -305,6 +434,7 @@ class RuntimeSupplyPort:
         plan = self._planner.plan_rollback(
             current, target, referenced_services=references
         )
+        _validate_runtime_service_options(config, resource, target)
         self._switch_runtime_references(resource, target.installation_id)
         return _runtime_result(target, plan)
 
@@ -323,6 +453,7 @@ class RuntimeSupplyPort:
             )
         _require_confirmed(parameters, "runtime removal")
         if installation.provenance != "adopted":
+            self._validate_managed_installation(installation)
             self._filesystem.remove(installation.root)
         self._remove_runtime_record(resource)
         return {
@@ -354,12 +485,102 @@ class RuntimeSupplyPort:
             _require_confirmed(parameters, "runtime pruning")
         for installation in candidates:
             if installation.provenance != "adopted":
+                self._validate_managed_installation(installation)
+        for installation in candidates:
+            if installation.provenance != "adopted":
                 self._filesystem.remove(installation.root)
             self._remove_runtime_record(installation.installation_id)
         return {
             "removed": [item.installation_id for item in candidates],
             "plans": [_plain_plan(item) for item in plans],
         }
+
+    def record_managed_installation(self, installation: RuntimeInstallation) -> None:
+        """Create independent evidence before registering a managed environment."""
+
+        root = _validate_runtime_directory(
+            installation.root,
+            self._installation_root,
+            installation.installation_id,
+        )
+        marker = root / ".mlxctl-runtime-owner.json"
+        payload = json.dumps(
+            {
+                "installation_id": installation.installation_id,
+                "owner": "mlxctl",
+                "root": str(root),
+                "schema_version": 1,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        descriptor = os.open(
+            marker,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SupplyPortError("runtime ownership marker is not a private file")
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+            os.fsync(descriptor)
+        except Exception:
+            os.close(descriptor)
+            marker.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(descriptor)
+
+    def _validate_managed_installation(self, installation: RuntimeInstallation) -> None:
+        root = _validate_runtime_directory(
+            installation.root,
+            self._installation_root,
+            installation.installation_id,
+        )
+        marker = root / ".mlxctl-runtime-owner.json"
+        try:
+            descriptor = os.open(
+                marker,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as error:
+            raise SupplyPortError(
+                f"runtime ownership marker is missing or unsafe: {marker}"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SupplyPortError(
+                    f"runtime ownership marker is not a private file: {marker}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                raw = stream.read(16 * 1024 + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > 16 * 1024:
+            raise SupplyPortError("runtime ownership marker exceeds the size limit")
+        expected = {
+            "installation_id": installation.installation_id,
+            "owner": "mlxctl",
+            "root": str(root),
+            "schema_version": 1,
+        }
+        try:
+            observed = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SupplyPortError("runtime ownership marker is invalid") from error
+        if observed != expected:
+            raise SupplyPortError(
+                "runtime ownership marker does not match the registry"
+            )
 
     def _tested_bundle(self, runtime: str, bundle_id: str | None):
         choices = tuple(
@@ -416,11 +637,13 @@ class ModelSupplyPort:
         self,
         supply: ModelSupply,
         config_store: ConfigStore[MlxctlConfig],
+        security: ExactRevisionModelSecurity,
         *,
         cache_mover: CacheMover | None = None,
     ) -> None:
         self._supply = supply
         self._config_store = config_store
+        self._security = security
         self._cache_mover = cache_mover or VerifiedCacheMover()
 
     def search(self, query: str, *, mode: str = "curated", limit: int = 20):
@@ -454,25 +677,46 @@ class ModelSupplyPort:
         alias = str(
             parameters.get("alias") or repository.rstrip("/").rsplit("/", 1)[-1]
         )
-        result = self._supply.install(
-            alias=alias,
-            repo_id=repository,
-            revision=revision,
+        config = self._config_store.load().value
+        runtimes = _model_runtime_observations(config, alias)
+        result, security = self._install_exact(
+            alias,
+            repository,
+            revision,
             offline=bool(parameters.get("offline", False)),
+            runtimes=runtimes,
+        )
+        self._security.require_compatible(
+            security, tuple(item.installation_id for item in runtimes)
         )
         installation_name = str(
             parameters.get("installation")
             or f"{alias}-{result.revision.commit_sha[:12]}"
         )
         self._persist_model(result, installation_name, alias)
-        return _model_result(result, installation_name)
+        payload = _model_result(result, installation_name)
+        payload["security"] = dict(security)
+        return payload
 
     def _repair(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
-        installation = self._supplied_installation(_resource(parameters))
+        config = self._config_store.load().value
+        installation_name, alias = _resolve_model(config, _resource(parameters))
+        installation = self._supplied_installation(installation_name)
+        runtimes = _model_runtime_observations(config, alias)
+        assessment = self._security.inspect(
+            installation.revision.repo_id,
+            installation.revision.commit_sha,
+            runtimes=runtimes,
+        )
         verification = self._supply.repair(installation)
+        security = self._security.record_verification(assessment, verification)
+        self._security.require_compatible(
+            security, tuple(item.installation_id for item in runtimes)
+        )
         return {
             "installation_name": installation.installation_id,
             "verification": asdict(verification),
+            "security": dict(security),
         }
 
     def _update(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
@@ -480,11 +724,16 @@ class ModelSupplyPort:
         config = self._config_store.load().value
         installation_name, alias = _resolve_model(config, resource)
         current = config.models[installation_name]
-        result = self._supply.install(
-            alias=alias,
-            repo_id=current.revision.repository,
-            revision=_required(parameters, "revision"),
+        runtimes = _model_runtime_observations(config, alias)
+        result, security = self._install_exact(
+            alias,
+            current.revision.repository,
+            _required(parameters, "revision"),
             offline=bool(parameters.get("offline", False)),
+            runtimes=runtimes,
+        )
+        self._security.require_compatible(
+            security, tuple(item.installation_id for item in runtimes)
         )
         target_name = str(
             parameters.get("installation")
@@ -492,6 +741,7 @@ class ModelSupplyPort:
         )
         self._persist_model(result, target_name, alias)
         payload = _model_result(result, target_name)
+        payload["security"] = dict(security)
         payload["previous_installation"] = installation_name
         payload["plan"] = {
             "operation": "update",
@@ -502,6 +752,39 @@ class ModelSupplyPort:
             ],
         }
         return payload
+
+    def _install_exact(
+        self,
+        alias: str,
+        repository: str,
+        revision: str,
+        *,
+        offline: bool,
+        runtimes: tuple[RuntimeObservation, ...],
+    ) -> tuple[ModelInstallResult, Mapping[str, object]]:
+        resolved = self._supply.resolve(repository, revision, offline=offline)
+        if offline:
+            assessment = self._security.require(repository, resolved.commit_sha)
+        else:
+            assessment = self._security.inspect(
+                repository, resolved.commit_sha, runtimes=runtimes
+            )
+        result = self._supply.install(
+            alias=alias,
+            repo_id=repository,
+            revision=resolved.commit_sha,
+            offline=offline,
+        )
+        if (
+            result.revision.repo_id != repository
+            or result.revision.commit_sha.casefold() != resolved.commit_sha.casefold()
+        ):
+            raise ModelSecurityPolicyError(
+                "installed model identity differs from its security assessment"
+            )
+        return result, self._security.record_verification(
+            assessment, result.verification
+        )
 
     def _rollback(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         _require_confirmed(parameters, "model rollback")
@@ -516,6 +799,19 @@ class ModelSupplyPort:
             != config.models[current].revision.repository
         ):
             raise SupplyPortError("model rollback target must have the same repository")
+        runtimes = _model_runtime_observations(config, alias)
+        supplied_target = self._supplied_installation(target)
+        assessment = self._security.inspect(
+            supplied_target.revision.repo_id,
+            supplied_target.revision.commit_sha,
+            runtimes=runtimes,
+        )
+        assessment = self._security.record_verification(
+            assessment, self._supply.verify(supplied_target)
+        )
+        self._security.require_compatible(
+            assessment, tuple(item.installation_id for item in runtimes)
+        )
 
         def mutation(document) -> None:
             document["aliases"][alias]["installation"] = target
@@ -678,6 +974,21 @@ def _runtime_references(config: MlxctlConfig, resource: str) -> tuple[str, ...]:
     )
 
 
+def _validate_runtime_service_options(
+    config: MlxctlConfig, current: str, target: RuntimeInstallation
+) -> None:
+    for service_name, service in config.services.items():
+        if service.runtime_installation != current:
+            continue
+        required = frozenset({"model", "host", "port", *service.options})
+        missing = sorted(required - target.capabilities)
+        if missing:
+            raise SupplyPortError(
+                f"runtime target {target.installation_id!r} cannot serve "
+                f"{service_name!r}; missing exact capabilities: {', '.join(missing)}"
+            )
+
+
 def _resolve_model(config: MlxctlConfig, resource: str) -> tuple[str, str]:
     if resource in config.aliases:
         return config.aliases[resource].installation_name, resource
@@ -689,6 +1000,29 @@ def _resolve_model(config: MlxctlConfig, resource: str) -> tuple[str, str]:
         if alias.installation_name == resource
     )
     return resource, aliases[0] if aliases else resource
+
+
+def _model_runtime_observations(
+    config: MlxctlConfig, alias: str
+) -> tuple[RuntimeObservation, ...]:
+    installation_ids = sorted(
+        {
+            service.runtime_installation
+            for service in config.services.values()
+            if str(service.model_alias) == alias
+        }
+    )
+    return tuple(
+        RuntimeObservation(
+            installation_id=installation_id,
+            runtime=config.runtimes[installation_id].definition,
+            version=config.runtimes[installation_id].version,
+            recognized_model_types=frozenset(),
+            capabilities=config.runtimes[installation_id].capabilities,
+            source="configured installation with probed option capabilities",
+        )
+        for installation_id in installation_ids
+    )
 
 
 def _runtime_intent_plan(
@@ -824,3 +1158,137 @@ def _content_manifest(root: Path) -> tuple[tuple[str, int, str], ...]:
             (str(path.relative_to(root)), path.stat().st_size, digest.hexdigest())
         )
     return tuple(records)
+
+
+def _security_assessment(report: ModelIntelligenceReport) -> dict[str, object]:
+    signals = [
+        {
+            "name": signal.name,
+            "severity": signal.severity,
+            "state": str(signal.state),
+            "source": signal.source,
+            "detail": signal.detail,
+        }
+        for signal in report.trust_signals
+    ]
+    scan = next(
+        (item for item in report.trust_signals if item.name == "hub_security_scan"),
+        None,
+    )
+    blockers: list[str] = []
+    if scan is None or scan.severity == "unknown":
+        blockers.append("security_scan_unavailable")
+    elif scan.severity == "danger":
+        blockers.append("known_security_finding")
+    if any(item.name == "unsafe_serialization" for item in report.trust_signals):
+        blockers.append("unsafe_serialization")
+    overridable = []
+    if any(item.name == "repository_code" for item in report.trust_signals):
+        overridable.append("repository_code")
+    if any(item.name == "remote_code_mapping" for item in report.trust_signals):
+        overridable.append("remote_code")
+    return {
+        "policy_version": 1,
+        "repository": report.identity.repo_id,
+        "revision": report.identity.commit_sha,
+        "hard_blockers": blockers,
+        "overridable_risks": overridable,
+        "signals": signals,
+        "compatibility": [
+            {
+                "installation_id": item.installation_id,
+                "runtime": item.runtime,
+                "version": item.version,
+                "status": item.status,
+                "source": item.source,
+                "detail": item.detail,
+            }
+            for item in getattr(report, "compatibility", ())
+        ],
+        "verification": {
+            "status": "pending",
+            "evidence": "not-yet-verified",
+            "issues": [],
+        },
+    }
+
+
+def _assessment_with_verification(
+    assessment: Mapping[str, object], verification: VerificationResult
+) -> dict[str, object]:
+    blockers = [str(item) for item in assessment.get("hard_blockers", ())]
+    if verification.status not in {"complete", "verified"} or verification.issues:
+        blockers.append("integrity_mismatch")
+    return {
+        key: value
+        for key, value in assessment.items()
+        if key not in {"id", "kind", "version"}
+    } | {
+        "hard_blockers": list(dict.fromkeys(blockers)),
+        "verification": {
+            "status": verification.status,
+            "evidence": verification.evidence,
+            "issues": list(verification.issues),
+        },
+    }
+
+
+def _require_security_allowed(
+    assessment: Mapping[str, object], *, require_integrity: bool
+) -> None:
+    if assessment.get("policy_version") != 1:
+        raise ModelSecurityPolicyError("model security policy evidence is unsupported")
+    blockers = assessment.get("hard_blockers")
+    if not isinstance(blockers, (tuple, list)) or not all(
+        isinstance(item, str) for item in blockers
+    ):
+        raise ModelSecurityPolicyError("model security policy evidence is invalid")
+    if blockers:
+        raise ModelSecurityPolicyError(
+            "model revision is blocked by security policy: "
+            + ", ".join(sorted(blockers))
+        )
+    verification = assessment.get("verification")
+    if require_integrity and (
+        not isinstance(verification, Mapping)
+        or verification.get("status") not in {"complete", "verified"}
+        or verification.get("issues") not in ((), [])
+    ):
+        raise ModelSecurityPolicyError(
+            "required exact-revision cache integrity evidence is absent"
+        )
+
+
+def _prepare_runtime_root(path: Path) -> Path:
+    expanded = path.expanduser()
+    expanded.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = expanded.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise SupplyPortError(f"runtime root is not a managed directory: {expanded}")
+    if metadata.st_uid != os.getuid():
+        raise SupplyPortError(f"runtime root is not user-owned: {expanded}")
+    os.chmod(expanded, 0o700, follow_symlinks=False)
+    return expanded.resolve(strict=True)
+
+
+def _validate_runtime_directory(
+    path: Path, installation_root: Path, installation_id: str
+) -> Path:
+    candidate = path.expanduser()
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise SupplyPortError(
+            f"managed runtime directory is missing: {path}"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise SupplyPortError(f"managed runtime is not a directory: {path}")
+    if metadata.st_uid != os.getuid():
+        raise SupplyPortError(f"managed runtime is not user-owned: {path}")
+    if resolved.parent != installation_root or resolved.name != installation_id:
+        raise SupplyPortError(
+            "managed runtime must be an exact direct managed child matching its "
+            "installation identity"
+        )
+    return resolved

@@ -71,8 +71,8 @@ class FakeClientAdapter:
         self.calls.append(("preview", configuration.service_name))
         return ("model",)
 
-    def apply(self, configuration):
-        self.calls.append(("apply", configuration.service_name))
+    def apply(self, configuration, *, takeover=False):
+        self.calls.append(("apply", configuration.service_name, takeover))
         return {"changed": True}
 
     def remove(self):

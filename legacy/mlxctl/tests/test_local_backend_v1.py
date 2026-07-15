@@ -11,6 +11,7 @@ from mlxctl.infrastructure.model_supply import (
     CacheInventory,
     CachedRevision,
     CatalogCandidate,
+    ModelRevision,
     ModelSupply,
     VerificationResult,
 )
@@ -148,6 +149,10 @@ class _ModelSupply:
                 reported_sha="a" * 40,
             ),
         )
+
+    def resolve(self, repo_id, revision, *, offline=False):
+        self.calls.append(("resolve", repo_id, revision, offline))
+        return ModelRevision(repo_id, "c" * 40, revision, "hub-observed")
 
     def inventory(self):
         return CacheInventory(
@@ -419,6 +424,35 @@ class LocalOperationBackendTests(unittest.TestCase):
             install = next(call for call in supply.calls if call[0] == "install")
             self.assertEqual(install[1]["alias"], "Qwen-OptiQ")
 
+    def test_model_install_executes_the_exact_revision_bound_in_preview(self) -> None:
+        with TemporaryDirectory() as directory:
+            supply = _ModelSupply()
+            backend, _ = self._backend(Path(directory), model_supply=supply)
+            request = OperationRequest(
+                "model.install",
+                {
+                    "repository": "mlx-community/Qwen-OptiQ",
+                    "revision": "main",
+                },
+            )
+            preview = backend.prepare(request).events[-1]
+
+            backend.prepare(
+                OperationRequest(
+                    "model.install",
+                    {
+                        **dict(request.parameters),
+                        "confirmed": True,
+                        "plan_fingerprint": preview["plan_fingerprint"],
+                    },
+                )
+            ).execute()
+
+            execution = next(
+                call for call in supply.calls if call[0] == "model.install"
+            )
+            self.assertEqual(execution[1]["revision"], "c" * 40)
+
     def test_model_trust_is_exact_revision_and_runtime_scoped(self) -> None:
         with TemporaryDirectory() as directory:
             backend, state = self._backend(Path(directory))
@@ -483,14 +517,45 @@ class LocalOperationBackendTests(unittest.TestCase):
             source = root / "candidate.toml"
             source.write_text(_CONFIG.replace("port = 8766", "port = 9000"))
 
+            request = OperationRequest("config.import", {"source": str(source)})
+            preview = backend.prepare(request).events[-1]
             result = backend.prepare(
                 OperationRequest(
                     "config.import",
-                    {"source": str(source), "confirmed": True},
+                    {
+                        "source": str(source),
+                        "confirmed": True,
+                        "plan_fingerprint": preview["plan_fingerprint"],
+                    },
                 )
             ).execute()
 
             self.assertEqual(result["resource"]["value"]["gateway"]["port"], 9000)
+
+    def test_every_confirmed_mutation_is_bound_to_current_config_revision(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+            request = OperationRequest("service.remove", {"resource": "chat"})
+            fingerprint = backend.prepare(request).events[-1]["plan_fingerprint"]
+
+            backend._config_store.edit(  # noqa: SLF001 - verifies stale-plan boundary.
+                lambda document: document["gateway"].update({"port": 9000})
+            )
+
+            with self.assertRaisesRegex(ApplicationError, "plan changed") as caught:
+                backend.prepare(
+                    OperationRequest(
+                        "service.remove",
+                        {
+                            "resource": "chat",
+                            "confirmed": True,
+                            "plan_fingerprint": fingerprint,
+                        },
+                    )
+                )
+            self.assertEqual(caught.exception.code, "stale_plan")
 
     def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
         with TemporaryDirectory() as directory:
@@ -754,7 +819,6 @@ class LocalOperationBackendTests(unittest.TestCase):
             "model.repair",
             "model.update",
             "model.rollback",
-            "model.cache.move",
             "model.cache.evict",
             "model.cache.prune",
             "service.start",
@@ -780,6 +844,11 @@ class LocalOperationBackendTests(unittest.TestCase):
                         prepared.requires_supervisor, name in supervisor_backed
                     )
                     self.assertEqual(prepared.events[0]["phase"], "preview")
+                    self.assertTrue(
+                        str(prepared.events[0]["plan_fingerprint"]).startswith(
+                            "sha256:"
+                        )
+                    )
                     self.assertEqual(
                         prepared.events[0]["confirmation_required"],
                         operation.confirmation,

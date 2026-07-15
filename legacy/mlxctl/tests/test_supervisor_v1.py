@@ -51,6 +51,7 @@ class FakeRuntimeSupply:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int]] = []
         self.error: Exception | None = None
+        self.revision = "v1"
 
     def prepare_launch(
         self, service: InferenceService, host: str, port: int
@@ -60,7 +61,10 @@ class FakeRuntimeSupply:
             raise self.error
         return PreparedLaunch(
             argv=("/runtime/bin/server", "--port", str(port)),
-            environment={"MODEL_ALIAS": str(service.model_alias)},
+            environment={
+                "MODEL_ALIAS": str(service.model_alias),
+                "REVISION": self.revision,
+            },
             required_capabilities=frozenset({"model", "host", "port"}),
             observed_capabilities=frozenset(
                 {"model", "host", "port", "context_length"}
@@ -502,6 +506,45 @@ class SupervisorTests(unittest.TestCase):
 
         self.assertEqual(route.state, "stopped")
         self.assertEqual(len(self.processes.launched), before)
+
+    def test_maintenance_detects_exit_and_registers_new_desired_route(self) -> None:
+        transition = self.supervisor.start_service("coding")
+        self.processes.processes[transition.run.pid].running = False  # type: ignore[index]
+        self.desired.items["new"] = _service("new")
+
+        outcome = self.supervisor.maintain()
+
+        self.assertEqual(
+            self.supervisor.service_status("coding").state, ServiceRunState.FAILED
+        )
+        self.assertEqual(self.gateway.routes["new"], ("stopped", None))
+        self.assertEqual(outcome.pressure, PressureLevel.NORMAL)
+
+    def test_maintenance_restarts_a_running_service_after_desired_edit(self) -> None:
+        first = self.supervisor.start_service("coding")
+        self.desired.items["coding"] = _service("coding", route="coding-v2")
+
+        outcome = self.supervisor.maintain()
+
+        current = self.supervisor.service_status("coding")
+        self.assertEqual(current.state, ServiceRunState.READY)
+        self.assertNotEqual(current.run_id, first.run.run_id)
+        self.assertNotIn("coding", self.gateway.routes)
+        self.assertEqual(self.gateway.routes["coding-v2"][0], "ready")
+        self.assertEqual(outcome.restarted_services, ("coding",))
+
+    def test_maintenance_restarts_idle_run_after_exact_launch_target_update(
+        self,
+    ) -> None:
+        first = self.supervisor.start_service("coding")
+        self.runtime.revision = "v2"
+
+        outcome = self.supervisor.maintain()
+
+        current = self.supervisor.service_status("coding")
+        self.assertEqual(current.state, ServiceRunState.READY)
+        self.assertNotEqual(current.run_id, first.run.run_id)
+        self.assertEqual(outcome.restarted_services, ("coding",))
 
     def _new_supervisor(self):
         candidate = Supervisor(

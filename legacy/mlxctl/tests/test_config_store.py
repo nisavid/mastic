@@ -1,14 +1,58 @@
 import stat
+import shutil
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from mlxctl.infrastructure.config_store import ConfigChange, ConfigStore
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_rejects_symlinked_config_history_lock_and_journal_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.write_text("preserve", encoding="utf-8")
+
+            config = root / "config.toml"
+            config.symlink_to(outside)
+            with self.assertRaises(OSError):
+                ConfigStore(config, lambda data: data)
+            config.unlink()
+
+            history = root / ".config.toml.history"
+            shutil.rmtree(history)
+            history.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(RuntimeError):
+                ConfigStore(config, lambda data: data)
+            history.unlink()
+
+            store = ConfigStore(config, lambda data: data)
+            lock = root / "config.toml.lock"
+            lock.symlink_to(outside)
+            with self.assertRaises(OSError):
+                store.import_text("schema_version = 1\n")
+            lock.unlink()
+
+            journal = root / ".config.toml.journal.jsonl"
+            journal.symlink_to(outside)
+            with self.assertRaises(OSError):
+                store.import_text("schema_version = 1\n")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "preserve")
+
+    def test_rejects_a_private_directory_not_owned_by_the_current_user(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "mlxctl.infrastructure.config_store.os.getuid",
+                return_value=Path(directory).stat().st_uid + 1,
+            ):
+                with self.assertRaises(PermissionError):
+                    ConfigStore(Path(directory) / "config.toml", lambda data: data)
+
     def test_exists_distinguishes_uninitialized_from_saved_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.toml", lambda data: data)

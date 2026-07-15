@@ -110,6 +110,17 @@ class PressureOutcome:
     operator_stop_plan: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class MaintenanceStatus:
+    """One daemon maintenance pass over desired, process, and pressure state."""
+
+    state: str
+    pressure: PressureLevel
+    shedding_new_work: bool
+    restarted_services: tuple[str, ...] = ()
+    stopped_services: tuple[str, ...] = ()
+
+
 class DesiredState(Protocol):
     def service(self, name: str) -> InferenceService | None: ...
 
@@ -200,6 +211,7 @@ class _Run:
     service: InferenceService
     process: ManagedProcess | None = None
     identity: ProcessIdentity | None = None
+    launch: PreparedLaunch | None = None
 
 
 class Supervisor:
@@ -252,6 +264,7 @@ class Supervisor:
         self._sequence = 0
         self._shedding_new_work = False
         self._operation_metadata: dict[str, tuple[str, str]] = {}
+        self._last_pressure: PressureLevel | None = None
 
     def status(self) -> SupervisorStatus:
         """Observe persisted/live state without activating the Supervisor."""
@@ -380,7 +393,7 @@ class Supervisor:
             starting = ServiceRunStatus(
                 name, run_id, ServiceRunState.STARTING, upstream_port=port
             )
-            run = _Run(starting, service)
+            run = _Run(starting, service, launch=launch)
             self._runs[name] = run
             self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._event_locked(operation_id, "launch_prepared", run_id=run_id)
@@ -611,6 +624,76 @@ class Supervisor:
             self._finish_operation_locked(operation_id, "complete")
             return PressureOutcome(level, True, tuple(stopped), plan)
 
+    def maintain(self) -> MaintenanceStatus:
+        """Converge live routes/runs and pressure without a client request."""
+
+        changed: list[tuple[str, InferenceService]] = []
+        desired = {str(item.name): item for item in self._desired_state.services()}
+        with self._lock:
+            self._refresh_exits_locked()
+            if self._state == "running":
+                for name, service in desired.items():
+                    run = self._runs.get(name)
+                    if run is None:
+                        route = self._gateway_route(service)
+                        self._gateway.describe_route(
+                            GatewayRoute(
+                                route,
+                                "stopped",
+                                model=str(service.model_alias),
+                                runtime=service.runtime_installation,
+                            )
+                        )
+                        self._gateway.set_route(route, "stopped", None)
+                    else:
+                        launch_changed = False
+                        if (
+                            run.launch is not None
+                            and run.status.upstream_port is not None
+                        ):
+                            try:
+                                current_launch = self._runtime_supply.prepare_launch(
+                                    service,
+                                    "127.0.0.1",
+                                    run.status.upstream_port,
+                                )
+                            except (CapabilityValidationError, ValueError):
+                                current_launch = run.launch
+                            launch_changed = current_launch != run.launch
+                        if (
+                            run.service != service or launch_changed
+                        ) and not self._gateway.is_busy(
+                            self._gateway_route(run.service)
+                        ):
+                            changed.append((name, service))
+        restarted: list[str] = []
+        for name, service in changed:
+            self._replace_service_run(name, service)
+            restarted.append(name)
+        pressure = self.reconcile_pressure()
+        with self._lock:
+            status = self._status_locked()
+        if pressure.level is not self._last_pressure or pressure.stopped_services:
+            self._record_metric(
+                {
+                    "kind": "memory_pressure",
+                    "scope": "supervisor",
+                    "resource": "supervisor",
+                    "level": pressure.level.value,
+                    "shedding_new_work": pressure.shedding_new_work,
+                    "stopped_services": len(pressure.stopped_services),
+                    "observed_at_ns": self._clock.time_ns(),
+                }
+            )
+            self._last_pressure = pressure.level
+        return MaintenanceStatus(
+            status.state,
+            pressure.level,
+            status.shedding_new_work,
+            tuple(restarted),
+            pressure.stopped_services,
+        )
+
     def list_routes(self) -> tuple[GatewayRoute, ...]:
         """Return Gateway routes without starting stopped services."""
 
@@ -660,6 +743,38 @@ class Supervisor:
             self._shedding_new_work,
             operation_id,
         )
+
+    def _replace_service_run(
+        self, name: str, desired: InferenceService
+    ) -> ServiceTransition:
+        """Boundedly replace one idle run after its desired identity changes."""
+
+        with self._lock:
+            run = self._runs.get(name)
+            if run is None:
+                return self.start_service(name)
+            old_route = self._gateway_route(run.service)
+            new_route = self._gateway_route(desired)
+            self._gateway.set_route(old_route, "unavailable", None)
+            self._terminate_locked(run)
+            run.status = ServiceRunStatus(
+                name, run.status.run_id, ServiceRunState.STOPPED
+            )
+            self._persist_run_locked(run)
+            self._gateway.set_route(old_route, "stopped", None)
+            if old_route != new_route:
+                self._gateway.remove_route(old_route)
+            self._runs.pop(name, None)
+            self._gateway.describe_route(
+                GatewayRoute(
+                    new_route,
+                    "stopped",
+                    model=str(desired.model_alias),
+                    runtime=desired.runtime_installation,
+                )
+            )
+            self._gateway.set_route(new_route, "stopped", None)
+        return self.start_service(name)
 
     def _recover_runs_locked(self) -> None:
         snapshots = self._state_store.snapshots("service_run")
@@ -817,6 +932,23 @@ class Supervisor:
         if run.status.error is not None:
             snapshot["error"] = run.status.error
         self._state_store.put_snapshot(snapshot)
+        self._record_metric(
+            {
+                "kind": "process_state",
+                "scope": "service",
+                "resource": run.status.service,
+                "service": run.status.service,
+                "run_id": run.status.run_id,
+                "state": run.status.state.value,
+                "pid": run.status.pid,
+                "observed_at_ns": self._clock.time_ns(),
+            }
+        )
+
+    def _record_metric(self, metric: Mapping[str, object]) -> None:
+        record = getattr(self._state_store, "record_metric", None)
+        if callable(record):
+            record(metric)
 
     def _begin_operation_locked(self, kind: str, resource: str) -> str:
         operation_id = self._new_identity_locked("op")

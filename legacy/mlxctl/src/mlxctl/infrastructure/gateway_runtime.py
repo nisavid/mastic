@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Protocol
 
@@ -37,11 +37,13 @@ class GatewayRuntime:
         start_timeout: float = 10.0,
         poll_interval: float = 0.01,
         clock_ns: Callable[[], int] = time.time_ns,
+        max_in_flight_per_service: int = 4,
+        metric_sink: Callable[[Mapping[str, object]], object] | None = None,
     ) -> None:
         validate_loopback_bind(host)
         if not 1 <= port <= 65535:
             raise ValueError("Gateway port must be in 1..65535")
-        if start_timeout <= 0 or poll_interval <= 0:
+        if start_timeout <= 0 or poll_interval <= 0 or max_in_flight_per_service <= 0:
             raise ValueError("Gateway timeouts must be positive")
         self.host = host
         self.port = port
@@ -49,6 +51,8 @@ class GatewayRuntime:
         self._start_timeout = start_timeout
         self._poll_interval = poll_interval
         self._clock_ns = clock_ns
+        self._max_in_flight_per_service = max_in_flight_per_service
+        self._metric_sink = metric_sink or (lambda _metric: None)
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._routes: dict[str, GatewayRoute] = {}
@@ -148,16 +152,23 @@ class GatewayRuntime:
         with self._lock:
             self._shedding = enabled
 
-    def begin(self, service: str) -> None:
+    def begin(self, service: str) -> bool:
         with self._condition:
+            active = self._active.get(service, 0)
+            if self._shedding or active >= self._max_in_flight_per_service:
+                self._record_activity(service, "rejected", active)
+                return False
             self._active[service] = self._active.get(service, 0) + 1
             self._last_used[service] = self._clock_ns()
+            self._record_activity(service, "accepted", self._active[service])
+            return True
 
     def end(self, service: str) -> None:
         with self._condition:
             current = self._active.get(service, 0)
             self._active[service] = max(0, current - 1)
             self._last_used[service] = self._clock_ns()
+            self._record_activity(service, "complete", self._active[service])
             self._condition.notify_all()
 
     def is_busy(self, service: str) -> bool:
@@ -182,6 +193,18 @@ class GatewayRuntime:
         if self._shedding and route.state == "ready":
             return replace(route, state="unavailable", endpoint=None)
         return route
+
+    def _record_activity(self, service: str, event: str, active: int) -> None:
+        observed_at_ns = self._clock_ns()
+        common = {
+            "service": service,
+            "resource": service,
+            "event": event,
+            "active_requests": active,
+            "observed_at_ns": observed_at_ns,
+        }
+        self._metric_sink({"kind": "gateway_activity", "scope": "gateway", **common})
+        self._metric_sink({"kind": "service_request", "scope": "service", **common})
 
 
 def _uvicorn_server(app: object, host: str, port: int) -> GatewayServer:

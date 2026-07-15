@@ -85,10 +85,17 @@ class CompositionTests(unittest.TestCase):
                 clients=_Port(),
             )
 
+            preview = composition.dispatcher.preview(
+                OperationRequest("runtime.install", {"runtime": "optiq"})
+            )
             result = composition.dispatcher.execute(
                 OperationRequest(
                     "runtime.install",
-                    {"runtime": "optiq", "confirmed": True},
+                    {
+                        "runtime": "optiq",
+                        "confirmed": True,
+                        "plan_fingerprint": preview.value["plan_fingerprint"],
+                    },
                 )
             )
 

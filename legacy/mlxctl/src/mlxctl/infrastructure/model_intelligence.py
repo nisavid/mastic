@@ -949,7 +949,10 @@ def _assess_runtime(
     if architecture is None:
         status = "unknown"
         detail = "model architecture is unknown"
-    elif architecture not in runtime.recognized_model_types:
+    elif (
+        runtime.recognized_model_types
+        and architecture not in runtime.recognized_model_types
+    ):
         status = "unsupported"
         detail = (
             f"{runtime.runtime} {runtime.version} does not list architecture "
@@ -960,6 +963,12 @@ def _assess_runtime(
     ):
         status = "unknown"
         detail = "architecture matches, but exact OptiQ KV support is not evidenced"
+    elif not runtime.recognized_model_types:
+        status = "unknown"
+        detail = (
+            "runtime architecture recognition evidence is unavailable; exact option "
+            "preflight and a bounded readiness probe are still required"
+        )
     else:
         status = "candidate"
         detail = (

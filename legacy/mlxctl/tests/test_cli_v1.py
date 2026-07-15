@@ -92,6 +92,15 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(payload["operation"], "service.stop")
         self.assertEqual(payload["parameters"]["resource"], "coding")
 
+    def test_service_edit_can_explicitly_clear_a_boolean(self) -> None:
+        result = self.runner.invoke(
+            self.app,
+            ["service", "edit", "coding", "--no-pinned", "--yes", "--json"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIs(self.dispatcher.requests[-1].parameters["pinned"], False)
+
     def test_help_and_dispatch_expose_operation_specific_values(self) -> None:
         help_result = self.runner.invoke(self.app, ["runtime", "install", "--help"])
         self.assertEqual(help_result.exit_code, 0, help_result.output)
@@ -192,6 +201,20 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(human.exit_code, 1)
         self.assertIn("OptiQ capability conflict", human.output)
         self.assertIn("mlxctl runtime update optiq", human.output)
+
+    def test_check_returns_nonzero_when_the_reported_state_is_unhealthy(self) -> None:
+        original = self.dispatcher.execute
+
+        def unhealthy(request):
+            if request.name == "check":
+                return OperationResult("check", {"state": "stopped", "checks": []})
+            return original(request)
+
+        self.dispatcher.execute = unhealthy
+        result = self.runner.invoke(self.app, ["check", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(json.loads(result.output)["state"], "stopped")
 
     def test_explicit_tui_command_uses_injected_launcher(self) -> None:
         result = self.runner.invoke(self.app, ["tui"])

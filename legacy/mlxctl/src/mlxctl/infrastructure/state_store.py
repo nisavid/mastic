@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sqlite3
+import stat
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +26,25 @@ _SENSITIVE_KEYS = frozenset(
         "response_body",
         "response_text",
         "responses",
+    }
+)
+_CREDENTIAL_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "api_token",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "cookie",
+        "credentials",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "set-cookie",
+        "x-api-key",
+        "token",
     }
 )
 
@@ -260,18 +280,21 @@ class OperationalStateStore:
         return tuple(_record({**_decode(row[1]), "sequence": row[0]}) for row in rows)
 
     def _prepare_path(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self._path.parent, 0o700)
-        descriptor = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
-        os.fchmod(descriptor, 0o600)
+        _prepare_private_directory(self._path.parent)
+        descriptor = _open_private_file(self._path, os.O_RDWR | os.O_CREAT)
         os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
+        self._validate_database_files()
         connection = sqlite3.connect(self._path, timeout=10)
-        connection.execute("PRAGMA busy_timeout = 10000")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            connection.execute("PRAGMA busy_timeout = 10000")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            return connection
+        except Exception:
+            connection.close()
+            raise
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -284,9 +307,27 @@ class OperationalStateStore:
             self._secure_files()
 
     def _secure_files(self) -> None:
-        for path in (self._path, Path(f"{self._path}-wal"), Path(f"{self._path}-shm")):
-            if path.exists():
-                os.chmod(path, 0o600)
+        self._validate_database_files(chmod=True)
+
+    def _validate_database_files(self, *, chmod: bool = False) -> None:
+        for path in (
+            self._path,
+            Path(f"{self._path}-wal"),
+            Path(f"{self._path}-shm"),
+            Path(f"{self._path}-journal"),
+        ):
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise OSError(f"operational state target is not a regular file: {path}")
+            if metadata.st_uid != os.getuid():
+                raise PermissionError(
+                    f"operational state target is not user-owned: {path}"
+                )
+            if chmod:
+                os.chmod(path, 0o600, follow_symlinks=False)
 
 
 def _identity(dto: Mapping[str, object], key: str, noun: str) -> str:
@@ -328,6 +369,15 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
                 raise SensitiveContentError(
                     f"operational state cannot persist inference content at {location}"
                 )
+            normalized_key = raw_key.casefold()
+            if normalized_key in _CREDENTIAL_KEYS or (
+                normalized_key.endswith("_token") and normalized_key != "birth_token"
+            ):
+                location = ".".join((*path, raw_key))
+                raise SensitiveContentError(
+                    "operational state cannot persist credential material at "
+                    f"{location}"
+                )
             result[raw_key] = _normalize(value[raw_key], (*path, raw_key))
         return result
     if isinstance(value, (list, tuple)):
@@ -337,6 +387,35 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
     if isinstance(value, float) and math.isfinite(value):
         return value
     raise TypeError(f"operational DTO contains unsupported value {value!r}")
+
+
+def _prepare_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError(f"private state path is not a directory: {path}")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"private state path is not user-owned: {path}")
+    os.chmod(path, 0o700, follow_symlinks=False)
+
+
+def _open_private_file(path: Path, flags: int) -> int:
+    descriptor = os.open(
+        path,
+        flags | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"operational state target is not a regular file: {path}")
+        if metadata.st_uid != os.getuid():
+            raise PermissionError(f"operational state target is not user-owned: {path}")
+        os.fchmod(descriptor, 0o600)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def _encode(dto: Mapping[str, object]) -> str:

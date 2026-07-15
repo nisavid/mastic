@@ -293,6 +293,45 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
                 replacement.close()
                 socket_path.unlink(missing_ok=True)
 
+    async def test_close_drains_an_accepted_request_before_cancelling_connections(
+        self,
+    ) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handle(request, emit_progress):
+            entered.set()
+            await release.wait()
+            return {"state": "stopped"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(Path(directory) / "mlxd.sock", handle)
+            await server.start()
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            await self._negotiate(reader, writer)
+            await write_message(
+                writer,
+                {
+                    "type": "request",
+                    "protocol": PROTOCOL_NAME,
+                    "version": PROTOCOL_VERSION,
+                    "request_id": "req-stop",
+                    "operation_id": "op-stop",
+                    "operation": "supervisor.stop",
+                    "parameters": {},
+                },
+            )
+            await entered.wait()
+            closing = asyncio.create_task(server.close())
+            await asyncio.sleep(0)
+            self.assertFalse(closing.done())
+
+            release.set()
+            result = await read_message(reader)
+            self.assertEqual(result["result"], {"state": "stopped"})
+            await self._close_writer(writer)
+            await asyncio.wait_for(closing, timeout=1)
+
     async def _negotiate(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:

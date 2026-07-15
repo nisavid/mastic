@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -73,7 +75,6 @@ _MODEL_LONG_MUTATIONS = frozenset(
         "model.repair",
         "model.update",
         "model.rollback",
-        "model.cache.move",
         "model.cache.evict",
         "model.cache.prune",
     }
@@ -155,12 +156,22 @@ class LocalOperationBackend:
                 **_plain(resolved),
             }
         else:
-            preview = {
-                "schema_version": 1,
-                "operation": request.name,
-                "confirmation_required": operation.confirmation,
-                "parameters": _plain(request.parameters),
-            }
+            preview = self._resolved_mutation_preview(request, operation)
+        owner_fingerprint = preview.get("plan_fingerprint")
+        if not isinstance(owner_fingerprint, str):
+            owner_fingerprint = _plan_fingerprint(preview)
+            preview["plan_fingerprint"] = owner_fingerprint
+        if request.parameters.get("confirmed") is True:
+            supplied = request.parameters.get("plan_fingerprint")
+            if supplied != owner_fingerprint:
+                raise ApplicationError(
+                    "stale_plan",
+                    "The mutation plan changed or was not reviewed; preview it again.",
+                    next_actions=(
+                        f"mlxctl {request.name.replace('.', ' ')} --help",
+                        "review the newly resolved plan before confirming",
+                    ),
+                )
         requires_supervisor = (
             request.name
             in (_SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS)
@@ -171,6 +182,101 @@ class LocalOperationBackend:
             execute=lambda: self._mutate(request, preview),
             events=({"phase": "preview", **preview},),
         )
+
+    def _resolved_mutation_preview(
+        self, request: OperationRequest, operation: Operation
+    ) -> dict[str, object]:
+        """Resolve a confirmation-bound plan without crossing a mutation boundary."""
+
+        parameters = {
+            key: _plain(value)
+            for key, value in request.parameters.items()
+            if key not in {"confirmed", "plan_fingerprint"}
+        }
+        config = self._config()
+        config_revision = (
+            self._config_store.load().revision if self._config_store.exists else None
+        )
+        resolved: dict[str, object] = {
+            "schema_version": 1,
+            "operation": request.name,
+            "confirmation_required": operation.confirmation,
+            "config_revision": config_revision,
+            "parameters": parameters,
+        }
+        if request.name == "model.install":
+            resolve = getattr(self._model_supply, "resolve", None)
+            if callable(resolve):
+                revision = resolve(
+                    str(parameters["repository"]),
+                    str(parameters.get("revision", "main")),
+                    offline=bool(parameters.get("offline", False)),
+                )
+                resolved["target"] = _plain(revision)
+        elif request.name == "model.update":
+            resource = str(parameters["resource"])
+            installation_name = self._model_installation_name(resource, config)
+            current = config.models[installation_name]
+            resolve = getattr(self._model_supply, "resolve", None)
+            if callable(resolve):
+                revision = resolve(
+                    current.revision.repository,
+                    str(parameters["revision"]),
+                    offline=bool(parameters.get("offline", False)),
+                )
+                resolved["target"] = _plain(revision)
+            resolved["current_installation"] = installation_name
+        elif request.name == "runtime.install":
+            runtime = str(parameters.get("runtime", ""))
+            channel = str(
+                parameters.get(
+                    "channel", "custom" if parameters.get("version") else "tested"
+                )
+            )
+            if channel == "tested":
+                bundles = sorted(
+                    (
+                        bundle
+                        for bundle in self._runtime_catalogue.tested_bundles
+                        if bundle.runtime == runtime
+                    ),
+                    key=lambda item: (item.version, item.bundle_id),
+                )
+                if bundles:
+                    bundle = bundles[-1]
+                    resolved["target"] = {
+                        "installation": bundle.bundle_id,
+                        "runtime": bundle.runtime,
+                        "version": bundle.version,
+                        "lock_sha256": bundle.lock_sha256,
+                    }
+        elif request.name.startswith("runtime.") and request.name not in {
+            "runtime.prune",
+            "runtime.install",
+            "runtime.adopt",
+        }:
+            resource = str(parameters.get("resource", ""))
+            current = config.runtimes[resource]
+            resolved["current"] = _plain(current)
+            resolved["affected_services"] = sorted(
+                name
+                for name, service in config.services.items()
+                if service.runtime_installation == resource
+            )
+        elif request.name.startswith("service."):
+            resource = str(parameters.get("resource", parameters.get("service", "")))
+            if resource in config.services:
+                resolved["current"] = _plain(config.services[resource])
+        elif request.name == "model.uninstall":
+            resource = str(parameters.get("resource", ""))
+            installation = self._model_installation_name(resource, config)
+            resolved["installation"] = installation
+            resolved["aliases"] = sorted(
+                alias
+                for alias, target in config.aliases.items()
+                if target.installation_name == installation
+            )
+        return resolved
 
     def _validate_request(self, request: OperationRequest) -> None:
         """Resolve named resources before returning an executable plan."""
@@ -786,6 +892,19 @@ class LocalOperationBackend:
     ) -> Mapping[str, object]:
         name = request.name
         parameters = dict(request.parameters)
+        target = preview.get("target")
+        if isinstance(target, Mapping):
+            if name in {"model.install", "model.update"} and isinstance(
+                target.get("commit_sha"), str
+            ):
+                parameters["revision"] = target["commit_sha"]
+            elif name == "runtime.install":
+                if isinstance(target.get("installation"), str):
+                    parameters["bundle_id"] = target["installation"]
+                if isinstance(target.get("version"), str):
+                    parameters["expected_version"] = target["version"]
+                if isinstance(target.get("lock_sha256"), str):
+                    parameters["expected_lock_digest"] = target["lock_sha256"]
         if name == "setup":
             value = self._setup.execute(name, parameters)
         elif name == "remove":
@@ -1134,6 +1253,13 @@ def _read_config_source(source: str, *, max_bytes: int = 1024 * 1024) -> str:
 
 def _result(operation: str, **value: object) -> Mapping[str, object]:
     return {"schema_version": 1, "operation": operation, **value}
+
+
+def _plan_fingerprint(plan: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        _plain(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _plain(value: object) -> object:

@@ -5,6 +5,8 @@ import os
 import plistlib
 import socket
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,7 @@ from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonSe
 from mlxctl.infrastructure.production import (
     _ActivatingOperationOwner,
     _GatewayMutationGuard,
+    _LocalModelSupply,
     _SetupSupervisorOwner,
     _setup_planner,
     compose_daemon,
@@ -68,6 +71,38 @@ class _Launchd:
 
 
 class ProductionCompositionTests(unittest.TestCase):
+    def test_local_model_resolution_is_side_effect_free_and_stays_local(self) -> None:
+        class Supply:
+            def resolve(self, repo_id, revision, *, offline=False):
+                return (repo_id, revision, offline)
+
+        remote = _Port()
+        model = _LocalModelSupply(Supply(), remote, object())
+
+        self.assertEqual(
+            model.resolve("owner/model", "main", offline=True),
+            ("owner/model", "main", True),
+        )
+        self.assertEqual(remote.calls, [])
+
+    def test_local_composition_prepares_private_paths_before_store_construction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MlxctlPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+
+            with patch.object(
+                paths.__class__, "prepare", wraps=paths.prepare
+            ) as prepare:
+                compose_local(
+                    paths=paths, home=root, executable=Path("/usr/bin/python3")
+                )
+
+            self.assertGreaterEqual(prepare.call_count, 1)
+
     def test_setup_remote_owner_activates_only_at_execution_boundary(self) -> None:
         activator = _Activator()
         remote = _Port({"state": "complete"})
@@ -116,6 +151,22 @@ class ProductionCompositionTests(unittest.TestCase):
                 guard.execute(OperationRequest("gateway.configure", {"port": 9000}))
 
         self.assertEqual(dispatcher.calls, [])
+
+    def test_running_supervisor_allows_reconcilable_service_edit(self) -> None:
+        class Dispatcher:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, request):
+                self.calls.append(request)
+                return {"edited": True}
+
+        dispatcher = Dispatcher()
+        guard = _GatewayMutationGuard(dispatcher, _Launchd(True))
+        request = OperationRequest("service.edit", {"resource": "coding"})
+
+        self.assertEqual(guard.execute(request), {"edited": True})
+        self.assertEqual(dispatcher.calls, [request])
 
     def test_client_sampling_defaults_cover_coding_and_memory_operations(self) -> None:
         self.assertEqual(default_sampling("codex")["coding"].temperature, 0.0)
@@ -229,6 +280,10 @@ class ProductionCompositionTests(unittest.TestCase):
                 state.snapshot("supervisor", "supervisor")["state"], "stopped"
             )
             self.assertEqual(state.snapshot("gateway", "gateway")["port"], 8766)
+            self.assertEqual(
+                {metric["scope"] for metric in state.metrics()},
+                {"gateway", "supervisor"},
+            )
 
     def test_router_rejects_unowned_resume_instead_of_faking_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -241,6 +296,51 @@ class ProductionCompositionTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ApplicationError, "not owned"):
                 router.execute("operation.resume", {"resource": "unknown"})
+
+    def test_supervisor_stop_drains_physical_work_and_rejects_new_work(self) -> None:
+        class BlockingPort(_Port):
+            def __init__(self) -> None:
+                super().__init__({"state": "complete"})
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def execute(self, operation, parameters):
+                self.entered.set()
+                self.release.wait(1)
+                return super().execute(operation, parameters)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = BlockingPort()
+            supervisor = _Port({"state": "stopped"})
+            router = DaemonOperationRouter(
+                runtime=runtime,
+                model=_Port(),
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+                physical_drain_timeout=1,
+            )
+            physical = threading.Thread(
+                target=lambda: router.execute("runtime.install", {"runtime": "optiq"})
+            )
+            physical.start()
+            self.assertTrue(runtime.entered.wait(1))
+            stopped = []
+            stopping = threading.Thread(
+                target=lambda: stopped.append(router.execute("supervisor.stop", {}))
+            )
+            stopping.start()
+            time.sleep(0.02)
+
+            with self.assertRaises(ApplicationError) as raised:
+                router.execute("model.install", {"repository": "owner/model"})
+            self.assertEqual(raised.exception.code, "supervisor_stopping")
+            self.assertEqual(supervisor.calls, [])
+
+            runtime.release.set()
+            physical.join(1)
+            stopping.join(1)
+            self.assertEqual(stopped[0]["state"], "stopped")
+            self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
 
     def test_state_removal_rejects_symlink_even_when_it_resolves_to_owned_path(
         self,
@@ -361,6 +461,13 @@ class _FakeRouter(_Port):
     def cancel(self, operation_id):
         return False
 
+    def maintain(self):
+        self.calls.append(("maintain", {}))
+        return {"state": "running"}
+
+    def record_maintenance_failure(self, error):
+        self.calls.append(("maintenance_failure", type(error).__name__))
+
     def execute(self, operation, parameters, *, operation_id=None):
         value = super().execute(operation, parameters)
         if operation == "supervisor.stop":
@@ -423,6 +530,36 @@ class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
             [item["phase"] for item in servers[0].progress], ["started", "complete"]
         )
         self.assertTrue(servers[0].closed)
+
+    async def test_daemon_runs_periodic_maintenance_without_cli_requests(self) -> None:
+        routers = []
+
+        class IdleServer:
+            async def start(self):
+                return None
+
+            async def close(self):
+                return None
+
+        def router_factory(request_stop):
+            router = _FakeRouter(request_stop)
+            routers.append(router)
+            return router
+
+        service = DaemonService(
+            Path("/tmp/mlxd-maintenance-test.sock"),
+            router_factory,
+            server_factory=lambda *args, **kwargs: IdleServer(),
+            maintenance_interval=0.01,
+        )
+        task = asyncio.create_task(service.serve())
+        await asyncio.sleep(0.04)
+        routers[0].request_stop()
+        await asyncio.wait_for(task, timeout=1)
+
+        self.assertGreaterEqual(
+            sum(call[0] == "maintain" for call in routers[0].calls), 2
+        )
 
 
 if __name__ == "__main__":
