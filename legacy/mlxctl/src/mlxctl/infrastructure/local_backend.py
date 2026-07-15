@@ -9,7 +9,7 @@ from typing import Protocol
 import tomlkit
 
 from mlxctl.application.catalogue import Operation, OperationKind
-from mlxctl.application.config_schema import MlxctlConfig
+from mlxctl.application.config_schema import MlxctlConfig, validate_config
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.application.manager import PreparedOperation
 from mlxctl.infrastructure.config_store import ConfigStore
@@ -156,7 +156,7 @@ class LocalOperationBackend:
     def _validate_request(self, request: OperationRequest) -> None:
         """Resolve named resources before returning an executable plan."""
         name = request.name
-        config = self._config_store.load().value
+        config = self._config()
         if name == "runtime.inspect":
             _resource(
                 request,
@@ -204,7 +204,7 @@ class LocalOperationBackend:
 
     def _query(self, request: OperationRequest) -> Mapping[str, object]:
         name = request.name
-        config = self._config_store.load().value
+        config = self._config()
         if name in {"status", "check", "doctor", "tui"}:
             return self._overview(name, config)
         if name in {"logs", "metrics"}:
@@ -500,7 +500,6 @@ class LocalOperationBackend:
 
     def _config_query(self, request: OperationRequest) -> Mapping[str, object]:
         name = request.name
-        snapshot = self._config_store.load()
         if name == "config.path":
             return _result(
                 name,
@@ -508,6 +507,24 @@ class LocalOperationBackend:
                 evidence=["local-path"],
                 next_actions=[],
             )
+        if name == "config.history":
+            return _result(
+                name,
+                items=[_plain(item) for item in self._config_store.history()],
+                evidence=["config-journal"],
+                next_actions=[],
+            )
+        if not self._config_store.exists:
+            return _result(
+                name,
+                state="uninitialized",
+                path=str(self._config_path),
+                text="" if name == "config.export" else None,
+                items=[] if name == "config.diff" else None,
+                evidence=["desired-state-absent"],
+                next_actions=["mlxctl setup"],
+            )
+        snapshot = self._config_store.load()
         if name == "config.show":
             return _result(
                 name,
@@ -533,13 +550,6 @@ class LocalOperationBackend:
                 name,
                 items=[_plain(item) for item in self._config_store.diff(candidate)],
                 evidence=["semantic-diff"],
-                next_actions=[],
-            )
-        if name == "config.history":
-            return _result(
-                name,
-                items=[_plain(item) for item in self._config_store.history()],
-                evidence=["config-journal"],
                 next_actions=[],
             )
         return _result(
@@ -577,11 +587,11 @@ class LocalOperationBackend:
             value = self._setup.execute(name, parameters)
         elif name in _SUPERVISOR_MUTATIONS:
             if name.startswith("service."):
-                config = self._config_store.load().value
+                config = self._config()
                 _resource(request, config.services, "Inference Service")
             value = self._supervisor.execute(name, parameters)
         elif name in _RUNTIME_MUTATIONS:
-            self._validate_runtime_mutation(request, self._config_store.load().value)
+            self._validate_runtime_mutation(request, self._config())
             value = self._runtime_supply.execute(name, parameters)
         elif name in _MODEL_LONG_MUTATIONS:
             value = self._execute_model_mutation(name, parameters)
@@ -634,7 +644,7 @@ class LocalOperationBackend:
                     offline=bool(parameters.get("offline", False)),
                 )
             )
-        config = self._config_store.load().value
+        config = self._config()
         resource = str(parameters.get("resource", ""))
         if name == "model.repair":
             installation_name = self._model_installation_name(resource, config)
@@ -712,7 +722,7 @@ class LocalOperationBackend:
             return _plain(self._config_store.restore(str(parameters["revision"])))
         if name == "model.trust":
             resource = str(parameters.get("resource", parameters.get("model", "")))
-            config = self._config_store.load().value
+            config = self._config()
             _resource(
                 OperationRequest(name, {"resource": resource}),
                 config.models,
@@ -790,6 +800,11 @@ class LocalOperationBackend:
 
     def _latest(self, kind: str, resource: str) -> dict[str, object] | None:
         return self._state_store.snapshot(kind, resource)
+
+    def _config(self) -> MlxctlConfig:
+        if self._config_store.exists:
+            return self._config_store.load().value
+        return validate_config({"schema_version": 1})
 
 
 def _resource(

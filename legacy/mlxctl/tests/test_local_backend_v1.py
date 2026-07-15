@@ -198,6 +198,36 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["services"], [])
             self.assertIn("mlxctl supervisor start", result["next_actions"])
 
+    def test_uninitialized_status_and_config_are_actionable_without_a_file(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            state = OperationalStateStore(root / "state.sqlite3")
+            backend = LocalOperationBackend(
+                catalogue=build_operation_catalogue(),
+                config_store=ConfigStore(config_path, validate_config),
+                state_store=state,
+                runtime_catalogue=RuntimeCatalogue.load_builtin(),
+                runtime_supply=_NeverCalled(),
+                model_supply=ModelSupply(_NeverCalled()),
+                supervisor=_NeverCalled(),
+                logs=_NeverCalled(),
+                metrics=_NeverCalled(),
+                setup=_NeverCalled(),
+                clients=_NeverCalled(),
+                config_path=config_path,
+            )
+
+            status = backend.prepare(OperationRequest("status")).execute()
+            shown = backend.prepare(OperationRequest("config.show")).execute()
+
+            self.assertEqual(status["services"], [])
+            self.assertEqual(shown["state"], "uninitialized")
+            self.assertIn("mlxctl setup", shown["next_actions"])
+            self.assertFalse(config_path.exists())
+
     def test_service_list_keeps_desired_and_run_state_distinct(self) -> None:
         with TemporaryDirectory() as directory:
             backend, state = self._backend(Path(directory))

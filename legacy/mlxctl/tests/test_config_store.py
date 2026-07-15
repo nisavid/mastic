@@ -9,6 +9,14 @@ from mlxctl.infrastructure.config_store import ConfigChange, ConfigStore
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_exists_distinguishes_uninitialized_from_saved_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.toml", lambda data: data)
+
+            self.assertFalse(store.exists)
+            store.import_text("schema_version = 1\n")
+            self.assertTrue(store.exists)
+
     def test_round_trips_comments_and_returns_validated_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mlxctl" / "config.toml"

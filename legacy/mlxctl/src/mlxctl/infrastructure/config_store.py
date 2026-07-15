@@ -67,6 +67,12 @@ class ConfigStore(Generic[ValidatedConfig]):
             self._reconcile_journal_locked()
             return self._snapshot(self._path.read_text(encoding="utf-8"))
 
+    @property
+    def exists(self) -> bool:
+        """Return whether desired state has been initialized, without creating it."""
+
+        return self._path.is_file()
+
     def save(
         self, document: TOMLDocument, *, action: str = "save"
     ) -> ConfigSnapshot[ValidatedConfig]:
