@@ -12,6 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
+from ipaddress import ip_address
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -91,12 +92,23 @@ class ExactSetupSelection:
         ):
             raise ValueError("model_revision must be lowercase hexadecimal")
         endpoint = urlsplit(self.gateway_endpoint)
-        if endpoint.scheme != "http" or endpoint.hostname not in {
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        }:
-            raise ValueError("gateway_endpoint must be an HTTP loopback URL")
+        try:
+            address = ip_address(endpoint.hostname or "")
+            port = endpoint.port
+        except ValueError as error:
+            raise ValueError(
+                "gateway_endpoint must be a literal HTTP loopback URL"
+            ) from error
+        if (
+            endpoint.scheme != "http"
+            or not address.is_loopback
+            or port is None
+            or endpoint.username is not None
+            or endpoint.password is not None
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("gateway_endpoint must be a literal HTTP loopback URL")
 
 
 @dataclass(frozen=True, slots=True)

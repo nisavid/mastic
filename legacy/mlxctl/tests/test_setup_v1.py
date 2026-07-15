@@ -116,6 +116,26 @@ class SetupV1Tests(unittest.TestCase):
                 SetupRequest(selection=not_locked, noninteractive=True, confirmed=True),
             )
 
+        hostname_endpoint = ExactSetupSelection(
+            runtime_name="optiq",
+            runtime_version="0.3.3",
+            runtime_lock_digest="sha256:" + "a" * 64,
+            model_repository="mlx-community/example",
+            model_revision="3" * 40,
+            trust_grants=(),
+            service_name="coding",
+            gateway_endpoint="http://localhost:8766/v1",
+        )
+        with self.assertRaisesRegex(ValueError, "literal HTTP loopback"):
+            self.planner.plan(
+                facts,
+                SetupRequest(
+                    selection=hostname_endpoint,
+                    noninteractive=True,
+                    confirmed=True,
+                ),
+            )
+
     def test_resume_skips_a_completed_download_and_ends_with_a_real_request(
         self,
     ) -> None:

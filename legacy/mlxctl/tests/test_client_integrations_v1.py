@@ -221,6 +221,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_API_LLM_MODEL=cloud", restored)
             self.assertNotIn("HINDSIGHT_API_LLM_BASE_URL", restored)
 
+    def test_client_endpoint_requires_a_literal_loopback_origin(self) -> None:
+        with self.assertRaisesRegex(ValueError, "literal HTTP loopback"):
+            ClientConfiguration(
+                gateway_endpoint="http://localhost:8766/v1",
+                service_name="coding",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

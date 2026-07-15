@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
@@ -57,12 +58,23 @@ class ClientConfiguration:
             self, "sampling_profiles", MappingProxyType(dict(self.sampling_profiles))
         )
         endpoint = urlsplit(self.gateway_endpoint)
-        if endpoint.scheme != "http" or endpoint.hostname not in {
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        }:
-            raise ValueError("Gateway endpoint must be an HTTP loopback URL")
+        try:
+            address = ip_address(endpoint.hostname or "")
+            port = endpoint.port
+        except ValueError as error:
+            raise ValueError(
+                "Gateway endpoint must be a literal HTTP loopback URL"
+            ) from error
+        if (
+            endpoint.scheme != "http"
+            or not address.is_loopback
+            or port is None
+            or endpoint.username is not None
+            or endpoint.password is not None
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("Gateway endpoint must be a literal HTTP loopback URL")
         if not self.service_name:
             raise ValueError("service_name is required")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.service_name):
