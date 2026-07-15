@@ -1045,6 +1045,8 @@ class LocalOperationBackend:
                     )
                 del models[resource]
 
+        if not self._config_store.exists:
+            self._config_store.import_text("schema_version = 1\n")
         return _plain(self._config_store.edit(edit))
 
     def _service_items(self, config: MlxctlConfig) -> list[dict[str, object]]:

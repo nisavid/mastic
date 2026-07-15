@@ -312,6 +312,9 @@ class SupervisorTests(unittest.TestCase):
             self.gateway.routes,
             {"coding": ("stopped", None), "memory": ("stopped", None)},
         )
+        operation = next(iter(self.store.operation_items.values()))
+        self.assertEqual(operation["status"], "complete")
+        self.assertEqual(operation["outcome"], "running")
 
     def test_service_start_visibly_activates_and_runs_multiple_named_services(self):
         coding = self.supervisor.start_service("coding")

@@ -818,7 +818,7 @@ class Supervisor:
         return operation_id
 
     def _finish_operation_locked(
-        self, operation_id: str, status: str, *, error: str | None = None
+        self, operation_id: str, outcome: str, *, error: str | None = None
     ) -> None:
         kind, resource = self._operation_metadata.get(
             operation_id, ("lifecycle", "unknown")
@@ -827,12 +827,18 @@ class Supervisor:
             "id": operation_id,
             "kind": kind,
             "resource": resource,
-            "status": status,
+            "status": "failed" if outcome == "failed" else "complete",
+            "outcome": outcome,
         }
         if error is not None:
             current["error"] = error
         self._state_store.put_operation(current)
-        self._event_locked(operation_id, "finished", status=status)
+        self._event_locked(
+            operation_id,
+            "finished",
+            status=current["status"],
+            outcome=outcome,
+        )
 
     def _event_locked(self, operation_id: str, kind: str, **details: object) -> None:
         self._state_store.append_event(

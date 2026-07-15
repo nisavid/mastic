@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,9 +173,15 @@ class _DispatcherOwner:
 class _GatewayMutationGuard:
     """Reject desired endpoint edits that cannot rebind the running Gateway."""
 
-    def __init__(self, dispatcher, launchd: LaunchdAdapter) -> None:
+    def __init__(
+        self,
+        dispatcher,
+        launchd: LaunchdAdapter,
+        control_socket: Path | None = None,
+    ) -> None:
         self._dispatcher = dispatcher
         self._launchd = launchd
+        self._control_socket = control_socket
 
     def preview(self, request: OperationRequest):
         self._check(request)
@@ -185,7 +192,15 @@ class _GatewayMutationGuard:
         return self._dispatcher.execute(request)
 
     def _check(self, request: OperationRequest) -> None:
-        if request.name == "gateway.configure" and self._launchd.status().running:
+        socket_running = False
+        if self._control_socket is not None:
+            try:
+                socket_running = stat.S_ISSOCK(self._control_socket.lstat().st_mode)
+            except FileNotFoundError:
+                pass
+        if request.name == "gateway.configure" and (
+            self._launchd.status().running or socket_running
+        ):
             raise ApplicationError(
                 "gateway_running",
                 "Stop the Supervisor before changing the Gateway endpoint.",
@@ -297,7 +312,9 @@ def compose_local(
             ),
         )
     )
-    guarded = _GatewayMutationGuard(application.dispatcher, launchd)
+    guarded = _GatewayMutationGuard(
+        application.dispatcher, launchd, paths.control_socket
+    )
     public_application = ApplicationComposition(
         dispatcher=guarded,  # type: ignore[arg-type]
         catalogue=application.catalogue,

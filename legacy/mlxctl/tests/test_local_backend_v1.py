@@ -503,6 +503,20 @@ class LocalOperationBackendTests(unittest.TestCase):
             ).execute()
             self.assertTrue(inspected["resource"]["desired"]["pinned"])
 
+    def test_first_local_mutation_initializes_minimal_desired_state(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend, _ = self._backend(root, config=_EMPTY_CONFIG)
+            (root / "config.toml").unlink()
+
+            backend.prepare(
+                OperationRequest("gateway.configure", {"port": 9001})
+            ).execute()
+
+            self.assertTrue((root / "config.toml").exists())
+            shown = backend.prepare(OperationRequest("config.show")).execute()
+            self.assertEqual(shown["resource"]["gateway"]["port"], 9001)
+
     def test_service_remove_drains_and_stops_before_deleting_desired_state(
         self,
     ) -> None:

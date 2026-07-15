@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import plistlib
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,20 @@ class ProductionCompositionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ApplicationError, "Stop the Supervisor"):
             guard.preview(OperationRequest("gateway.configure", {"port": 9000}))
+
+        self.assertEqual(dispatcher.calls, [])
+
+    def test_live_control_socket_blocks_gateway_endpoint_edit(self) -> None:
+        dispatcher = _Port()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mlxd.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(str(path))
+            guard = _GatewayMutationGuard(dispatcher, _Launchd(False), path)
+
+            with self.assertRaisesRegex(ApplicationError, "Stop the Supervisor"):
+                guard.execute(OperationRequest("gateway.configure", {"port": 9000}))
 
         self.assertEqual(dispatcher.calls, [])
 
