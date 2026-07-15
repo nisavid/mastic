@@ -262,6 +262,24 @@ class _LocalSupervisorOwner:
                     "state": "stopped",
                 }
             )
+        for operation in self._state_store.operations():
+            if operation.get("status") not in {"queued", "running", "resuming"}:
+                continue
+            interrupted = {
+                **operation,
+                "status": "failed",
+                "outcome": "interrupted",
+                "error": "Supervisor stopped before the operation completed.",
+            }
+            self._state_store.put_operation(interrupted)
+            self._state_store.append_event(
+                {
+                    "kind": "interrupted",
+                    "operation_id": str(operation["id"]),
+                    "resource": str(operation.get("resource", "unknown")),
+                    "reason": "supervisor_inactive",
+                }
+            )
 
 
 class _DispatcherOwner:

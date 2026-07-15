@@ -91,17 +91,11 @@ class ApplicationManager:
                         "rerun with --yes after reviewing the complete plan",
                     ),
                 )
-            if prepared.requires_supervisor:
-                if operation.kind is OperationKind.QUERY:
-                    raise ApplicationError(
-                        "activation_forbidden",
-                        f"{request.name} must not start the Supervisor",
-                        next_actions=(
-                            "start the Supervisor explicitly if mutation is intended",
-                        ),
-                    )
-                if operation.supervisor is not SupervisorRequirement.NEVER_START:
-                    dispatcher.require_supervisor(request)
+            if prepared.requires_supervisor and (
+                operation.kind is OperationKind.QUERY
+                or operation.supervisor is not SupervisorRequirement.NEVER_START
+            ):
+                dispatcher.require_supervisor(request)
             try:
                 value = prepared.execute()
             except ApplicationError:

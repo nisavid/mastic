@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -199,7 +200,16 @@ def private_socket_ready(path: Path) -> bool:
         metadata = path.lstat()
     except FileNotFoundError:
         return False
-    return stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == os.getuid()
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(0.2)
+        return probe.connect_ex(str(path)) == 0
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def _mapping(value: object) -> Mapping[str, object]:

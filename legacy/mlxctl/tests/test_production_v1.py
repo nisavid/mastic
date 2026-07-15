@@ -124,7 +124,7 @@ class ProductionCompositionTests(unittest.TestCase):
         activator = _Activator()
         remote = _Port({"state": "running"})
 
-        owner = _SetupSupervisorOwner(remote, _Launchd(False), activator)
+        owner = _SetupSupervisorOwner(remote, _Launchd(running=False), activator)
         result = owner.execute("supervisor.start", {})
 
         self.assertEqual(activator.calls, 1)
@@ -139,7 +139,7 @@ class ProductionCompositionTests(unittest.TestCase):
             remote = _Port({"state": "stopping"})
             owner = _LocalSupervisorOwner(
                 remote,
-                _Launchd(False),
+                _Launchd(running=False),
                 root / "mlxd.sock",
                 OperationalStateStore(root / "state.db"),
                 ConfigStore(root / "config.toml", validate_config),
@@ -156,7 +156,7 @@ class ProductionCompositionTests(unittest.TestCase):
             remote = _Port({"state": "stopping"})
             owner = _LocalSupervisorOwner(
                 remote,
-                _Launchd(True),
+                _Launchd(running=True),
                 root / "mlxd.sock",
                 OperationalStateStore(root / "state.db"),
                 ConfigStore(root / "config.toml", validate_config),
@@ -174,10 +174,11 @@ class ProductionCompositionTests(unittest.TestCase):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.addCleanup(listener.close)
             listener.bind(str(path))
+            listener.listen(1)
             remote = _Port({"state": "stopping"})
             owner = _LocalSupervisorOwner(
                 remote,
-                _Launchd(False),
+                _Launchd(running=False),
                 path,
                 OperationalStateStore(root / "state.db"),
                 ConfigStore(root / "config.toml", validate_config),
@@ -187,6 +188,27 @@ class ProductionCompositionTests(unittest.TestCase):
 
         self.assertEqual(result, {"state": "stopping"})
         self.assertEqual(remote.calls, [("supervisor.stop", {})])
+
+    def test_local_supervisor_stop_reconciles_a_stale_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "mlxd.sock"
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(str(path))
+            stale.close()
+            remote = _Port({"state": "stopping"})
+            owner = _LocalSupervisorOwner(
+                remote,
+                _Launchd(running=False),
+                path,
+                OperationalStateStore(root / "state.db"),
+                ConfigStore(root / "config.toml", validate_config),
+            )
+
+            result = owner.execute("supervisor.stop", {})
+
+        self.assertEqual(result, {"state": "stopped", "already_stopped": True})
+        self.assertEqual(remote.calls, [])
 
     def test_inactive_supervisor_stop_reconciles_stale_running_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -225,10 +247,18 @@ class ProductionCompositionTests(unittest.TestCase):
                     "pid": 123,
                 }
             )
+            state.put_operation(
+                {
+                    "id": "operation-1",
+                    "kind": "service.start",
+                    "resource": "coding",
+                    "status": "running",
+                }
+            )
             versions = iter(range(10, 20))
             owner = _LocalSupervisorOwner(
                 _Port(),
-                _Launchd(False),
+                _Launchd(running=False),
                 root / "mlxd.sock",
                 state,
                 config,
@@ -246,12 +276,23 @@ class ProductionCompositionTests(unittest.TestCase):
             service = state.snapshot("service_run", "coding/run-1")
             self.assertEqual(service["state"], "stopped")
             self.assertNotIn("pid", service)
+            operation = state.operation("operation-1")
+            self.assertEqual(operation["status"], "failed")
+            self.assertEqual(operation["outcome"], "interrupted")
+            self.assertEqual(state.events("operation-1")[-1]["kind"], "interrupted")
+            self.assertFalse(
+                {
+                    item.get("status")
+                    for item in state.operations()
+                    if item.get("status") in {"queued", "running", "resuming"}
+                }
+            )
 
     def test_running_gateway_endpoint_edit_fails_before_preview_or_execution(
         self,
     ) -> None:
         dispatcher = _Port()
-        guard = _GatewayMutationGuard(dispatcher, _Launchd(True))
+        guard = _GatewayMutationGuard(dispatcher, _Launchd(running=True))
 
         with self.assertRaisesRegex(ApplicationError, "Stop the Supervisor"):
             guard.preview(OperationRequest("gateway.configure", {"port": 9000}))
@@ -265,7 +306,8 @@ class ProductionCompositionTests(unittest.TestCase):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.addCleanup(listener.close)
             listener.bind(str(path))
-            guard = _GatewayMutationGuard(dispatcher, _Launchd(False), path)
+            listener.listen(1)
+            guard = _GatewayMutationGuard(dispatcher, _Launchd(running=False), path)
 
             with self.assertRaisesRegex(ApplicationError, "Stop the Supervisor"):
                 guard.execute(OperationRequest("gateway.configure", {"port": 9000}))
@@ -282,7 +324,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 return {"edited": True}
 
         dispatcher = Dispatcher()
-        guard = _GatewayMutationGuard(dispatcher, _Launchd(True))
+        guard = _GatewayMutationGuard(dispatcher, _Launchd(running=True))
         request = OperationRequest("service.edit", {"resource": "coding"})
 
         self.assertEqual(guard.execute(request), {"edited": True})

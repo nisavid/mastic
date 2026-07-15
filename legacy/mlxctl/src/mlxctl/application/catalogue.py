@@ -185,6 +185,8 @@ _LOCAL_MUTATIONS = frozenset(
         "config.restore",
     }
 )
+# These mutations may use a running Supervisor but must never start one.
+_NEVER_START_MUTATIONS = _LOCAL_MUTATIONS | {"supervisor.stop"}
 
 
 def build_operation_catalogue() -> Mapping[str, Operation]:
@@ -198,7 +200,7 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
             if kind is OperationKind.MUTATION:
                 if name in {"setup", "service.start"}:
                     supervisor = SupervisorRequirement.MAY_START
-                elif name != "supervisor.stop" and name not in _LOCAL_MUTATIONS:
+                elif name not in _NEVER_START_MUTATIONS:
                     supervisor = SupervisorRequirement.REQUIRED
             summary = _summary(name)
             operations[name] = Operation(
