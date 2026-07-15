@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -11,10 +12,10 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Footer, Static
+from textual.widgets import Button, Checkbox, Footer, Input, Label, Select, Static
 
-from mlxctl.application.catalogue import Operation
-from mlxctl.application.dispatch import OperationRequest
+from mlxctl.application.catalogue import Operation, ParameterKind
+from mlxctl.application.dispatch import ApplicationError, OperationRequest
 
 from .cli import Dispatcher
 
@@ -138,6 +139,38 @@ class MlxctlApp(App[None]):
         margin-right: 1;
         min-width: 18;
     }
+    #operation-form {
+        display: none;
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        background: #111715;
+        border: solid #2b3733;
+    }
+    #operation-form .parameter-label {
+        height: auto;
+        margin-top: 1;
+        color: #e7ecea;
+        text-style: bold;
+    }
+    #operation-form .parameter-help {
+        height: auto;
+        color: #8a9691;
+    }
+    #operation-form Input, #operation-form Select {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #operation-form Checkbox { margin-bottom: 1; }
+    #operation-form .operation-buttons {
+        height: 4;
+        margin-top: 1;
+    }
+    #operation-form .operation-buttons Button {
+        min-width: 18;
+        margin-right: 1;
+    }
     #first-run {
         background: #e7ecea;
         color: #090d0c;
@@ -164,6 +197,8 @@ class MlxctlApp(App[None]):
         self.catalogue = catalogue
         self.snapshots = snapshots
         self.current_view = "home"
+        self.selected_operation: str | None = None
+        self.pending_parameters: Mapping[str, object] | None = None
 
     @property
     def available_operations(self) -> tuple[str, ...]:
@@ -186,6 +221,7 @@ class MlxctlApp(App[None]):
             with VerticalScroll(id="workspace"):
                 yield Static("", id="view-title")
                 yield Static("", id="view-body")
+                yield Vertical(id="operation-form")
                 with Horizontal(id="workspace-actions"):
                     yield Button("Create service", id="first-run")
                     yield Button("Open topology", id="open-topology")
@@ -210,6 +246,12 @@ class MlxctlApp(App[None]):
             self.show_view("topology")
         elif identity == "refresh":
             self.show_view(self.current_view)
+        elif identity == "operation-submit":
+            self._submit_operation()
+        elif identity == "operation-confirm":
+            self._confirm_operation()
+        elif identity == "operation-cancel":
+            self._cancel_operation()
 
     def action_help(self) -> None:
         self.show_view("help")
@@ -223,29 +265,147 @@ class MlxctlApp(App[None]):
         inspector.styles.display = "none" if width < 100 else "block"
         workspace.styles.padding = (1, 1) if width < 80 else (1, 2)
 
-    def open_operation(self, name: str) -> None:
+    async def open_operation(self, name: str) -> None:
         operation = self.catalogue[name]
+        self.selected_operation = name
+        self.pending_parameters = None
         self.current_view = f"operation:{name}"
         self.query_one("#view-title", Static).update(name.replace(".", "  ›  "))
         self.query_one("#view-body", Static).update(
             f"{operation.summary}\n\n"
-            "This command is available in both the CLI and TUI. Select or enter "
-            "the required resource here; mutations show their complete plan before "
-            "confirmation.\n\n"
-            f"CLI: {operation.examples[0]} --help"
+            f"{operation.kind.value.title()} · Supervisor: "
+            f"{operation.supervisor.value.replace('_', ' ')}\n\n"
+            "Set the operation inputs below. Read-only operations do not start the "
+            "Supervisor. Confirmed mutations show their complete plan before any "
+            "change.\n\n"
+            f"CLI equivalent: {operation.examples[0]} --help"
         )
+        form = self.query_one("#operation-form", Vertical)
+        form.styles.display = "block"
+        self.query_one("#workspace-actions", Horizontal).styles.display = "none"
+        await form.remove_children()
+        widgets: list[Static | Input | Select[str] | Checkbox | Horizontal] = []
+        for parameter in operation.parameters:
+            requirement = "required" if parameter.required else "optional"
+            surface = (
+                "Argument"
+                if parameter.kind is ParameterKind.ARGUMENT
+                else f"Option {parameter.flag or '--' + parameter.name.replace('_', '-')}"
+            )
+            widgets.append(
+                Label(
+                    f"{parameter.name.replace('_', ' ').title()} · {surface} · {requirement}",
+                    classes="parameter-label",
+                )
+            )
+            accepted = (
+                f" Accepted values: {', '.join(parameter.accepted)}."
+                if parameter.accepted
+                else ""
+            )
+            widgets.append(
+                Static(
+                    parameter.help + accepted,
+                    classes="parameter-help",
+                )
+            )
+            identifier = f"parameter-{parameter.name}"
+            if parameter.value_type == "boolean":
+                widgets.append(
+                    Checkbox(f"Set {parameter.flag or parameter.name}", id=identifier)
+                )
+            elif parameter.accepted:
+                widgets.append(
+                    Select(
+                        [(value, value) for value in parameter.accepted],
+                        prompt="Choose a value",
+                        allow_blank=not parameter.required,
+                        id=identifier,
+                    )
+                )
+            else:
+                widgets.append(
+                    Input(
+                        placeholder="Required" if parameter.required else "Optional",
+                        type="integer" if parameter.value_type == "integer" else "text",
+                        id=identifier,
+                    )
+                )
+        submit_label = (
+            "Review complete plan" if operation.confirmation else "Run operation"
+        )
+        widgets.append(
+            Horizontal(
+                Button(submit_label, id="operation-submit", variant="primary"),
+                Button("Confirm change", id="operation-confirm", variant="warning"),
+                Button("Cancel", id="operation-cancel"),
+                classes="operation-buttons",
+            )
+        )
+        await form.mount(*widgets)
+        self.query_one("#operation-confirm", Button).styles.display = "none"
+        self.query_one("#operation-cancel", Button).styles.display = "none"
+        focus_target = (
+            f"#parameter-{operation.parameters[0].name}"
+            if operation.parameters
+            else "#operation-submit"
+        )
+        self.set_focus(self.query_one(focus_target))
 
     def execute_operation(self, name: str, **parameters: object) -> None:
         """Execute one palette or contextual operation through shared dispatch."""
-        result = self.dispatcher.execute(OperationRequest(name, parameters))
+        try:
+            result = self.dispatcher.execute(OperationRequest(name, parameters))
+        except ApplicationError as error:
+            actions = "\n".join(f"  → {action}" for action in error.next_actions)
+            body = f"{error.code}\n\n{error.message}"
+            if actions:
+                body += f"\n\nNext actions\n{actions}"
+            self.query_one("#view-title", Static).update(
+                f"{name.replace('.', '  ›  ')} · failed"
+            )
+            self.query_one("#view-body", Static).update(body)
+            self.notify(error.message, title="Operation failed", severity="error")
+            return
         self.notify(
             f"{name}: complete"
             + (" · Supervisor started" if result.supervisor_started else ""),
             title="mlxctl",
         )
-        self.show_view(self.current_view)
+        rendered = json.dumps(dict(result.value), indent=2, sort_keys=True, default=str)
+        events = ""
+        if result.events:
+            events = "\n\nEvents\n" + "\n".join(
+                json.dumps(dict(event), sort_keys=True, default=str)
+                for event in result.events
+            )
+        next_actions_value = result.value.get("next_actions", ())
+        if isinstance(next_actions_value, str):
+            next_actions = (next_actions_value,)
+        elif isinstance(next_actions_value, tuple | list):
+            next_actions = tuple(str(item) for item in next_actions_value)
+        else:
+            next_actions = ()
+        next_text = "\n".join(f"  → {action}" for action in next_actions)
+        if not next_text:
+            next_text = "  → Open Ctrl+P for another operation"
+        self.query_one("#view-title", Static).update(
+            f"{name.replace('.', '  ›  ')} · complete"
+        )
+        self.query_one("#view-body", Static).update(
+            f"Result\n{rendered}{events}\n\nNext actions\n{next_text}"
+        )
+        self.pending_parameters = None
+        self.query_one("#operation-confirm", Button).styles.display = "none"
+        self.query_one("#operation-cancel", Button).styles.display = "none"
+        self.query_one("#operation-submit", Button).styles.display = "block"
+        self.set_focus(self.query_one("#operation-submit", Button))
 
     def show_view(self, name: str) -> None:
+        self.selected_operation = None
+        self.pending_parameters = None
+        self.query_one("#operation-form", Vertical).styles.display = "none"
+        self.query_one("#workspace-actions", Horizontal).styles.display = "block"
         snapshot = self.snapshots.snapshot()
         self.current_view = name
         self.query_one("#machine-state", Static).update(
@@ -256,6 +416,101 @@ class MlxctlApp(App[None]):
         self.query_one("#view-title", Static).update(title)
         self.query_one("#view-body", Static).update(body)
         self.query_one("#inspector", Static).update(self._inspector(snapshot))
+
+    def _submit_operation(self) -> None:
+        if self.selected_operation is None:
+            return
+        operation = self.catalogue[self.selected_operation]
+        try:
+            parameters = self._operation_parameters(operation)
+        except ValueError as error:
+            self.query_one("#view-body", Static).update(
+                f"Check the highlighted operation inputs.\n\n{error}"
+            )
+            self.notify(str(error), title="Input needed", severity="warning")
+            return
+        if not operation.confirmation:
+            self.execute_operation(operation.name, **parameters)
+            return
+        self.pending_parameters = parameters
+        self.query_one("#view-body", Static).update(
+            self._mutation_plan(operation, parameters)
+        )
+        self.query_one("#operation-submit", Button).styles.display = "none"
+        self.query_one("#operation-confirm", Button).styles.display = "block"
+        self.query_one("#operation-cancel", Button).styles.display = "block"
+        self.set_focus(self.query_one("#operation-confirm", Button))
+
+    def _confirm_operation(self) -> None:
+        if self.selected_operation is None or self.pending_parameters is None:
+            return
+        operation = self.catalogue[self.selected_operation]
+        parameters = dict(self.pending_parameters)
+        self.execute_operation(operation.name, **parameters)
+
+    def _cancel_operation(self) -> None:
+        if self.selected_operation is None:
+            return
+        operation = self.catalogue[self.selected_operation]
+        self.pending_parameters = None
+        self.query_one("#view-body", Static).update(
+            f"No changes made.\n\n{operation.summary}\n\n"
+            "The editable inputs are preserved. Review them, then preview the "
+            "complete plan again."
+        )
+        self.query_one("#operation-submit", Button).styles.display = "block"
+        self.query_one("#operation-confirm", Button).styles.display = "none"
+        self.query_one("#operation-cancel", Button).styles.display = "none"
+        self.set_focus(self.query_one("#operation-submit", Button))
+
+    def _operation_parameters(self, operation: Operation) -> dict[str, object]:
+        values: dict[str, object] = {}
+        for parameter in operation.parameters:
+            control = self.query_one(f"#parameter-{parameter.name}")
+            value: object
+            if isinstance(control, Checkbox):
+                value = control.value
+            elif isinstance(control, Select):
+                value = None if control.value is Select.BLANK else control.value
+            elif isinstance(control, Input):
+                value = control.value.strip() or None
+                if value is not None and parameter.value_type == "integer":
+                    try:
+                        value = int(value)
+                    except ValueError as error:
+                        raise ValueError(
+                            f"{parameter.name.replace('_', ' ').title()} must be a whole number."
+                        ) from error
+            else:  # pragma: no cover - Textual form construction is exhaustive.
+                raise TypeError(f"unsupported control for {parameter.name}")
+            if parameter.required and value is None:
+                raise ValueError(
+                    f"{parameter.name.replace('_', ' ').title()} is required."
+                )
+            if value is not None and value is not False:
+                values[parameter.name] = value
+        return values
+
+    @staticmethod
+    def _mutation_plan(operation: Operation, parameters: Mapping[str, object]) -> str:
+        rows = []
+        for parameter in operation.parameters:
+            value = parameters.get(
+                parameter.name,
+                False if parameter.value_type == "boolean" else "not set",
+            )
+            rows.append(f"  {parameter.name}: {value}")
+        parameter_text = "\n".join(rows) if rows else "  No operation inputs"
+        supervisor = operation.supervisor.value.replace("_", " ")
+        return (
+            "Complete mutation plan\n\n"
+            f"Operation: {operation.name}\n"
+            f"Intent: {operation.summary}\n"
+            f"Supervisor: {supervisor}\n"
+            f"Confirmation: required\n\nInputs\n{parameter_text}\n\n"
+            "No change has been made. Confirm to apply this exact plan, or cancel "
+            "to return to the editable inputs."
+        )
 
     def _content(self, name: str, snapshot: TuiSnapshot) -> tuple[str, str]:
         if name == "home":
