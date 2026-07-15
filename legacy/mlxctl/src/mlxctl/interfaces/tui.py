@@ -446,6 +446,7 @@ class MlxctlApp(App[None]):
             return
         operation = self.catalogue[self.selected_operation]
         parameters = dict(self.pending_parameters)
+        parameters["confirmed"] = True
         self.execute_operation(operation.name, **parameters)
 
     def _cancel_operation(self) -> None:

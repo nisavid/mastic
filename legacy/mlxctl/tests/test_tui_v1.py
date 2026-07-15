@@ -157,6 +157,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                     "repository": "mlx-community/Qwen3-4B-4bit",
                     "revision": "abc123",
                     "alias": "coding",
+                    "confirmed": True,
                 },
             )
             self.assertEqual(self.app.focused.id, "operation-submit")
@@ -183,6 +184,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                         await pilot.pause()
                     self.assertEqual(len(self.dispatcher.requests), before + 1)
                     self.assertEqual(self.dispatcher.requests[-1].name, name)
+                    if operation.confirmation:
+                        self.assertTrue(
+                            self.dispatcher.requests[-1].parameters["confirmed"]
+                        )
 
     async def test_results_errors_and_next_actions_stay_in_the_workspace(self) -> None:
         async with self.app.run_test(size=(120, 45)) as pilot:
