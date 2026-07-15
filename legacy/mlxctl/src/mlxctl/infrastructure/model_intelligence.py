@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.parse import quote, urlparse
 
 
@@ -195,6 +195,31 @@ class ModelRepositoryPort(Protocol):
 
 class MachineInventoryPort(Protocol):
     def inspect(self) -> MachineInventory: ...
+
+
+class PsutilMachineInventory:
+    """Observe unified-memory capacity without mutating host state."""
+
+    def __init__(self, sample: Callable[[], object] | None = None) -> None:
+        if sample is None:
+            import psutil
+
+            sample = psutil.virtual_memory
+        self._sample = sample
+
+    def inspect(self) -> MachineInventory:
+        value = self._sample()
+        total = getattr(value, "total", None)
+        available = getattr(value, "available", None)
+        if type(total) is not int or total <= 0:
+            raise ModelIntelligenceError("machine memory inventory is unavailable")
+        if type(available) is not int or available < 0:
+            available = None
+        return MachineInventory(
+            total_memory_bytes=total,
+            available_memory_bytes=available,
+            source="psutil virtual_memory",
+        )
 
 
 class HubApiPort(Protocol):

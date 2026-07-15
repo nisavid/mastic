@@ -16,6 +16,7 @@ from mlxctl.infrastructure.config_store import ConfigStore
 from mlxctl.infrastructure.model_supply import (
     ModelInstallation as SuppliedModelInstallation,
 )
+from mlxctl.infrastructure.model_intelligence import RuntimeObservation
 from mlxctl.infrastructure.model_supply import (
     ModelProvenance,
     ModelRevision,
@@ -113,6 +114,7 @@ class LocalOperationBackend:
         setup: OperationPort,
         clients: OperationPort,
         config_path: str | Path,
+        model_intelligence=None,
     ) -> None:
         self._catalogue = catalogue
         self._config_store = config_store
@@ -126,6 +128,7 @@ class LocalOperationBackend:
         self._setup = setup
         self._clients = clients
         self._config_path = Path(config_path)
+        self._model_intelligence = model_intelligence
 
     def prepare(self, request: OperationRequest) -> PreparedOperation:
         operation = self._catalogue.get(request.name)
@@ -176,7 +179,6 @@ class LocalOperationBackend:
         elif name in _RUNTIME_MUTATIONS:
             self._validate_runtime_mutation(request, config)
         elif name in {
-            "model.inspect",
             "model.verify",
             "model.repair",
             "model.update",
@@ -342,6 +344,49 @@ class LocalOperationBackend:
         self, request: OperationRequest, config: MlxctlConfig
     ) -> Mapping[str, object]:
         name = request.name
+        if name == "model.inspect":
+            if self._model_intelligence is None:
+                raise ApplicationError(
+                    "operation_unavailable",
+                    "model intelligence is unavailable in this installation",
+                )
+            selected = str(
+                request.parameters.get(
+                    "repository", request.parameters.get("resource", "")
+                )
+            )
+            revision = str(request.parameters.get("revision", "main"))
+            if selected in config.aliases:
+                selected = config.aliases[selected].installation_name
+            if selected in config.models:
+                installed = config.models[selected]
+                repository = installed.revision.repository
+                revision = installed.revision.revision
+            else:
+                repository = selected
+            report = self._model_intelligence.inspect(
+                repository,
+                revision,
+                runtimes=tuple(
+                    RuntimeObservation(
+                        installation_id=item.installation_id,
+                        runtime=item.definition,
+                        version=item.version,
+                        recognized_model_types=frozenset(),
+                        capabilities=item.capabilities,
+                        source="exact-runtime-probe",
+                    )
+                    for item in config.runtimes.values()
+                ),
+                context_tokens=int(request.parameters.get("context_tokens", 32768)),
+                concurrency=int(request.parameters.get("concurrency", 1)),
+            )
+            return _result(
+                name,
+                resource=_plain(report),
+                evidence=["exact-hub-metadata", "local-machine-inventory"],
+                next_actions=[],
+            )
         if name == "model.search":
             query = str(request.parameters.get("query", ""))
             mode = str(request.parameters.get("source", "curated"))

@@ -153,6 +153,15 @@ class _ModelSupply:
         return VerificationResult("complete", "cache-completeness", ())
 
 
+class _ModelIntelligence:
+    def __init__(self):
+        self.calls = []
+
+    def inspect(self, repository, revision, **scenario):
+        self.calls.append((repository, revision, scenario))
+        return {"identity": {"repo_id": repository, "commit_sha": "b" * 40}}
+
+
 class _DirectInstallSupply(_ModelSupply):
     execute = None
 
@@ -179,6 +188,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             setup=ports.get("setup", _NeverCalled()),
             clients=ports.get("clients", _NeverCalled()),
             config_path=config_path,
+            model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
         )
         return backend, state
 
@@ -312,6 +322,27 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertIn(("search", "Qwen", "broad", 3), supply.calls)
             install = next(call for call in supply.calls if call[0] == "install")
             self.assertEqual(install[1]["alias"], "Qwen-OptiQ")
+
+    def test_model_inspect_accepts_arbitrary_repository_before_install(self) -> None:
+        with TemporaryDirectory() as directory:
+            intelligence = _ModelIntelligence()
+            backend, _ = self._backend(Path(directory), model_intelligence=intelligence)
+
+            result = backend.prepare(
+                OperationRequest(
+                    "model.inspect",
+                    {
+                        "repository": "mlx-community/New-OptiQ",
+                        "revision": "main",
+                        "context_tokens": 65536,
+                        "concurrency": 2,
+                    },
+                )
+            ).execute()
+
+            self.assertEqual(intelligence.calls[0][0], "mlx-community/New-OptiQ")
+            self.assertEqual(intelligence.calls[0][2]["context_tokens"], 65536)
+            self.assertEqual(result["resource"]["identity"]["commit_sha"], "b" * 40)
 
     def test_config_import_reads_a_bounded_explicit_source(self) -> None:
         with TemporaryDirectory() as directory:

@@ -292,6 +292,24 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 value_type="boolean",
             ),
         )
+    if name == "model.inspect":
+        return (
+            _argument(
+                "repository",
+                "Hugging Face repository ID, configured Model Installation, or Model Alias.",
+            ),
+            _option("revision", "Revision to resolve exactly before inspection."),
+            _option(
+                "context_tokens",
+                "Context-token scenario for the machine-fit estimate.",
+                value_type="integer",
+            ),
+            _option(
+                "concurrency",
+                "Concurrent-request scenario for the machine-fit estimate.",
+                value_type="integer",
+            ),
+        )
     if name == "doctor":
         return (
             _option(
@@ -418,7 +436,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "Cached Revision identity; discover values with `mlxctl model cache list`.",
             ),
         )
-    if name.startswith("model.") and name not in {"model.list", "model.search"}:
+    if name.startswith("model.") and name not in {
+        "model.list",
+        "model.search",
+        "model.inspect",
+    }:
         return (_argument("resource", resource_help["model"]),)
     if name == "service.create":
         return (

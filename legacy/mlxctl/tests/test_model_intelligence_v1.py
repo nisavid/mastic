@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 
 from mlxctl.infrastructure.model_intelligence import (
     CacheObservation,
@@ -11,6 +12,7 @@ from mlxctl.infrastructure.model_intelligence import (
     MetadataPayload,
     ModelIntelligence,
     ModelIntelligenceError,
+    PsutilMachineInventory,
     RepositoryEnvelope,
     RepositoryFile,
     RuntimeObservation,
@@ -125,6 +127,15 @@ def _json_payload(path: str, value: object) -> MetadataPayload:
 
 
 class ModelIntelligenceTests(unittest.TestCase):
+    def test_machine_inventory_reports_unified_memory_capacity(self) -> None:
+        inventory = PsutilMachineInventory(
+            lambda: SimpleNamespace(total=64 * GIB, available=48 * GIB)
+        ).inspect()
+
+        self.assertEqual(inventory.total_memory_bytes, 64 * GIB)
+        self.assertEqual(inventory.available_memory_bytes, 48 * GIB)
+        self.assertEqual(inventory.source, "psutil virtual_memory")
+
     def test_hugging_face_adapter_requests_exact_bounded_metadata(self) -> None:
         api = _HubApi()
         fetcher = _MetadataFetcher()
