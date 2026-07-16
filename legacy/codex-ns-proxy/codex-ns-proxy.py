@@ -496,13 +496,15 @@ def _ordinary_tool_names(data: dict[str, Any]) -> set[str]:
     tools = data.get("tools")
     if not isinstance(tools, list):
         return set()
-    return {
-        tool["name"]
-        for tool in tools
-        if isinstance(tool, dict)
-        and tool.get("type") in {"function", "custom"}
-        and isinstance(tool.get("name"), str)
-    }
+    names: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") not in {"function", "custom"}:
+            continue
+        name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            raise TransformationError("ordinary tools require a non-empty name")
+        names.add(name)
+    return names
 
 
 def _response_ids(data: Any) -> set[str]:

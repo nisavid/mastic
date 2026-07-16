@@ -966,6 +966,19 @@ class ProxyIntegrationTest(unittest.TestCase):
         self.assertIn("collides", json.loads(raw)["error"]["message"])
         self.assertEqual(1, len(FakeUpstreamHandler.requests))
 
+    def test_unnamed_ordinary_tools_fail_closed_before_upstream(self):
+        for tool in [
+            {"type": "function"},
+            {"type": "custom", "name": ""},
+        ]:
+            with self.subTest(tool=tool):
+                status, _, raw = self.request(
+                    "POST", "/v1/responses", {"input": [], "tools": [tool]}
+                )
+                self.assertEqual(400, status)
+                self.assertIn("non-empty name", json.loads(raw)["error"]["message"])
+        self.assertEqual([], FakeUpstreamHandler.requests)
+
     def test_malformed_namespaced_history_fails_closed(self):
         malformed = [
             {"type": "function_call", "namespace": "", "name": "add"},
