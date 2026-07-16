@@ -542,6 +542,54 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 frozenset({"model", "host", "port", "kv_config", "mtp"}),
             )
 
+    def test_launch_accepts_hugging_face_blob_symlink_without_allowing_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            repository_cache = root / "cache" / "models--mlx-community--Qwen"
+            snapshot = repository_cache / "snapshots" / _REVISION
+            snapshot.mkdir(parents=True)
+            blob = repository_cache / "blobs" / ("a" * 40)
+            blob.parent.mkdir()
+            blob.write_text("{}")
+            (snapshot / "kv_config.json").symlink_to(Path("../../blobs") / blob.name)
+            model = SuppliedModelInstallation(
+                installation_id=model.installation_id,
+                revision=model.revision,
+                cached_revision_id=model.cached_revision_id,
+                snapshot_path=snapshot,
+                provenance=model.provenance,
+            )
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
+            )
+
+            prepared = supply.prepare_launch(
+                config.services["coding"], "127.0.0.1", 49152
+            )
+
+            kv_index = prepared.argv.index("--kv-config") + 1
+            self.assertEqual(prepared.argv[kv_index], str(blob.resolve()))
+
+            outside = root / "outside.json"
+            outside.write_text("{}")
+            (snapshot / "kv_config.json").unlink()
+            (snapshot / "kv_config.json").symlink_to(outside)
+            with self.assertRaisesRegex(
+                CapabilityValidationError, "exact cached model snapshot"
+            ):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
     def test_launch_rejects_runtime_or_model_that_differs_from_desired_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
