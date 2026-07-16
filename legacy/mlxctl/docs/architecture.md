@@ -127,6 +127,17 @@ stays healthy when an upstream fails, reports per-service readiness through
 `/v1/models`, and returns stable actionable errors for stopped or unavailable
 services. Requests never start services implicitly.
 
+Managed clients use workload-profiled Gateway base URLs under
+`/clients/<client>/profiles/<profile>/v1`. The profile resolves from mlxctl's
+validated desired state and must target the request's service route. Before
+forwarding, the Gateway replaces the supported generation and chat-template
+fields with that profile's values. This makes the complete request policy
+explicit even when a client cannot express the model profile natively. Runtime
+acceptance still has to prove that the selected inference-engine path honors
+those values. The ordinary
+`/v1` endpoints remain unmodified OpenAI-compatible routes for unmanaged
+clients.
+
 Request telemetry records admission, completion, active-request counts, and
 service correlation. Lifecycle and pressure telemetry record state transitions.
 Prompt and response content, authorization headers, and token payloads are not

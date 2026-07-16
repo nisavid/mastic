@@ -254,8 +254,32 @@ pinned service.
 
 Client integrations are owned and reversible. They write only the settings
 needed for the selected Gateway route and retain ownership evidence for safe
-removal. Guided setup configures both clients with the selected service context
-and conservative sampling defaults.
+removal. For the guided Qwen3.6 OptiQ setup, mlxctl loads the model developer's
+profiles at the pinned model revision and applies them through client-specific
+Gateway endpoints. The Gateway injects them automatically; selecting a Codex
+profile or editing Hindsight configuration out of band is not required.
+
+| Client workload | Upstream profile | Effective parameters |
+| --- | --- | --- |
+| Codex coding and tool use | precise coding, thinking | `temperature=0.6`, `top_p=0.95`, `top_k=20`, `min_p=0`, `presence_penalty=0`, `repetition_penalty=1` |
+| Hindsight verification, retain, consolidation | non-thinking | `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0`, `presence_penalty=1.5`, `repetition_penalty=1` |
+| Hindsight reflect | general thinking | `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0`, `presence_penalty=1.5`, `repetition_penalty=1` |
+
+The Gateway also sets Qwen's `enable_thinking` template control for each
+workload and supports the nested `preserve_thinking` control. The guided
+profiles leave preservation unset today: Qwen already retains tool-loop
+thinking after the latest user message, while OptiQ 0.3.3 and Hindsight 0.8.4
+discard the older reasoning that preservation would need to replay. Codex's
+Responses transport carries the three active coding sampler
+values; the other coding values are neutral and remain recorded as upstream
+provenance. Hindsight's Chat Completions transport carries the complete
+operation profile.
+
+This proves the request projection, not OptiQ's internal MTP sampling path.
+OptiQ 0.3.3 can bypass MTP on its batch path, while its patched single-request
+path can discard compiled sampler settings. Target-machine acceptance must
+confirm both effective sampling and MTP activity; see the
+[OptiQ compatibility note](docs/research/optiq-0.3.3-sampling-compatibility.md).
 
 For Codex, mlxctl also creates a custom model catalog from the installed
 Codex version's bundled catalog, preserves its bundled coding instructions,
@@ -264,11 +288,20 @@ Codex from guessing fallback metadata for `qwen36-optiq`. `client inspect`
 reports a missing, malformed, incompatible, or externally changed catalog and
 gives the repair command; re-running `client configure codex` repairs it.
 
+mlxctl also selects its provider as Codex's `oss_provider`. Launching
+`codex --oss` therefore keeps the managed model and provider while enabling
+Codex's raw-reasoning display for an open-weight model. In Codex 0.144.1 the
+flag does not change request shape or disable namespace tools, so it does not
+replace a compatibility proxy when the serving stack cannot accept Codex's
+namespace-tool representation.
+
 ```sh
 mlxctl client configure codex \
   --service assistant \
   --context-window 131072 \
-  --sampling-profiles '{"coding":{"temperature":0}}'
+  --sampling-profiles '{"coding":{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0,"presence_penalty":0,"repetition_penalty":1,"enable_thinking":true}}'
+
+codex --oss
 
 mlxctl client configure hindsight \
   --service assistant \
@@ -276,12 +309,15 @@ mlxctl client configure hindsight \
   --context-window 131072 \
   --max-concurrent 1 \
   --sampling-profiles '{
-    "verification":{"temperature":0},
-    "retain":{"temperature":0.1},
-    "reflect":{"temperature":0.9},
-    "consolidation":{"temperature":0}
+    "verification":{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0,"presence_penalty":1.5,"repetition_penalty":1,"enable_thinking":false},
+    "retain":{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0,"presence_penalty":1.5,"repetition_penalty":1,"enable_thinking":false},
+    "reflect":{"temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0,"presence_penalty":1.5,"repetition_penalty":1,"enable_thinking":true},
+    "consolidation":{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0,"presence_penalty":1.5,"repetition_penalty":1,"enable_thinking":false}
   }'
 ```
+
+Those explicit forms are useful when configuring an equivalent service by
+hand. `mlxctl setup` supplies them automatically for its pinned Qwen3.6 model.
 
 Verify and remove an integration through mlxctl:
 

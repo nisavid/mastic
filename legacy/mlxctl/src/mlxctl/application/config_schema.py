@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
+import math
 from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from mlxctl.domain.resources import (
     ActivationPolicy,
@@ -46,7 +48,16 @@ class ConfiguredRuntime:
 class ClientSamplingSettings:
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
     max_tokens: int | None = None
+    enable_thinking: bool | None = None
+    preserve_thinking: bool | None = None
+    upstream_profile: str | None = None
+    source_url: str | None = None
+    source_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,9 +373,7 @@ def _clients(
             raise ConfigSchemaError(
                 f"client {name!r} context_window must be a positive integer"
             )
-        provider = table.get(
-            "provider", "mlxctl-local" if kind == "codex" else "openai"
-        )
+        provider = table.get("provider", "mlx-local" if kind == "codex" else "openai")
         if not isinstance(provider, str) or not provider:
             raise ConfigSchemaError(f"client {name!r} provider must be a string")
         max_concurrent = table.get("max_concurrent", 1 if kind == "hindsight" else None)
@@ -403,11 +412,49 @@ def _clients(
             _reject_unknown(
                 f"client {name!r} sampling profile {sampling_name!r}",
                 values,
-                {"temperature", "top_p", "max_tokens"},
+                {
+                    "temperature",
+                    "top_p",
+                    "top_k",
+                    "min_p",
+                    "presence_penalty",
+                    "repetition_penalty",
+                    "max_tokens",
+                    "enable_thinking",
+                    "preserve_thinking",
+                    "upstream_profile",
+                    "source_url",
+                    "source_revision",
+                },
             )
             temperature = values.get("temperature")
             top_p = values.get("top_p")
+            top_k = values.get("top_k")
+            min_p = values.get("min_p")
+            presence_penalty = values.get("presence_penalty")
+            repetition_penalty = values.get("repetition_penalty")
             max_tokens = values.get("max_tokens")
+            enable_thinking = values.get("enable_thinking")
+            preserve_thinking = values.get("preserve_thinking")
+            upstream_profile = values.get("upstream_profile")
+            source_url = values.get("source_url")
+            source_revision = values.get("source_revision")
+            numeric_values = {
+                "temperature": temperature,
+                "top_p": top_p,
+                "min_p": min_p,
+                "presence_penalty": presence_penalty,
+                "repetition_penalty": repetition_penalty,
+            }
+            if any(
+                value is not None
+                and type(value) in {int, float}
+                and not math.isfinite(float(value))
+                for value in numeric_values.values()
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} numeric values must be finite"
+                )
             if temperature is not None and (
                 type(temperature) not in {int, float} or temperature < 0
             ):
@@ -420,17 +467,118 @@ def _clients(
                 raise ConfigSchemaError(
                     f"client {name!r} sampling profile {sampling_name!r} top_p must be in (0, 1]"
                 )
+            if top_k is not None and (type(top_k) is not int or top_k < 0):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} top_k must be a nonnegative integer"
+                )
+            if min_p is not None and (
+                type(min_p) not in {int, float} or not 0 <= min_p <= 1
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} min_p must be in [0, 1]"
+                )
+            if presence_penalty is not None and (
+                type(presence_penalty) not in {int, float}
+                or not -2 <= presence_penalty <= 2
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} presence_penalty must be in [-2, 2]"
+                )
+            if repetition_penalty is not None and (
+                type(repetition_penalty) not in {int, float} or repetition_penalty <= 0
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} repetition_penalty must be positive"
+                )
             if max_tokens is not None and (
                 type(max_tokens) is not int or max_tokens <= 0
             ):
                 raise ConfigSchemaError(
                     f"client {name!r} sampling profile {sampling_name!r} max_tokens must be positive"
                 )
+            if enable_thinking is not None and type(enable_thinking) is not bool:
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} enable_thinking must be boolean"
+                )
+            if preserve_thinking is not None and type(preserve_thinking) is not bool:
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} preserve_thinking must be boolean"
+                )
+            provenance = (upstream_profile, source_url, source_revision)
+            if any(value is not None for value in provenance) and not all(
+                value is not None for value in provenance
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} provenance must include upstream_profile, source_url, and source_revision"
+                )
+            if upstream_profile is not None and (
+                not isinstance(upstream_profile, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", upstream_profile)
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} upstream_profile is invalid"
+                )
+            if source_url is not None:
+                parsed_source = (
+                    urlsplit(source_url) if isinstance(source_url, str) else None
+                )
+                if (
+                    parsed_source is None
+                    or parsed_source.scheme != "https"
+                    or not parsed_source.hostname
+                    or parsed_source.username is not None
+                    or parsed_source.password is not None
+                ):
+                    raise ConfigSchemaError(
+                        f"client {name!r} sampling profile {sampling_name!r} source_url must be HTTPS"
+                    )
+            if source_revision is not None and (
+                not isinstance(source_revision, str)
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source_revision)
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile {sampling_name!r} source_revision must be an exact commit SHA"
+                )
             sampling[sampling_name] = ClientSamplingSettings(
                 temperature=float(temperature) if temperature is not None else None,
                 top_p=float(top_p) if top_p is not None else None,
+                top_k=top_k,
+                min_p=float(min_p) if min_p is not None else None,
+                presence_penalty=(
+                    float(presence_penalty) if presence_penalty is not None else None
+                ),
+                repetition_penalty=(
+                    float(repetition_penalty)
+                    if repetition_penalty is not None
+                    else None
+                ),
                 max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
+                preserve_thinking=preserve_thinking,
+                upstream_profile=upstream_profile,
+                source_url=source_url,
+                source_revision=source_revision,
             )
+        required_profiles = (
+            {"coding"}
+            if kind == "codex"
+            else {"verification", "retain", "reflect", "consolidation"}
+        )
+        if set(sampling) != required_profiles:
+            raise ConfigSchemaError(
+                f"client {name!r} requires sampling profiles: {', '.join(sorted(required_profiles))}"
+            )
+        if kind == "codex":
+            coding = sampling["coding"]
+            if (
+                coding.min_p not in {None, 0.0}
+                or coding.presence_penalty not in {None, 0.0}
+                or coding.repetition_penalty not in {None, 1.0}
+                or coding.max_tokens is not None
+            ):
+                raise ConfigSchemaError(
+                    f"client {name!r} sampling profile 'coding' contains values OptiQ Responses cannot represent"
+                )
         result[name] = ClientSettings(
             name=name,
             kind=kind,

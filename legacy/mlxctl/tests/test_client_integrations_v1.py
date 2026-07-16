@@ -1,4 +1,5 @@
 import json
+import math
 import shutil
 import stat
 import tempfile
@@ -27,11 +28,53 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             service_name="coding",
             context_window=32768,
             sampling_profiles={
-                "coding": SamplingProfile(temperature=0.0, top_p=0.95),
-                "retain": SamplingProfile(temperature=0.1, top_p=0.9),
-                "reflect": SamplingProfile(temperature=0.9, top_p=0.95),
+                "verification": SamplingProfile(
+                    temperature=0.7,
+                    top_p=0.8,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=1.5,
+                    repetition_penalty=1.0,
+                    enable_thinking=False,
+                ),
+                "coding": SamplingProfile(
+                    temperature=0.6,
+                    top_p=0.95,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=0.0,
+                    repetition_penalty=1.0,
+                    enable_thinking=True,
+                ),
+                "retain": SamplingProfile(
+                    temperature=0.7,
+                    top_p=0.8,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=1.5,
+                    repetition_penalty=1.0,
+                    enable_thinking=False,
+                ),
+                "reflect": SamplingProfile(
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=1.5,
+                    repetition_penalty=1.0,
+                    enable_thinking=True,
+                ),
+                "consolidation": SamplingProfile(
+                    temperature=0.7,
+                    top_p=0.8,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=1.5,
+                    repetition_penalty=1.0,
+                    enable_thinking=False,
+                ),
             },
-            codex_provider_id="mlxctl-local",
+            codex_provider_id="mlx-local",
             hindsight_provider="openai",
             max_concurrent=1,
         )
@@ -416,11 +459,12 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertTrue(applied.changed)
             self.assertFalse(second.changed)
             self.assertEqual(document["model"], "coding")
+            self.assertEqual(document["oss_provider"], "mlx-local")
             self.assertEqual(
-                document["model_providers"]["mlxctl-local"]["base_url"],
-                self.configuration.gateway_endpoint,
+                document["model_providers"]["mlx-local"]["base_url"],
+                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1",
             )
-            self.assertEqual(document["profiles"]["coding"]["temperature"], 0.0)
+            self.assertNotIn("profiles", document)
             self.assertEqual(document["tui"]["theme"], "catppuccin-mocha")
             self.assertEqual(
                 document["model_providers"]["existing"]["name"], "Existing"
@@ -438,8 +482,93 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertTrue(removed.changed)
             self.assertEqual(restored["model"], "cloud")
             self.assertEqual(restored["model_provider"], "existing")
-            self.assertNotIn("mlxctl-local", restored["model_providers"])
+            self.assertNotIn("oss_provider", restored)
+            self.assertNotIn("mlx-local", restored["model_providers"])
             self.assertEqual(restored["tui"]["theme"], "catppuccin-mocha")
+
+    def test_codex_apply_migrates_the_owned_legacy_provider_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "codex" / "config.toml"
+            adapter = CodexClientIntegration(
+                config,
+                root / "mlxctl" / "codex-ownership.json",
+                root / "mlxctl" / "codex-config.backup",
+            )
+            legacy = replace(self.configuration, codex_provider_id="mlxctl-local")
+
+            adapter.apply(legacy)
+            adapter.apply(self.configuration)
+
+            document = tomlkit.parse(config.read_text(encoding="utf-8"))
+            self.assertEqual(document["model_provider"], "mlx-local")
+            self.assertEqual(document["oss_provider"], "mlx-local")
+            self.assertIn("mlx-local", document["model_providers"])
+            self.assertNotIn("mlxctl-local", document["model_providers"])
+
+    def test_managed_clients_fail_closed_on_missing_or_unrepresentable_profiles(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = CodexClientIntegration(
+                root / "codex.toml", root / "codex-owner.json", root / "codex-backup"
+            )
+            missing_coding = replace(
+                self.configuration,
+                sampling_profiles={
+                    "codng": SamplingProfile(temperature=0.6, top_p=0.95)
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "requires sampling profiles"):
+                codex.preview(missing_coding)
+
+            unsupported = replace(
+                self.configuration,
+                sampling_profiles={
+                    "coding": SamplingProfile(
+                        temperature=0.6,
+                        top_p=0.95,
+                        presence_penalty=1.5,
+                    )
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "Responses"):
+                codex.preview(unsupported)
+
+            hindsight = HindsightClientIntegration(
+                root / "hindsight.env",
+                root / "hindsight-owner.json",
+                root / "hindsight-backup",
+            )
+            with self.assertRaisesRegex(ValueError, "requires sampling profiles"):
+                hindsight.preview(
+                    replace(
+                        self.configuration,
+                        sampling_profiles={"retain": SamplingProfile(temperature=0.7)},
+                    )
+                )
+
+    def test_sampling_profiles_reject_non_finite_values_and_preserve_provenance(
+        self,
+    ) -> None:
+        for value in (math.nan, math.inf, -math.inf):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "finite"),
+            ):
+                SamplingProfile(temperature=value)
+
+        profile = SamplingProfile(
+            temperature=0.6,
+            upstream_profile="precise-coding-thinking",
+            source_url="https://example.test/model-card",
+            source_revision="9" * 40,
+        )
+        self.assertEqual(profile.values(), {"temperature": 0.6})
+        self.assertEqual(
+            profile.definition()["upstream_profile"], "precise-coding-thinking"
+        )
 
     def test_gateway_credential_is_exactly_configured_and_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -456,7 +585,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             codex.apply(configuration)
             document = tomlkit.parse(codex_path.read_text(encoding="utf-8"))
-            auth = document["model_providers"]["mlxctl-local"]["auth"]
+            auth = document["model_providers"]["mlx-local"]["auth"]
             self.assertEqual(auth["command"], "/bin/cat")
             self.assertEqual(auth["args"], [str(credential)])
             self.assertEqual(auth["refresh_interval_ms"], 0)
@@ -540,7 +669,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             removed = adapter.remove()
             self.assertTrue(removed.changed)
             document = tomlkit.parse(config.read_text(encoding="utf-8"))
-            self.assertNotIn("mlxctl-local", document.get("model_providers", {}))
+            self.assertNotIn("mlx-local", document.get("model_providers", {}))
 
     def test_codex_reconfiguration_keeps_the_original_restore_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -557,7 +686,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 service_name="general",
                 context_window=16384,
                 sampling_profiles={
-                    "general": SamplingProfile(temperature=0.2, top_p=0.9)
+                    "coding": SamplingProfile(temperature=0.2, top_p=0.9)
                 },
             )
 
@@ -646,14 +775,30 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("# memory profile", text)
             self.assertIn("HINDSIGHT_BANK_ID=existing-bank", text)
             self.assertIn("HINDSIGHT_API_LLM_MODEL=coding", text)
-            self.assertIn("HINDSIGHT_API_LLM_TEMPERATURE_REFLECT=0.9", text)
+            self.assertIn(
+                "HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/verification/v1",
+                text,
+            )
+            self.assertIn("HINDSIGHT_API_LLM_TEMPERATURE_REFLECT=1.0", text)
+            self.assertIn(
+                "HINDSIGHT_API_RETAIN_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1",
+                text,
+            )
+            self.assertIn(
+                "HINDSIGHT_API_REFLECT_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/reflect/v1",
+                text,
+            )
+            self.assertIn(
+                "HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/consolidation/v1",
+                text,
+            )
             self.assertEqual(
                 calls,
                 [
                     (
-                        self.configuration.gateway_endpoint,
+                        "http://127.0.0.1:8766/clients/hindsight/profiles/reflect/v1",
                         "coding",
-                        {"temperature": 0.9, "top_p": 0.95},
+                        {},
                     )
                 ],
             )

@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from mlxctl.application.config_schema import MlxctlConfig, validate_config
+from mlxctl.application.config_schema import (
+    ClientSamplingSettings,
+    MlxctlConfig,
+    validate_config,
+)
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.application.setup import (
     CapacityProfile,
@@ -24,6 +28,7 @@ from mlxctl.infrastructure.config_store import ConfigStore
 from mlxctl.infrastructure.control_client import UnixControlClient
 from mlxctl.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mlxctl.infrastructure.gateway_runtime import GatewayRuntime
+from mlxctl.infrastructure.gateway import GatewayRequestProfile
 from mlxctl.infrastructure.gateway_credential import GatewayCredential
 from mlxctl.infrastructure.host_integration import (
     LaunchdSupervisorActivator,
@@ -36,6 +41,7 @@ from mlxctl.infrastructure.model_intelligence import (
     PsutilMachineInventory,
     optiq_kv_bytes,
 )
+from mlxctl.infrastructure.model_profiles import ModelProfileCatalogue
 from mlxctl.infrastructure.model_supply import (
     HuggingFaceHubClient,
     ModelInstallation,
@@ -54,9 +60,11 @@ from mlxctl.infrastructure.production_host import (
     SystemSetupPreflight,
     client_port,
     configured_model_installations,
+    default_sampling,
     plain,
     removal_inventory,
     resolve_uv,
+    sampling_profile,
 )
 from mlxctl.infrastructure.runtime_supply import (
     RuntimeCatalogue,
@@ -370,7 +378,15 @@ class _SetupSupervisorOwner:
         if operation in {"service.drain", "service.stop"}:
             if not self._launchd.status().running:
                 return {"state": "stopped", "already_stopped": True}
-        elif operation in {"supervisor.start", "service.start"}:
+        elif operation == "supervisor.start":
+            # Setup can be the first command run after replacing the installed
+            # mlxctl package.  A running launchd process still has the old
+            # Python code loaded, so recycle it before asking the freshly
+            # started daemon to reconcile its configured services.
+            if self._launchd.status().running:
+                self._launchd.bootout()
+            self._activator.activate()
+        elif operation == "service.start":
             self._activator.activate()
         return self._remote.execute(operation, parameters)
 
@@ -478,6 +494,40 @@ def compose_local(
     return ProductionApplication(public_application, launchd)
 
 
+def _sampling_matches_service_model(
+    config: MlxctlConfig,
+    service,
+    sampling: ClientSamplingSettings,
+    catalogue: ModelProfileCatalogue | None = None,
+) -> bool:
+    """Fail closed unless stored provenance matches the service's exact model."""
+
+    alias = config.aliases.get(service.model_alias)
+    if alias is None:
+        return False
+    installation = config.models.get(alias.installation_name)
+    if installation is None:
+        return False
+    if sampling.upstream_profile is None:
+        return True
+    profiles = catalogue or ModelProfileCatalogue.load_builtin()
+    try:
+        expected = profiles.profile(
+            installation.revision.repository,
+            installation.revision.revision,
+            sampling.upstream_profile,
+        )
+    except KeyError:
+        return False
+    actual = dict(sampling_profile(sampling).values())
+    actual.pop("preserve_thinking", None)
+    return (
+        actual == dict(expected.parameters)
+        and sampling.source_url == expected.source_url
+        and sampling.source_revision == expected.source_revision
+    )
+
+
 def compose_daemon(
     *, paths: MlxctlPaths | None = None, home: Path | None = None
 ) -> DaemonService:
@@ -543,11 +593,41 @@ def compose_daemon(
         return configured_model_installations(load_config(), hub_supply.inventory())
 
     configured = load_config()
+    model_profiles = ModelProfileCatalogue.load_builtin()
+
+    def request_profile(client_name: str, profile_name: str):
+        config = load_config()
+        client = config.clients.get(client_name)
+        if client is None:
+            return None
+        sampling = client.sampling.get(profile_name)
+        if sampling is None:
+            return None
+        service = config.services.get(client.service)
+        if service is None:
+            service = next(
+                (
+                    item
+                    for item in config.services.values()
+                    if str(item.route) == client.service
+                ),
+                None,
+            )
+        if service is None:
+            return None
+        if not _sampling_matches_service_model(
+            config, service, sampling, model_profiles
+        ):
+            return None
+        parameters = dict(sampling_profile(sampling).values())
+        return GatewayRequestProfile(str(service.route), parameters)
+
     gateway = GatewayRuntime(
         host=configured.gateway.host,
         port=configured.gateway.port,
         metric_sink=state_store.record_metric,
         authenticate=credential.authenticate,
+        profile_resolver=request_profile,
     )
     pressure = MacOSMemoryPressure()
     supervisor = Supervisor(
@@ -615,22 +695,26 @@ def _setup_planner() -> SetupPlanner:
         service_options={
             "kv_config": "kv_config.json",
             "mtp": True,
-            "temperature": 0.0,
         },
         gateway_endpoint="http://127.0.0.1:8766/v1",
         clients=("codex", "hindsight"),
         client_options={
             "codex": {
-                "sampling_profiles": {"coding": {"temperature": 0.0}},
+                "sampling_profiles": {
+                    name: dict(sampling_profile(settings).definition())
+                    for name, settings in default_sampling(
+                        _DEFAULT_MODEL, _DEFAULT_MODEL_REVISION, "codex"
+                    ).items()
+                },
             },
             "hindsight": {
                 "profile": "default",
                 "max_concurrent": 1,
                 "sampling_profiles": {
-                    "verification": {"temperature": 0.0},
-                    "retain": {"temperature": 0.1},
-                    "reflect": {"temperature": 0.9},
-                    "consolidation": {"temperature": 0.0},
+                    name: dict(sampling_profile(settings).definition())
+                    for name, settings in default_sampling(
+                        _DEFAULT_MODEL, _DEFAULT_MODEL_REVISION, "hindsight"
+                    ).items()
                 },
             },
         },

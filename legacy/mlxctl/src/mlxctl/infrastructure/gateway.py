@@ -44,6 +44,14 @@ class GatewayRoute:
     runtime: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class GatewayRequestProfile:
+    """A client workload profile enforced before an upstream request."""
+
+    service: str
+    parameters: Mapping[str, object]
+
+
 class GatewayRouteResolver(Protocol):
     """Resolve current Gateway Routes without exposing arbitrary destinations."""
 
@@ -176,6 +184,8 @@ def create_gateway(
     upstream_response_timeout: float = DEFAULT_UPSTREAM_RESPONSE_TIMEOUT,
     activity: GatewayActivity | None = None,
     authenticate: Callable[[str | None], bool] | None = None,
+    profile_resolver: Callable[[str, str], GatewayRequestProfile | None | Any]
+    | None = None,
 ) -> Starlette:
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
@@ -299,6 +309,38 @@ def create_gateway(
                 parameter="model",
                 retryable=True,
             )
+        client_name = request.path_params.get("client")
+        profile_name = request.path_params.get("profile")
+        if client_name is not None and profile_name is not None:
+            profile = (
+                None
+                if profile_resolver is None
+                else await _await_if_needed(
+                    profile_resolver(str(client_name), str(profile_name))
+                )
+            )
+            if profile is None:
+                return _error_response(
+                    404,
+                    "profile_not_found",
+                    f"Client generation profile {client_name}/{profile_name} is not configured.",
+                    action="Reconfigure the client with mlxctl and retry.",
+                    parameter="profile",
+                )
+            if profile.service != service:
+                return _error_response(
+                    400,
+                    "profile_service_mismatch",
+                    f"Client generation profile {client_name}/{profile_name} targets {profile.service!r}, not {service!r}.",
+                    action=f"Set model to {profile.service!r} and retry.",
+                    parameter="model",
+                )
+            payload = _apply_request_profile(
+                payload,
+                profile.parameters,
+                responses=request.url.path.endswith("/responses"),
+            )
+            body = json.dumps(payload, separators=(",", ":")).encode()
         try:
             origin = _validated_upstream_origin(route.endpoint)
         except ValueError:
@@ -324,7 +366,7 @@ def create_gateway(
         client = request.state.http_client
         upstream_request = client.build_request(
             request.method,
-            f"{origin}{request.url.path}",
+            f"{origin}{_upstream_path(request.url.path)}",
             content=body,
             headers={
                 name: value
@@ -370,9 +412,68 @@ def create_gateway(
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", proxy, methods=["POST"]),
             Route("/v1/responses", proxy, methods=["POST"]),
+            Route(
+                "/clients/{client}/profiles/{profile}/v1/models",
+                models,
+                methods=["GET"],
+            ),
+            Route(
+                "/clients/{client}/profiles/{profile}/v1/chat/completions",
+                proxy,
+                methods=["POST"],
+            ),
+            Route(
+                "/clients/{client}/profiles/{profile}/v1/responses",
+                proxy,
+                methods=["POST"],
+            ),
         ],
         lifespan=lifespan,
     )
+
+
+def _upstream_path(path: str) -> str:
+    marker = "/v1/"
+    _prefix, separator, suffix = path.rpartition(marker)
+    if not separator:
+        raise ValueError("Gateway route lacks an OpenAI-compatible path")
+    return marker + suffix
+
+
+def _apply_request_profile(
+    payload: Mapping[str, object],
+    parameters: Mapping[str, object],
+    *,
+    responses: bool,
+) -> dict[str, object]:
+    result = dict(payload)
+    supported = (
+        {"temperature", "top_p", "top_k"}
+        if responses
+        else {
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "presence_penalty",
+            "repetition_penalty",
+            "max_tokens",
+        }
+    )
+    for key in supported:
+        if key in parameters:
+            result[key] = parameters[key]
+    template_parameters = {
+        key: parameters[key]
+        for key in ("enable_thinking", "preserve_thinking")
+        if key in parameters
+    }
+    if template_parameters:
+        raw_kwargs = result.get("chat_template_kwargs", {})
+        kwargs = dict(raw_kwargs) if isinstance(raw_kwargs, Mapping) else {}
+        kwargs.update(template_parameters)
+        result["chat_template_kwargs"] = kwargs
+    return result
 
 
 class RequestTooLarge(ValueError):

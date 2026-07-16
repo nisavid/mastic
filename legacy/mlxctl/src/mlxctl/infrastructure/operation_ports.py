@@ -177,6 +177,17 @@ class ClientOperationPort:
             return _plain(inspect())
         configuration = self._configuration(name, parameters, stored)
         if operation == "client.configure":
+            required_profiles = (
+                {"coding"}
+                if name == "codex"
+                else {"verification", "retain", "reflect", "consolidation"}
+            )
+            if set(configuration.sampling_profiles) != required_profiles:
+                raise ApplicationError(
+                    "invalid_parameter",
+                    f"{name} requires sampling profiles: {', '.join(sorted(required_profiles))}",
+                    next_actions=(f"mlxctl client configure {name} --help",),
+                )
             preview = adapter.preview(configuration)
             result = adapter.apply(
                 configuration, takeover=bool(parameters.get("takeover", False))
@@ -237,7 +248,16 @@ def _client_settings(
         profile_name: ClientSamplingSettings(
             temperature=profile_settings.temperature,
             top_p=profile_settings.top_p,
+            top_k=profile_settings.top_k,
+            min_p=profile_settings.min_p,
+            presence_penalty=profile_settings.presence_penalty,
+            repetition_penalty=profile_settings.repetition_penalty,
             max_tokens=profile_settings.max_tokens,
+            enable_thinking=profile_settings.enable_thinking,
+            preserve_thinking=profile_settings.preserve_thinking,
+            upstream_profile=profile_settings.upstream_profile,
+            source_url=profile_settings.source_url,
+            source_revision=profile_settings.source_revision,
         )
         for profile_name, profile_settings in configuration.sampling_profiles.items()
     }

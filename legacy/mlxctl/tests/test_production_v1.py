@@ -26,6 +26,7 @@ from mlxctl.infrastructure.production import (
     _LocalSupervisorOwner,
     _LocalModelSupply,
     _SetupSupervisorOwner,
+    _sampling_matches_service_model,
     _setup_planner,
     compose_daemon,
     compose_local,
@@ -63,19 +64,60 @@ class _Activator:
 
 
 class _LaunchdStatus:
-    def __init__(self, running: bool) -> None:
+    def __init__(self, running: bool, registered: bool = True) -> None:
         self.running = running
+        self.registered = registered
 
 
 class _Launchd:
     def __init__(self, running: bool) -> None:
         self.running = running
+        self.registered = True
+        self.bootout_calls = 0
 
     def status(self):
-        return _LaunchdStatus(self.running)
+        return _LaunchdStatus(self.running, self.registered)
+
+    def bootout(self):
+        self.bootout_calls += 1
+        self.running = False
+        self.registered = False
+        return self.status()
 
 
 class ProductionCompositionTests(unittest.TestCase):
+    @staticmethod
+    def _profile_binding_config(*, revision: str):
+        return validate_config(
+            {
+                "schema_version": 1,
+                "runtimes": {
+                    "optiq@0.3.3": {
+                        "definition": "optiq",
+                        "version": "0.3.3",
+                        "provenance": "tested",
+                        "root": "/tmp/optiq",
+                        "launcher": ["/tmp/optiq/bin/optiq", "serve"],
+                        "capabilities": ["model"],
+                    }
+                },
+                "models": {
+                    "qwen": {
+                        "repository": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+                        "revision": revision,
+                    }
+                },
+                "aliases": {"qwen": {"installation": "qwen"}},
+                "services": {
+                    "coding": {
+                        "model_alias": "qwen",
+                        "runtime": "optiq@0.3.3",
+                        "route": "coding",
+                    }
+                },
+            }
+        )
+
     def test_client_context_defaults_to_and_enforces_service_cap(self) -> None:
         self.assertEqual(coherent_client_context(131_072, None), 131_072)
         self.assertEqual(coherent_client_context(131_072, 131_072), 131_072)
@@ -137,6 +179,37 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(activator.calls, 1)
         self.assertEqual(remote.calls, [("supervisor.start", {})])
         self.assertEqual(result["state"], "running")
+
+    def test_setup_recycles_a_running_supervisor_before_loading_new_code(self) -> None:
+        activator = _Activator()
+        remote = _Port({"state": "running"})
+        launchd = _Launchd(running=True)
+
+        owner = _SetupSupervisorOwner(remote, launchd, activator)
+        result = owner.execute("supervisor.start", {})
+
+        self.assertEqual(launchd.bootout_calls, 1)
+        self.assertEqual(activator.calls, 1)
+        self.assertEqual(remote.calls, [("supervisor.start", {})])
+        self.assertEqual(result["state"], "running")
+
+    def test_request_profile_is_bound_to_the_service_exact_model_revision(self) -> None:
+        exact_revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+        config = self._profile_binding_config(revision=exact_revision)
+        sampling = default_sampling(
+            "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+            exact_revision,
+            "codex",
+        )["coding"]
+
+        self.assertTrue(
+            _sampling_matches_service_model(config, config.services["coding"], sampling)
+        )
+
+        other = self._profile_binding_config(revision="a" * 40)
+        self.assertFalse(
+            _sampling_matches_service_model(other, other.services["coding"], sampling)
+        )
 
     def test_local_supervisor_stop_is_idempotent_without_remote_activation(
         self,
@@ -338,12 +411,22 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(dispatcher.calls, [request])
 
     def test_client_sampling_defaults_cover_coding_and_memory_operations(self) -> None:
-        self.assertEqual(default_sampling("codex")["coding"].temperature, 0.0)
-        hindsight = default_sampling("hindsight")
-        self.assertEqual(hindsight["verification"].temperature, 0.0)
-        self.assertEqual(hindsight["retain"].temperature, 0.1)
-        self.assertEqual(hindsight["reflect"].temperature, 0.9)
-        self.assertEqual(hindsight["consolidation"].temperature, 0.0)
+        repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
+        revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+        coding = default_sampling(repository, revision, "codex")["coding"]
+        self.assertEqual(coding.temperature, 0.6)
+        self.assertEqual(coding.top_p, 0.95)
+        self.assertEqual(coding.top_k, 20)
+        self.assertEqual(coding.presence_penalty, 0.0)
+        self.assertTrue(coding.enable_thinking)
+        hindsight = default_sampling(repository, revision, "hindsight")
+        self.assertEqual(hindsight["verification"].temperature, 0.7)
+        self.assertEqual(hindsight["retain"].temperature, 0.7)
+        self.assertFalse(hindsight["retain"].enable_thinking)
+        self.assertEqual(hindsight["reflect"].temperature, 1.0)
+        self.assertTrue(hindsight["reflect"].enable_thinking)
+        self.assertEqual(hindsight["consolidation"].temperature, 0.7)
+        self.assertEqual(default_sampling(repository, "0" * 40, "codex"), {})
 
     def test_local_status_neither_inspects_nor_activates_launchd(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -621,13 +704,52 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(preview.service_options["max_context"], 131_072)
         self.assertEqual(preview.service_options["max_concurrent"], 6)
         self.assertEqual(preview.service_options["prompt_cache_bytes"], 2 * 1024**3)
+        self.assertNotIn("temperature", preview.service_options)
         self.assertEqual(preview.projected_kv_bytes, 5_737_807_872)
         self.assertEqual(preview.clients, ("codex", "hindsight"))
         self.assertEqual(
             preview.client_options["codex"]["sampling_profiles"]["coding"][
                 "temperature"
             ],
-            0.0,
+            0.6,
+        )
+        self.assertEqual(
+            preview.client_options["codex"]["sampling_profiles"]["coding"]["top_k"],
+            20,
+        )
+        self.assertTrue(
+            preview.client_options["codex"]["sampling_profiles"]["coding"][
+                "enable_thinking"
+            ]
+        )
+        self.assertEqual(
+            preview.client_options["codex"]["sampling_profiles"]["coding"][
+                "upstream_profile"
+            ],
+            "precise-coding-thinking",
+        )
+        self.assertEqual(
+            preview.client_options["codex"]["sampling_profiles"]["coding"][
+                "source_revision"
+            ],
+            "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        )
+        self.assertEqual(
+            preview.client_options["hindsight"]["sampling_profiles"]["retain"][
+                "temperature"
+            ],
+            0.7,
+        )
+        self.assertFalse(
+            preview.client_options["hindsight"]["sampling_profiles"]["retain"][
+                "enable_thinking"
+            ]
+        )
+        self.assertEqual(
+            preview.client_options["hindsight"]["sampling_profiles"]["reflect"][
+                "temperature"
+            ],
+            1.0,
         )
         self.assertEqual(preview.client_options["hindsight"]["max_concurrent"], 1)
 

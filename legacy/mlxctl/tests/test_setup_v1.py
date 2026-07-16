@@ -12,6 +12,7 @@ from mlxctl.application.setup import (
     SetupPreflight,
     SetupRequest,
     StepState,
+    _fingerprint,
 )
 
 
@@ -345,6 +346,26 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(executed[-1], "verify.request")
         self.assertEqual(result.evidence[-1].step_id, "verify.request")
         self.assertTrue(result.complete)
+
+    def test_changed_supervisor_protocol_invalidates_old_activation_evidence(
+        self,
+    ) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+        old_fingerprint = _fingerprint(
+            "supervisor.activate",
+            {"reason": "install runtimes, models, and start the selected service"},
+        )
+        old_evidence = SetupEvidence(
+            "supervisor.activate", old_fingerprint, StepState.COMPLETE
+        )
+
+        resumed = self.planner.plan(facts, evidence=(old_evidence,))
+        activation = next(
+            step for step in resumed.steps if step.id == "supervisor.activate"
+        )
+
+        self.assertEqual(activation.state, StepState.READY)
+        self.assertNotEqual(activation.fingerprint, old_fingerprint)
 
     def test_apply_records_only_completed_steps_before_a_failure(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)

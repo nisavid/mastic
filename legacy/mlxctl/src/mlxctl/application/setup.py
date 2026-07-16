@@ -21,6 +21,10 @@ from urllib.parse import urlsplit
 from mlxctl.domain.resources import ActivationPolicy, ResourceName
 
 
+# Bump whenever setup must recycle mlxd to load a changed control/schema contract.
+SUPERVISOR_SETUP_PROTOCOL = 2
+
+
 class StepState(StrEnum):
     READY = "ready"
     COMPLETE = "complete"
@@ -722,7 +726,10 @@ class SetupPlanner:
             (
                 "supervisor.activate",
                 "Register and visibly activate the Supervisor",
-                {"reason": "install runtimes, models, and start the selected service"},
+                {
+                    "reason": "install runtimes, models, and start the selected service",
+                    "setup_protocol": SUPERVISOR_SETUP_PROTOCOL,
+                },
                 False,
             ),
             (

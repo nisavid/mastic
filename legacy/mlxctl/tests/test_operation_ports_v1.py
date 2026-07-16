@@ -161,10 +161,7 @@ class OperationPortTests(unittest.TestCase):
             return ClientConfiguration(
                 "http://127.0.0.1:8766/v1",
                 "coding",
-                sampling_profiles={
-                    "coding": SamplingProfile(temperature=0.0),
-                    "reflect": SamplingProfile(temperature=0.9),
-                },
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
                 service_identity="coding-internal",
             )
 
@@ -214,8 +211,10 @@ class OperationPortTests(unittest.TestCase):
                 service,
                 context_window=32768,
                 sampling_profiles={
+                    "verification": SamplingProfile(temperature=0.0),
                     "retain": SamplingProfile(temperature=0.1),
                     "reflect": SamplingProfile(temperature=0.9),
+                    "consolidation": SamplingProfile(temperature=0.0),
                 },
             )
 
@@ -259,6 +258,26 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
         self.assertNotIn("hindsight", records)
 
+    def test_extra_client_profiles_fail_before_external_apply(self) -> None:
+        adapter = FakeClientAdapter()
+        port = ClientOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ClientConfiguration(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                sampling_profiles={
+                    "coding": SamplingProfile(temperature=0.6),
+                    "surprise": SamplingProfile(temperature=0.6),
+                },
+            ),
+            request=lambda endpoint, model, sampling: {},
+        )
+
+        with self.assertRaisesRegex(ApplicationError, "requires sampling profiles"):
+            port.execute("client.configure", {"client": "codex", "service": "coding"})
+
+        self.assertEqual(adapter.calls, [])
+
     def test_hindsight_profile_cannot_change_without_precise_removal(self) -> None:
         stored = ClientSettings(
             name="hindsight",
@@ -296,7 +315,7 @@ class OperationPortTests(unittest.TestCase):
             service="coding",
             profile=None,
             context_window=32768,
-            provider="mlxctl-local",
+            provider="mlx-local",
             max_concurrent=None,
             sampling={},
         )

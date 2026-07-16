@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -33,15 +34,72 @@ _REDACTED = "<redacted>"
 class SamplingProfile:
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
     max_tokens: int | None = None
+    enable_thinking: bool | None = None
+    preserve_thinking: bool | None = None
+    upstream_profile: str | None = None
+    source_url: str | None = None
+    source_revision: str | None = None
 
     def __post_init__(self) -> None:
+        numeric_values = (
+            self.temperature,
+            self.top_p,
+            self.min_p,
+            self.presence_penalty,
+            self.repetition_penalty,
+        )
+        if any(
+            value is not None and not math.isfinite(value) for value in numeric_values
+        ):
+            raise ValueError("sampling values must be finite")
         if self.temperature is not None and self.temperature < 0:
             raise ValueError("temperature must be nonnegative")
         if self.top_p is not None and not 0 < self.top_p <= 1:
             raise ValueError("top_p must be greater than zero and at most one")
+        if self.top_k is not None and self.top_k < 0:
+            raise ValueError("top_k must be nonnegative")
+        if self.min_p is not None and not 0 <= self.min_p <= 1:
+            raise ValueError("min_p must be between zero and one")
+        if self.presence_penalty is not None and not -2 <= self.presence_penalty <= 2:
+            raise ValueError("presence_penalty must be between -2 and 2")
+        if self.repetition_penalty is not None and self.repetition_penalty <= 0:
+            raise ValueError("repetition_penalty must be positive")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        if self.enable_thinking is not None and type(self.enable_thinking) is not bool:
+            raise ValueError("enable_thinking must be boolean")
+        if (
+            self.preserve_thinking is not None
+            and type(self.preserve_thinking) is not bool
+        ):
+            raise ValueError("preserve_thinking must be boolean")
+        provenance = (self.upstream_profile, self.source_url, self.source_revision)
+        if any(value is not None for value in provenance) and not all(
+            value is not None for value in provenance
+        ):
+            raise ValueError("profile provenance must be complete")
+        if self.upstream_profile is not None and not re.fullmatch(
+            r"[a-z0-9][a-z0-9-]{0,63}", self.upstream_profile
+        ):
+            raise ValueError("upstream_profile is invalid")
+        if self.source_url is not None:
+            source = urlsplit(self.source_url)
+            if (
+                source.scheme != "https"
+                or not source.hostname
+                or source.username is not None
+                or source.password is not None
+            ):
+                raise ValueError("source_url must be HTTPS")
+        if self.source_revision is not None and not re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.source_revision
+        ):
+            raise ValueError("source_revision must be an exact commit SHA")
 
     def values(self) -> Mapping[str, object]:
         values: dict[str, object] = {}
@@ -49,8 +107,28 @@ class SamplingProfile:
             values["temperature"] = self.temperature
         if self.top_p is not None:
             values["top_p"] = self.top_p
+        if self.top_k is not None:
+            values["top_k"] = self.top_k
+        if self.min_p is not None:
+            values["min_p"] = self.min_p
+        if self.presence_penalty is not None:
+            values["presence_penalty"] = self.presence_penalty
+        if self.repetition_penalty is not None:
+            values["repetition_penalty"] = self.repetition_penalty
         if self.max_tokens is not None:
             values["max_tokens"] = self.max_tokens
+        if self.enable_thinking is not None:
+            values["enable_thinking"] = self.enable_thinking
+        if self.preserve_thinking is not None:
+            values["preserve_thinking"] = self.preserve_thinking
+        return MappingProxyType(values)
+
+    def definition(self) -> Mapping[str, object]:
+        values = dict(self.values())
+        if self.upstream_profile is not None:
+            values["upstream_profile"] = self.upstream_profile
+            values["source_url"] = self.source_url
+            values["source_revision"] = self.source_revision
         return MappingProxyType(values)
 
 
@@ -73,7 +151,7 @@ class ClientConfiguration:
     service_name: str
     context_window: int | None = None
     sampling_profiles: Mapping[str, SamplingProfile] = field(default_factory=dict)
-    codex_provider_id: str = "mlxctl-local"
+    codex_provider_id: str = "mlx-local"
     hindsight_provider: str = "openai"
     max_concurrent: int = 1
     credential_path: Path | None = None
@@ -884,12 +962,16 @@ class HindsightClientIntegration:
 def _codex_fields(
     configuration: ClientConfiguration,
 ) -> Mapping[tuple[str, ...], object]:
+    _validate_client_profiles(configuration, "codex")
     provider = configuration.codex_provider_id
     fields: dict[tuple[str, ...], object] = {
         ("model",): configuration.service_name,
         ("model_provider",): provider,
+        ("oss_provider",): provider,
         ("model_providers", provider, "name"): "Local mlxctl Gateway",
-        ("model_providers", provider, "base_url"): configuration.gateway_endpoint,
+        ("model_providers", provider, "base_url"): _profile_endpoint(
+            configuration, "codex", "coding"
+        ),
         ("model_providers", provider, "wire_api"): "responses",
     }
     if configuration.context_window is not None:
@@ -899,14 +981,6 @@ def _codex_fields(
         fields[(*auth, "command")] = "/bin/cat"
         fields[(*auth, "args")] = [str(configuration.credential_path)]
         fields[(*auth, "refresh_interval_ms")] = 0
-    for name, sampling in configuration.sampling_profiles.items():
-        prefix = ("profiles", name)
-        fields[(*prefix, "model")] = configuration.service_name
-        fields[(*prefix, "model_provider")] = provider
-        if configuration.context_window is not None:
-            fields[(*prefix, "model_context_window")] = configuration.context_window
-        for key, value in sampling.values().items():
-            fields[(*prefix, key)] = value
     return MappingProxyType(fields)
 
 
@@ -982,20 +1056,66 @@ def _validate_codex_catalog(path: Path) -> None:
 def _hindsight_fields(
     configuration: ClientConfiguration, *, token: str | None = None
 ) -> Mapping[str, str]:
+    _validate_client_profiles(configuration, "hindsight")
     fields = {
         "HINDSIGHT_API_LLM_PROVIDER": configuration.hindsight_provider,
-        "HINDSIGHT_API_LLM_BASE_URL": configuration.gateway_endpoint,
+        "HINDSIGHT_API_LLM_BASE_URL": _profile_endpoint(
+            configuration, "hindsight", "verification"
+        ),
         "HINDSIGHT_API_LLM_MODEL": configuration.service_name,
         "HINDSIGHT_API_LLM_MAX_CONCURRENT": str(configuration.max_concurrent),
     }
     if token is not None:
         fields[_HINDSIGHT_API_KEY] = token
+    operation_prefixes = {
+        "retain": "HINDSIGHT_API_RETAIN_LLM_BASE_URL",
+        "reflect": "HINDSIGHT_API_REFLECT_LLM_BASE_URL",
+        "consolidation": "HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL",
+    }
     for name, sampling in configuration.sampling_profiles.items():
         suffix = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
-        for key, value in sampling.values().items():
-            setting = "MAX_TOKENS" if key == "max_tokens" else key.upper()
-            fields[f"HINDSIGHT_API_LLM_{setting}_{suffix}"] = str(value)
+        if name in operation_prefixes:
+            fields[operation_prefixes[name]] = _profile_endpoint(
+                configuration, "hindsight", name
+            )
+        if sampling.temperature is not None:
+            fields[f"HINDSIGHT_API_LLM_TEMPERATURE_{suffix}"] = str(
+                sampling.temperature
+            )
     return MappingProxyType(fields)
+
+
+def _profile_endpoint(
+    configuration: ClientConfiguration, client: str, profile: str
+) -> str:
+    if profile not in configuration.sampling_profiles:
+        raise ValueError(f"required {client} sampling profile is missing: {profile}")
+    root = configuration.gateway_endpoint.removesuffix("/").removesuffix("/v1")
+    return f"{root}/clients/{client}/profiles/{profile}/v1"
+
+
+def _validate_client_profiles(configuration: ClientConfiguration, client: str) -> None:
+    required = (
+        {"coding"}
+        if client == "codex"
+        else {"verification", "retain", "reflect", "consolidation"}
+    )
+    missing = required - set(configuration.sampling_profiles)
+    if missing:
+        raise ValueError(
+            f"{client} requires sampling profiles: {', '.join(sorted(required))}"
+        )
+    if client == "codex":
+        coding = configuration.sampling_profiles["coding"]
+        if (
+            coding.min_p not in {None, 0.0}
+            or coding.presence_penalty not in {None, 0.0}
+            or coding.repetition_penalty not in {None, 1.0}
+            or coding.max_tokens is not None
+        ):
+            raise ValueError(
+                "Codex coding profile contains values OptiQ Responses cannot represent"
+            )
 
 
 def _secret_matches(current: str | None, item: Mapping[str, object]) -> bool:
@@ -1027,11 +1147,15 @@ def _test_request(
     request: TestRequest[TestResult],
     profile: str,
 ) -> TestResult:
-    try:
-        sampling = configuration.sampling_profiles[profile].values()
-    except KeyError as error:
+    if profile not in configuration.sampling_profiles:
+        error = KeyError(profile)
         raise KeyError(f"unknown sampling profile: {profile}") from error
-    return request(configuration.gateway_endpoint, configuration.service_name, sampling)
+    client = "codex" if profile == "coding" else "hindsight"
+    return request(
+        _profile_endpoint(configuration, client, profile),
+        configuration.service_name,
+        {},
+    )
 
 
 def _toml_changes(document: TOMLDocument, desired: Mapping[tuple[str, ...], object]):

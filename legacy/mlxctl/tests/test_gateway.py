@@ -8,6 +8,7 @@ import httpx
 from starlette.testclient import TestClient
 
 from mlxctl.infrastructure.gateway import (
+    GatewayRequestProfile,
     GatewayRoute,
     create_gateway,
     validate_loopback_bind,
@@ -248,6 +249,117 @@ class GatewayTests(unittest.TestCase):
         )
         self.assertNotIn("authorization", upstream.requests[0].headers)
         self.assertEqual(json.loads(upstream.requests[0].content)["model"], "coding")
+
+    def test_profiled_endpoints_enforce_supported_generation_parameters(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.extend(
+            [
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"chat-profile"}']),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"responses-profile"}']),
+                ),
+            ]
+        )
+        profile = GatewayRequestProfile(
+            service="coding",
+            parameters={
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 1.5,
+                "repetition_penalty": 1.0,
+                "enable_thinking": False,
+            },
+        )
+        coding = GatewayRequestProfile(
+            service="coding",
+            parameters={
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0,
+                "enable_thinking": True,
+                "preserve_thinking": True,
+            },
+        )
+        profiles = {
+            ("hindsight", "retain"): profile,
+            ("codex", "coding"): coding,
+        }
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            profile_resolver=lambda client, name: profiles.get((client, name)),
+        )
+
+        with TestClient(app) as client:
+            chat = client.post(
+                "/clients/hindsight/profiles/retain/v1/chat/completions",
+                json={
+                    "model": "coding",
+                    "messages": [{"role": "user", "content": "remember this"}],
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                },
+            )
+            responses = client.post(
+                "/clients/codex/profiles/coding/v1/responses",
+                json={"model": "coding", "input": "fix this", "temperature": 0.0},
+            )
+            missing = client.post(
+                "/clients/codex/profiles/missing/v1/responses",
+                json={"model": "coding", "input": "fix this"},
+            )
+
+        self.assertEqual((chat.status_code, responses.status_code), (200, 200))
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["error"]["code"], "profile_not_found")
+        chat_body = json.loads(upstream.requests[0].content)
+        self.assertEqual(
+            {
+                key: chat_body[key]
+                for key in profile.parameters
+                if key not in {"enable_thinking", "preserve_thinking"}
+            },
+            {
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 1.5,
+                "repetition_penalty": 1.0,
+            },
+        )
+        self.assertEqual(chat_body["chat_template_kwargs"], {"enable_thinking": False})
+        responses_body = json.loads(upstream.requests[1].content)
+        self.assertEqual(responses_body["temperature"], 0.6)
+        self.assertEqual(responses_body["top_p"], 0.95)
+        self.assertEqual(responses_body["top_k"], 20)
+        self.assertEqual(
+            responses_body["chat_template_kwargs"],
+            {"enable_thinking": True, "preserve_thinking": True},
+        )
+        for unsupported in ("min_p", "presence_penalty", "repetition_penalty"):
+            self.assertNotIn(unsupported, responses_body)
+        self.assertEqual(
+            [request.url for request in upstream.requests],
+            [
+                httpx.URL("http://127.0.0.1:49152/v1/chat/completions"),
+                httpx.URL("http://127.0.0.1:49152/v1/responses"),
+            ],
+        )
 
     def test_stopped_missing_and_unavailable_services_return_actionable_errors(
         self,
