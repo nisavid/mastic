@@ -143,6 +143,36 @@ class RuntimeCatalogueTests(unittest.TestCase):
 
 
 class SubprocessRuntimeProbeTests(unittest.TestCase):
+    def test_probes_through_a_venv_python_symlink_to_the_base_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            base_python = Path(directory) / "python3.13"
+            base_python.touch()
+            (root / "bin").mkdir(parents=True)
+            (root / "bin/python").symlink_to(base_python)
+            calls = []
+
+            def run(argv, **options):
+                calls.append((tuple(argv), options))
+                if "importlib.metadata" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="usage: server [--model MODEL] [--host HOST] [--port PORT]",
+                    stderr="",
+                )
+
+            definition = RuntimeCatalogue.load_builtin().definition("mlx_lm")
+
+            result = SubprocessRuntimeProbe(run=run).probe(definition, root)
+
+            self.assertEqual(result.version, "0.3.3")
+            self.assertEqual(calls[0][0][0], str(root.resolve() / "bin/python"))
+            self.assertEqual(
+                calls[1][0][:3],
+                (str(root.resolve() / "bin/python"), "-m", "mlx_lm.server"),
+            )
+
     def test_probes_module_runtime_version_launcher_and_exact_flags(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -189,6 +219,24 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
             definition = RuntimeCatalogue.load_builtin().definition("optiq")
             with self.assertRaisesRegex(ValueError, "help probe failed"):
                 SubprocessRuntimeProbe(run=run).probe(definition, root)
+
+    def test_rejects_an_optiq_console_symlink_outside_the_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            external_console = Path(directory) / "optiq"
+            external_console.touch()
+            (root / "bin").mkdir(parents=True)
+            (root / "bin/python").touch()
+            (root / "bin/optiq").symlink_to(external_console)
+
+            definition = RuntimeCatalogue.load_builtin().definition("optiq")
+
+            with self.assertRaisesRegex(ValueError, "is not in the subpath"):
+                SubprocessRuntimeProbe(
+                    run=lambda *_args, **_options: SimpleNamespace(
+                        returncode=0, stdout="0.3.3\n", stderr=""
+                    )
+                ).probe(definition, root)
 
 
 class RuntimeManagerTests(unittest.TestCase):

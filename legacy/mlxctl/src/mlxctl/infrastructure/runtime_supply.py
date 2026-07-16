@@ -119,8 +119,7 @@ class SubprocessRuntimeProbe:
 
     def probe(self, definition: RuntimeDefinition, root: Path) -> RuntimeProbeResult:
         resolved_root = root.expanduser().resolve(strict=True)
-        python = (resolved_root / "bin/python").resolve(strict=True)
-        python.relative_to(resolved_root)
+        python = resolved_root / "bin/python"
         if not python.is_file():
             raise RuntimeSupplyError("runtime Python launcher is unavailable")
         version_command = (
