@@ -966,6 +966,37 @@ class ProxyIntegrationTest(unittest.TestCase):
         self.assertIn("collides", json.loads(raw)["error"]["message"])
         self.assertEqual(1, len(FakeUpstreamHandler.requests))
 
+    def test_ordinary_history_calls_cannot_collide_with_namespace_mappings(self):
+        namespace_tools = [
+            {
+                "type": "namespace",
+                "name": "math",
+                "tools": [{"type": "function", "name": "add"}],
+            }
+        ]
+        ordinary_history = {"type": "function_call", "name": "math__add"}
+
+        status, _, _ = self.request(
+            "POST",
+            "/v1/responses",
+            {"input": [ordinary_history], "tools": namespace_tools},
+        )
+        self.assertEqual(400, status)
+        self.assertEqual([], FakeUpstreamHandler.requests)
+
+        FakeUpstreamHandler.response_body = b'{"id":"mapped-one","output":[]}'
+        first_status, _, _ = self.request(
+            "POST", "/v1/responses", {"input": [], "tools": namespace_tools}
+        )
+        self.assertEqual(200, first_status)
+        status, _, _ = self.request(
+            "POST",
+            "/v1/responses",
+            {"previous_response_id": "mapped-one", "input": [ordinary_history]},
+        )
+        self.assertEqual(400, status)
+        self.assertEqual(1, len(FakeUpstreamHandler.requests))
+
     def test_unnamed_ordinary_tools_fail_closed_before_upstream(self):
         for tool in [
             {"type": "function"},

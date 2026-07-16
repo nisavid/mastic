@@ -113,9 +113,7 @@ class ProxyConfig:
         if not (0 <= self.listen_port <= 65535):
             raise ConfigurationError("NS_PROXY_PORT must be between 0 and 65535")
         if len(self.inbound_token) < 32:
-            raise ConfigurationError(
-                "NS_PROXY_INBOUND_TOKEN must be a generated per-run value of at least 32 characters"
-            )
+            raise ConfigurationError("NS_PROXY_INBOUND_TOKEN must be at least 32 characters")
         if not _valid_bearer_value(self.inbound_token):
             raise ConfigurationError("NS_PROXY_INBOUND_TOKEN contains invalid characters")
         if self.upstream_token is not None and not _valid_bearer_value(self.upstream_token):
@@ -173,16 +171,9 @@ def flatten_request(
     """Return a transformed copy and its exact flattened-name reconstruction map."""
     transformed = copy.deepcopy(data)
     reconstruction: dict[str, tuple[str, str]] = {}
-    ordinary_names: set[Any] = set()
+    ordinary_names = _ordinary_names(transformed)
     tools = transformed.get("tools")
     if isinstance(tools, list):
-        ordinary_names = {
-            tool.get("name")
-            for tool in tools
-            if isinstance(tool, dict)
-            and tool.get("type") in {"function", "custom"}
-            and isinstance(tool.get("name"), str)
-        }
         flat: list[Any] = []
         for tool in tools:
             if isinstance(tool, dict) and tool.get("type") == "namespace":
@@ -492,18 +483,34 @@ def _merge_reconstruction(
     return merged
 
 
-def _ordinary_tool_names(data: dict[str, Any]) -> set[str]:
-    tools = data.get("tools")
-    if not isinstance(tools, list):
-        return set()
+def _ordinary_names(data: dict[str, Any]) -> set[str]:
     names: set[str] = set()
-    for tool in tools:
-        if not isinstance(tool, dict) or tool.get("type") not in {"function", "custom"}:
-            continue
-        name = tool.get("name")
-        if not isinstance(name, str) or not name:
-            raise TransformationError("ordinary tools require a non-empty name")
-        names.add(name)
+    tools = data.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("type") not in {"function", "custom"}:
+                continue
+            name = tool.get("name")
+            if not isinstance(name, str) or not name:
+                raise TransformationError("ordinary tools require a non-empty name")
+            names.add(name)
+
+    def collect_history_calls(items: list[Any]) -> None:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call" and "namespace" not in item:
+                name = item.get("name")
+                if not isinstance(name, str) or not name:
+                    raise TransformationError("ordinary history calls require a non-empty name")
+                names.add(name)
+            for value in item.values():
+                if isinstance(value, list):
+                    collect_history_calls(value)
+
+    inputs = data.get("input")
+    if isinstance(inputs, list):
+        collect_history_calls(inputs)
     return names
 
 
@@ -619,7 +626,7 @@ def _handler_for(config: ProxyConfig, namespace_state: _NamespaceState):
                                     "previous_response_id namespace state is unavailable"
                                 )
                             inherited = inherited_mapping
-                        current_ordinary_names = _ordinary_tool_names(body)
+                        current_ordinary_names = _ordinary_names(body)
                         body, current = flatten_request(body)
                         inherited_collisions = inherited.keys() & current_ordinary_names
                         if inherited_collisions:

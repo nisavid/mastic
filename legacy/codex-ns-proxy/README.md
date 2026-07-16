@@ -20,7 +20,7 @@ an isolated profile so Codex reaches it through this gateway.
 The gateway:
 
 - listens only on a loopback address;
-- requires a fresh inbound bearer token for every run;
+- requires an inbound bearer token; operators rotate it for every run;
 - forwards only `GET /v1/models` and `POST /v1/responses`;
 - never forwards the inbound credential upstream;
 - optionally injects a distinct upstream bearer credential;
@@ -50,7 +50,7 @@ python3 tooling/codex-ns-proxy/codex-ns-proxy.py
 ```
 
 Configure the isolated Codex provider with the gateway URL and expose the same
-per-run token to Codex through its provider credential environment variable:
+run token to Codex through its provider credential environment variable:
 
 ```toml
 [model_providers.local_gateway]
@@ -105,7 +105,7 @@ written only to stderr when `NS_PROXY_DEBUG=true`, as
 | Variable | Default | Description |
 |---|---:|---|
 | `NS_PROXY_UPSTREAM` | required | HTTP(S) provider base URL, normally ending in `/v1` |
-| `NS_PROXY_INBOUND_TOKEN` | required | Generated per-run bearer, at least 32 characters |
+| `NS_PROXY_INBOUND_TOKEN` | required | Bearer token of at least 32 characters; rotate per run |
 | `NS_PROXY_UPSTREAM_TOKEN` | unset | Optional independent upstream bearer |
 | `NS_PROXY_HOST` | `127.0.0.1` | Loopback listen address |
 | `NS_PROXY_PORT` | `18999` | Listen port |
