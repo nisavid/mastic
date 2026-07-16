@@ -141,6 +141,61 @@ class RuntimeCatalogueTests(unittest.TestCase):
                 options={"max_context": 32768},
             )
 
+    def test_capacity_options_are_positive_integers_and_render_exactly(self) -> None:
+        catalogue = RuntimeCatalogue.load_builtin()
+        installation = RuntimeInstallation(
+            installation_id="optiq-0.3.3",
+            runtime="optiq",
+            version="0.3.3",
+            provenance="tested",
+            root=Path("/runtimes/optiq-0.3.3"),
+            launcher=("/runtimes/optiq-0.3.3/bin/optiq", "serve"),
+            capabilities=frozenset(
+                {
+                    "model",
+                    "host",
+                    "port",
+                    "max_context",
+                    "max_concurrent",
+                    "prompt_cache_bytes",
+                }
+            ),
+        )
+
+        argv = RuntimeLaunchBuilder(catalogue).build(
+            installation,
+            model="/models/qwen",
+            host="127.0.0.1",
+            port=49152,
+            options={
+                "max_context": 131_072,
+                "max_concurrent": 6,
+                "prompt_cache_bytes": 2 * 1024**3,
+            },
+        )
+
+        self.assertIn(("--max-context", "131072"), tuple(zip(argv, argv[1:])))
+        self.assertIn(("--max-concurrent", "6"), tuple(zip(argv, argv[1:])))
+        self.assertIn(
+            ("--prompt-cache-bytes", str(2 * 1024**3)), tuple(zip(argv, argv[1:]))
+        )
+        for name, value in (
+            ("max_context", 0),
+            ("max_concurrent", -1),
+            ("prompt_cache_bytes", "2GiB"),
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ValueError, "positive integer"),
+            ):
+                RuntimeLaunchBuilder(catalogue).build(
+                    installation,
+                    model="/models/qwen",
+                    host="127.0.0.1",
+                    port=49152,
+                    options={name: value},
+                )
+
 
 class SubprocessRuntimeProbeTests(unittest.TestCase):
     def test_probes_through_a_venv_python_symlink_to_the_base_interpreter(self) -> None:

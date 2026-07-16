@@ -36,6 +36,7 @@ from mlxctl.infrastructure.production_host import (
     GatewayVerificationPort,
     OwnedStateRemover,
     client_request,
+    coherent_client_context,
     configured_model_installations,
     default_sampling,
     resolve_uv,
@@ -75,6 +76,12 @@ class _Launchd:
 
 
 class ProductionCompositionTests(unittest.TestCase):
+    def test_client_context_defaults_to_and_enforces_service_cap(self) -> None:
+        self.assertEqual(coherent_client_context(131_072, None), 131_072)
+        self.assertEqual(coherent_client_context(131_072, 131_072), 131_072)
+        with self.assertRaisesRegex(ValueError, "must match"):
+            coherent_client_context(131_072, 196_608)
+
     def test_local_model_resolution_is_side_effect_free_and_stays_local(self) -> None:
         class Supply:
             def resolve(self, repo_id, revision, *, offline=False):
@@ -595,6 +602,34 @@ class ProductionCompositionTests(unittest.TestCase):
                     online=True,
                 )
             )
+
+    def test_recommended_setup_defaults_to_balanced_capacity_and_clients(self) -> None:
+        preview = _setup_planner().preview(
+            _setup_planner().plan(
+                SetupPreflight(
+                    "darwin",
+                    "arm64",
+                    memory_bytes=48 * 1024**3,
+                    disk_free_bytes=100 * 1024**3,
+                    online=True,
+                )
+            )
+        )
+
+        self.assertEqual(preview.capacity_profile, "balanced")
+        self.assertEqual(preview.context_window, 131_072)
+        self.assertEqual(preview.service_options["max_context"], 131_072)
+        self.assertEqual(preview.service_options["max_concurrent"], 6)
+        self.assertEqual(preview.service_options["prompt_cache_bytes"], 2 * 1024**3)
+        self.assertEqual(preview.projected_kv_bytes, 5_737_807_872)
+        self.assertEqual(preview.clients, ("codex", "hindsight"))
+        self.assertEqual(
+            preview.client_options["codex"]["sampling_profiles"]["coding"][
+                "temperature"
+            ],
+            0.0,
+        )
+        self.assertEqual(preview.client_options["hindsight"]["max_concurrent"], 1)
 
     @patch("mlxctl.infrastructure.production_host.httpx.post")
     def test_gateway_requests_append_to_openai_v1_base_once(self, post) -> None:

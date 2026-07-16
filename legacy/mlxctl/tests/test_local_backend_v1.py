@@ -319,7 +319,8 @@ class LocalOperationBackendTests(unittest.TestCase):
 
     def test_diagnostic_queries_have_distinct_user_facing_results(self) -> None:
         with TemporaryDirectory() as directory:
-            backend, state = self._backend(Path(directory))
+            clients = _Port({"state": "healthy", "next_actions": []})
+            backend, state = self._backend(Path(directory), clients=clients)
             state.put_snapshot(
                 {
                     "kind": "supervisor",
@@ -373,6 +374,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 {issue["code"] for issue in doctor["issues"]},
                 {"gateway_drift", "service_unhealthy"},
             )
+            self.assertIn(("client.inspect", {"client": "codex"}), clients.calls)
             self.assertEqual(supervisor["operations"][0]["id"], "job-1")
             self.assertEqual(gateway_status["route_count"], 2)
             self.assertNotIn("routes", gateway_status)
@@ -382,6 +384,36 @@ class LocalOperationBackendTests(unittest.TestCase):
             )
             self.assertEqual(runtime["items"][0]["state"], "missing")
             self.assertEqual(service["checks"][2]["state"], "unavailable")
+
+    def test_doctor_reports_codex_context_drift_from_service_cap(self) -> None:
+        config = (
+            _CONFIG.replace("[services.coding]", "[services.coding_internal]")
+            .replace(
+                "pinned = true\n\n[services.chat]",
+                "pinned = true\n\n[services.coding_internal.options]\nmax_context = 131072\n\n[services.chat]",
+            )
+            .replace(
+                '[clients.codex]\nkind = "codex"\nservice = "coding"',
+                '[clients.codex]\nkind = "codex"\nservice = "coding_internal"\ncontext_window = 196608',
+            )
+        )
+        with TemporaryDirectory() as directory:
+            backend, _state = self._backend(
+                Path(directory),
+                config=config,
+                clients=_Port({"state": "healthy", "next_actions": []}),
+            )
+
+            doctor = backend.prepare(OperationRequest("doctor")).execute()
+
+            self.assertIn(
+                "codex_context_drift",
+                {issue["code"] for issue in doctor["issues"]},
+            )
+            self.assertNotIn(
+                "codex_catalog_unknown",
+                {issue["code"] for issue in doctor["issues"]},
+            )
 
     def test_strict_resource_lookup_reports_unknown_service(self) -> None:
         with TemporaryDirectory() as directory:

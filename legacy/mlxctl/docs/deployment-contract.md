@@ -41,6 +41,7 @@ restart it.
 | --- | --- | --- |
 | Desired state | `~/.config/mlxctl/config.toml` | `MLXCTL_CONFIG_DIR` |
 | SQLite state and socket | `~/.local/state/mlxctl/` | `MLXCTL_STATE_DIR` |
+| Codex model catalog and ownership | `~/.local/state/mlxctl/clients/` | `MLXCTL_STATE_DIR` |
 | Runtime Installations | `~/.local/share/mlxctl/runtimes/` | `MLXCTL_DATA_DIR` |
 | Logs | `~/Library/Logs/mlxctl/` | `MLXCTL_LOG_DIR` |
 | `uv` executable | Discovered from known absolute paths | `MLXCTL_UV_EXECUTABLE` |
@@ -66,7 +67,7 @@ The deployment owner must not author or mutate:
 - `config.toml` service, model, runtime, Gateway, or client tables;
 - isolated Runtime Installation directories;
 - model cache contents;
-- Codex or Hindsight provider settings that mlxctl owns;
+- Codex provider or model-catalog settings and Hindsight settings that mlxctl owns;
 - SQLite operational state or the control socket;
 - live Service Runs or Gateway state outside the mlxctl interface.
 
@@ -106,10 +107,21 @@ mlxctl --help
 mlxd --help
 mlxctl status
 mlxctl runtime available
+mlxctl setup --help
 mlxctl supervisor start
 mlxctl supervisor status
 mlxctl supervisor stop
 ```
+
+After configuring Codex, `mlxctl client inspect codex` must report a healthy
+owned catalog, and `codex debug models` must list the selected route with the
+same context cap without a fallback-metadata warning.
+
+On the target Mac with the service running, send one bounded Codex request and
+confirm its output or logs contain no fallback-metadata warning. If the
+installed Codex exposes custom catalogs through app-server `model/list`, verify
+the same route and context there as well; versions that return only the bundled
+catalog use `codex debug models` as the custom-catalog acceptance surface.
 
 When a model service is part of the deployment, also verify its exact Runtime
 Installation, Model Revision, launch argv, Gateway route, `/v1/models`, one

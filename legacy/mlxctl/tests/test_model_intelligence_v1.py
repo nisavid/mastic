@@ -16,6 +16,7 @@ from mlxctl.infrastructure.model_intelligence import (
     RepositoryEnvelope,
     RepositoryFile,
     RuntimeObservation,
+    optiq_kv_bytes,
 )
 
 
@@ -127,6 +128,24 @@ def _json_payload(path: str, value: object) -> MetadataPayload:
 
 
 class ModelIntelligenceTests(unittest.TestCase):
+    def test_pinned_qwen_capacity_profiles_share_exact_kv_budget(self) -> None:
+        config = {"head_dim": 256, "num_key_value_heads": 2}
+        kv_config = [
+            {"layer_idx": index, "bits": bits, "group_size": 64}
+            for index, bits in zip(
+                (3, 7, 11, 15, 19, 23, 27, 31, 35, 39),
+                (4, 8, 4, 8, 8, 4, 4, 4, 4, 4),
+                strict=True,
+            )
+        ]
+
+        projections = {
+            optiq_kv_bytes(config, kv_config, context_tokens=context, concurrency=count)
+            for context, count in ((131_072, 6), (196_608, 4), (262_144, 3))
+        }
+
+        self.assertEqual(projections, {5_737_807_872})
+
     def test_machine_inventory_reports_unified_memory_capacity(self) -> None:
         inventory = PsutilMachineInventory(
             lambda: SimpleNamespace(total=64 * GIB, available=48 * GIB)
@@ -422,7 +441,7 @@ class ModelIntelligenceTests(unittest.TestCase):
         )
 
         terms = {item.name: item for item in report.fit.terms}
-        self.assertEqual(terms["KV cache"].low_bytes, 218_103_808)
+        self.assertEqual(terms["KV cache"].low_bytes, 239_075_328)
         self.assertIn("kv_config.json", terms["KV cache"].source)
         artifacts = {item.role: item.path for item in report.artifacts}
         self.assertEqual(artifacts["mtp_weights"], "optiq/mtp.safetensors")

@@ -1,6 +1,8 @@
 import unittest
+from dataclasses import replace
 
 from mlxctl.application.setup import (
+    CapacityProfile,
     ExactSetupSelection,
     PlanExecutionError,
     RecommendedProfile,
@@ -47,6 +49,98 @@ class SetupV1Tests(unittest.TestCase):
             _selection(service="coding", revision="2" * 40),
         )
         self.planner = SetupPlanner((self.compact, self.workstation))
+
+    def test_capacity_profile_coherently_caps_service_and_clients(self) -> None:
+        planner = SetupPlanner(
+            (self.compact,),
+            capacity_profiles=(
+                CapacityProfile(
+                    "balanced",
+                    "Balanced",
+                    context_window=131_072,
+                    max_concurrent=6,
+                    projected_kv_bytes=5_737_807_872,
+                    prompt_cache_bytes=2 * GIB,
+                    description="Most parallel agents with long context.",
+                ),
+                CapacityProfile(
+                    "native-context",
+                    "Native context",
+                    context_window=262_144,
+                    max_concurrent=3,
+                    projected_kv_bytes=5_737_807_872,
+                    prompt_cache_bytes=2 * GIB,
+                    description="Longest context with fewer simultaneous requests.",
+                ),
+            ),
+            default_capacity_profile="balanced",
+        )
+        facts = SetupPreflight("darwin", "arm64", 48 * GIB, 200 * GIB, True)
+
+        balanced = planner.preview(planner.plan(facts))
+        native = planner.preview(
+            planner.plan(facts, SetupRequest(capacity_profile="native-context"))
+        )
+
+        self.assertEqual(balanced.capacity_profile, "balanced")
+        self.assertEqual(balanced.context_window, 131_072)
+        self.assertEqual(balanced.service_options["max_context"], 131_072)
+        self.assertEqual(balanced.service_options["max_concurrent"], 6)
+        self.assertEqual(balanced.service_options["prompt_cache_bytes"], 2 * GIB)
+        self.assertEqual(balanced.projected_kv_bytes, 5_737_807_872)
+        self.assertEqual(native.capacity_profile, "native-context")
+        self.assertEqual(native.context_window, 262_144)
+        self.assertEqual(native.service_options["max_concurrent"], 3)
+
+    def test_selected_client_context_cannot_exceed_service_capacity(self) -> None:
+        invalid = _selection(service="coding", revision="3" * 40)
+        invalid = replace(
+            invalid,
+            service_options={
+                "kv_config": "kv_config.json",
+                "max_context": 131_072,
+                "max_concurrent": 6,
+            },
+            context_window=196_608,
+        )
+
+        with self.assertRaisesRegex(ValueError, "context_window.*max_context"):
+            invalid.validate_exact()
+
+    def test_exact_selection_is_not_overwritten_by_default_capacity(self) -> None:
+        planner = SetupPlanner(
+            (self.compact,),
+            capacity_profiles=(
+                CapacityProfile(
+                    "balanced",
+                    "Balanced",
+                    131_072,
+                    6,
+                    5_737_807_872,
+                    2 * GIB,
+                    "Default capacity.",
+                ),
+            ),
+            default_capacity_profile="balanced",
+        )
+        exact = replace(
+            _selection(service="coding", revision="3" * 40),
+            service_options={
+                "kv_config": "kv_config.json",
+                "max_context": 262_144,
+                "max_concurrent": 3,
+            },
+            context_window=262_144,
+        )
+
+        plan = planner.plan(
+            SetupPreflight("darwin", "arm64", 48 * GIB, 200 * GIB, True),
+            SetupRequest(selection=exact, noninteractive=True, confirmed=True),
+        )
+
+        self.assertIsNone(plan.capacity_profile)
+        self.assertEqual(plan.selection.context_window, 262_144)
+        self.assertEqual(plan.selection.service_options["max_concurrent"], 3)
 
     def test_guided_plan_preselects_a_machine_aware_editable_exact_profile(
         self,

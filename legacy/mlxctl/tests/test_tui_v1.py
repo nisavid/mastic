@@ -129,6 +129,11 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 self.app.query_one("#operation-form").styles.display == "block"
             )
+            capacity = self.app.query_one("#parameter-capacity", Select)
+            labels = {str(label) for label, _value in capacity._options}
+            self.assertTrue(any("balanced" in label.lower() for label in labels))
+            self.assertTrue(any("long-context" in label for label in labels))
+            self.assertTrue(any("native-context" in label for label in labels))
 
     async def test_command_palette_exposes_every_catalogue_operation(self) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:

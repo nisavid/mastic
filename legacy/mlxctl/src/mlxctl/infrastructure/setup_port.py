@@ -235,6 +235,8 @@ class SetupOperationPort:
         try:
             facts = self._preflight(offline)
             prior = tuple(self._evidence.load("setup"))
+            capacity = parameters.get("capacity")
+            capacity_name = str(capacity) if capacity is not None else None
             if profile == "expert":
                 missing = _missing_expert_selection(parameters)
                 if missing:
@@ -245,11 +247,18 @@ class SetupOperationPort:
                 selection = _selection(parameters, self._planner.expert_template)
                 explicit_selection = True
             else:
-                baseline = self._planner.plan(facts, evidence=prior)
+                baseline = self._planner.plan(
+                    facts,
+                    SetupRequest(capacity_profile=capacity_name),
+                    evidence=prior,
+                )
+                if capacity_name is None and baseline.capacity_profile is not None:
+                    capacity_name = baseline.capacity_profile.name
                 selection = _selection(parameters, baseline.selection)
                 explicit_selection = _has_selection(parameters)
             request = SetupRequest(
                 selection=selection if explicit_selection else None,
+                capacity_profile=capacity_name,
                 noninteractive=bool(parameters.get("noninteractive", False)),
                 confirmed=parameters.get("confirmed") is True,
             )
@@ -270,6 +279,21 @@ class SetupOperationPort:
         return {
             "state": "review_required",
             "profile": preview.profile_name,
+            "capacity": (
+                {
+                    "profile": preview.capacity_profile,
+                    "context_window": preview.context_window,
+                    "max_concurrent": preview.service_options.get("max_concurrent"),
+                    "projected_kv_bytes": preview.projected_kv_bytes,
+                    "prompt_cache_bytes": preview.service_options.get(
+                        "prompt_cache_bytes"
+                    ),
+                    "description": preview.capacity_description,
+                    "note": "Concurrency is the maximum number of simultaneous inference requests; idle clients use no slot and excess requests queue. With OptiQ 0.3.3, 4-7 requests retain one simultaneous prefill; 8 permits two prefills and is riskier on 48 GiB Macs.",
+                }
+                if preview.capacity_profile is not None
+                else None
+            ),
             "editable": preview.editable,
             "confirmation_required": True,
             "plan_fingerprint": identity,

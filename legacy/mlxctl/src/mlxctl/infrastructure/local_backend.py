@@ -424,6 +424,67 @@ class LocalOperationBackend:
             ]
         elif name == "doctor":
             issues = self._diagnostic_issues(config, supervisor, gateway, services)
+            if "codex" in config.clients:
+                try:
+                    codex = config.clients["codex"]
+                    service = config.services.get(codex.service)
+                    if service is None:
+                        service = next(
+                            (
+                                candidate
+                                for candidate in config.services.values()
+                                if candidate.route == codex.service
+                            ),
+                            None,
+                        )
+                    if service is None:
+                        raise KeyError(codex.service)
+                    service_context = service.options.get("max_context")
+                    if (
+                        service_context is not None
+                        and codex.context_window != service_context
+                    ):
+                        issues.append(
+                            {
+                                "code": "codex_context_drift",
+                                "message": "Codex context does not match the selected Inference Service cap.",
+                                "next_actions": ["mlxctl client configure codex"],
+                            }
+                        )
+                    integration = self._clients.execute(
+                        "client.inspect", {"client": "codex"}
+                    )
+                    if integration.get("state") in {
+                        "missing",
+                        "drifted",
+                        "incompatible",
+                        "malformed",
+                    }:
+                        issues.append(
+                            {
+                                "code": "codex_catalog_unhealthy",
+                                "message": str(
+                                    integration.get(
+                                        "detail",
+                                        "Codex client integration is unhealthy.",
+                                    )
+                                ),
+                                "next_actions": list(
+                                    integration.get(
+                                        "next_actions",
+                                        ["mlxctl client configure codex"],
+                                    )
+                                ),
+                            }
+                        )
+                except Exception as error:
+                    issues.append(
+                        {
+                            "code": "codex_catalog_unknown",
+                            "message": f"Codex integration inspection failed: {error}",
+                            "next_actions": ["mlxctl client inspect codex"],
+                        }
+                    )
             details["issues"] = issues
             details["healthy"] = not issues
             next_actions.extend(
@@ -841,6 +902,19 @@ class LocalOperationBackend:
                 resource=_plain(value),
                 evidence=["client-probe"],
                 next_actions=[],
+            )
+        if request.name == "client.inspect":
+            value = self._clients.execute(
+                request.name, {**request.parameters, "resource": resource}
+            )
+            return _result(
+                request.name,
+                resource={
+                    "desired": _plain(config.clients[resource]),
+                    "integration": _plain(value),
+                },
+                evidence=["desired-state", "managed-client-files"],
+                next_actions=list(value.get("next_actions", [])),
             )
         return _result(
             request.name,

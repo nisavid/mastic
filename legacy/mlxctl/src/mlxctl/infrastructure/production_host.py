@@ -26,6 +26,7 @@ from mlxctl.application.dispatch import ApplicationError
 from mlxctl.application.setup import RemovalInventory, SetupPreflight
 from mlxctl.infrastructure.client_integrations import (
     ClientConfiguration,
+    CodexModelMetadata,
     LocalClientIntegrationFactory,
     SamplingProfile,
 )
@@ -262,14 +263,22 @@ def client_port(
             for profile, value in raw_sampling.items()
         }
         gateway_credential.load_or_create()
+        alias = config.aliases[str(service.model_alias)]
+        model = config.models[alias.installation_name]
+        repository = model.revision.repository
+        display_name = (
+            "Qwen3.6 35B A3B OptiQ 4-bit"
+            if repository == "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
+            else repository.rsplit("/", 1)[-1]
+        )
+        context_window = coherent_client_context(
+            service.options.get("max_context"),
+            parameters.get("context_window", stored.context_window if stored else None),
+        )
         return ClientConfiguration(
             gateway_endpoint=endpoint,
             service_name=str(service.route),
-            context_window=optional_int(
-                parameters.get(
-                    "context_window", stored.context_window if stored else None
-                )
-            ),
+            context_window=context_window,
             sampling_profiles=sampling,
             codex_provider_id=str(
                 parameters.get(
@@ -290,6 +299,16 @@ def client_port(
                 )
             ),
             credential_path=paths.gateway_credential,
+            service_identity=str(service.name),
+            codex_model=(
+                CodexModelMetadata(
+                    slug=str(service.route),
+                    display_name=display_name,
+                    description=f"Local mlxctl-managed route for {repository}.",
+                )
+                if name == "codex"
+                else None
+            ),
         )
 
     def record(name: str, value: ClientSettings | None) -> None:
@@ -336,6 +355,22 @@ def client_port(
         settings=settings,
         record=record,
     )
+
+
+def coherent_client_context(
+    service_context: object, requested_context: object
+) -> int | None:
+    service_value = optional_int(service_context)
+    requested_value = optional_int(requested_context)
+    if (
+        requested_value is not None
+        and service_value is not None
+        and requested_value != service_value
+    ):
+        raise ValueError(
+            "client context_window must match the selected service max_context"
+        )
+    return requested_value or service_value
 
 
 def client_request(

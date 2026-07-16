@@ -45,6 +45,17 @@ Named desired state combining one Model Alias, one Runtime Installation,
 launch options, activation policy, and Gateway route.
 _Avoid_: Server Definition, process, port
 
+**Capacity Profile**:
+A named, machine-aware pairing of an Inference Service context cap, maximum
+simultaneous inference requests, prompt-prefix cache budget, and projected KV
+memory. It is one coherent operating point, not a model capability claim.
+_Avoid_: Machine profile, client profile, agent count
+
+**Client Concurrency**:
+The maximum number of inference requests that may be in flight together for a
+client or service. Idle clients consume no slot; excess requests queue.
+_Avoid_: Number of configured clients, number of agents
+
 **Pinned Inference Service**:
 An Inference Service excluded from automatic idle or critical-pressure
 eviction. Pinning does not prevent explicit stop, failure recovery, or

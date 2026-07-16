@@ -289,6 +289,10 @@ class RuntimeLaunchBuilder:
         }
         argv = list(installation.launcher)
         for name, value in requested.items():
+            if name in {"max_context", "max_concurrent", "prompt_cache_bytes"} and (
+                type(value) is not int or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer")
             if name not in definition.options:
                 raise UnsupportedLaunchOption(
                     f"runtime '{installation.runtime}' does not define launch option "

@@ -170,6 +170,11 @@ class ClientOperationPort:
                 return {**plain_result, "desired_state_retained": True}
             self._record(name, None)
             return plain_result
+        if operation == "client.inspect":
+            inspect = getattr(adapter, "inspect", None)
+            if inspect is None:
+                return {"state": "healthy", "next_actions": []}
+            return _plain(inspect())
         configuration = self._configuration(name, parameters, stored)
         if operation == "client.configure":
             preview = adapter.preview(configuration)
@@ -210,7 +215,11 @@ def _client_settings(
     configuration: ClientConfiguration,
     stored: ClientSettings | None,
 ) -> ClientSettings:
-    service = str(parameters.get("service") or (stored.service if stored else ""))
+    service = str(
+        configuration.service_identity
+        or parameters.get("service")
+        or (stored.service if stored else "")
+    )
     if not service:
         raise ApplicationError(
             "invalid_parameter",

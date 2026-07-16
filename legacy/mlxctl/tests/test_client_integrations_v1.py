@@ -1,4 +1,5 @@
 import json
+import shutil
 import stat
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from mlxctl.application.config_schema import ClientSettings
 from mlxctl.infrastructure.client_integrations import (
     ClientConfiguration,
     ClientIntegrationConflict,
+    CodexModelMetadata,
     CodexClientIntegration,
     HindsightClientIntegration,
     LocalClientIntegrationFactory,
@@ -33,6 +35,362 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             hindsight_provider="openai",
             max_concurrent=1,
         )
+
+    @staticmethod
+    def _bundled_codex_catalog() -> dict[str, object]:
+        return {
+            "models": [
+                {
+                    "slug": "bundled-coding",
+                    "display_name": "Bundled coding",
+                    "description": "Bundled model",
+                    "base_instructions": "You are Codex, the bundled coding agent.",
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": ["low", "medium", "high"],
+                    "supports_reasoning_summaries": True,
+                    "supports_parallel_tool_calls": True,
+                    "supports_image_detail_original": True,
+                    "supports_search_tool": True,
+                    "use_responses_lite": True,
+                    "input_modalities": ["text", "image"],
+                    "context_window": 200_000,
+                    "max_context_window": 200_000,
+                    "visibility": "list",
+                }
+            ]
+        }
+
+    def test_codex_catalog_is_owned_version_shaped_and_reversible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            manifest = root / "owner.json"
+            backup = root / "config.backup"
+            catalog = root / "model-catalog.json"
+            catalog_backup = root / "model-catalog.backup"
+            configuration = replace(
+                self.configuration,
+                context_window=131_072,
+                service_name="qwen36-optiq",
+                codex_model=CodexModelMetadata(
+                    slug="qwen36-optiq",
+                    display_name="Qwen3.6 35B A3B OptiQ 4-bit",
+                    description="Local Qwen3.6 mixture-of-experts coding model.",
+                ),
+            )
+            adapter = CodexClientIntegration(
+                config,
+                manifest,
+                backup,
+                catalog_path=catalog,
+                catalog_backup_path=catalog_backup,
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+
+            preview = adapter.preview(configuration)
+            first = adapter.apply(configuration)
+            second = adapter.apply(configuration)
+
+            document = tomlkit.parse(config.read_text(encoding="utf-8"))
+            rendered = json.loads(catalog.read_text(encoding="utf-8"))
+            model = rendered["models"][0]
+            ownership = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertIn(("model_catalog_json",), {item.path for item in preview})
+            self.assertTrue(first.changed)
+            self.assertFalse(second.changed)
+            self.assertEqual(document["model_catalog_json"], str(catalog))
+            self.assertEqual(model["slug"], "qwen36-optiq")
+            self.assertEqual(model["context_window"], 131_072)
+            self.assertEqual(model["max_context_window"], 131_072)
+            self.assertEqual(
+                model["base_instructions"],
+                "You are Codex, the bundled coding agent.",
+            )
+            self.assertEqual(model["supported_reasoning_levels"], [])
+            self.assertIsNone(model["default_reasoning_level"])
+            self.assertEqual(model["input_modalities"], ["text"])
+            self.assertFalse(model["supports_parallel_tool_calls"])
+            self.assertFalse(model["supports_search_tool"])
+            self.assertFalse(model["use_responses_lite"])
+            self.assertNotIn("apply_patch_tool_type", model)
+            self.assertNotIn("web_search_tool_type", model)
+            self.assertEqual(model["additional_speed_tiers"], [])
+            self.assertEqual(model["service_tiers"], [])
+            self.assertEqual(ownership["catalog"]["slug"], "qwen36-optiq")
+            self.assertEqual(ownership["catalog"]["context_window"], 131_072)
+
+            removed = adapter.remove()
+            self.assertTrue(removed.changed)
+            self.assertFalse(catalog.exists())
+            self.assertFalse(manifest.exists())
+
+    def test_codex_catalog_inspect_reports_and_repair_fixes_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog.json"
+            configuration = replace(
+                self.configuration,
+                context_window=196_608,
+                codex_model=CodexModelMetadata(
+                    slug="coding",
+                    display_name="Local coding model",
+                    description="Local model",
+                ),
+            )
+            adapter = CodexClientIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                catalog_path=catalog,
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(configuration)
+            catalog.write_text('{"models": []}\n', encoding="utf-8")
+
+            drifted = adapter.inspect()
+            repaired = adapter.apply(configuration)
+            healthy = adapter.inspect()
+
+            self.assertEqual(drifted["state"], "drifted")
+            self.assertIn("mlxctl client configure codex", drifted["next_actions"])
+            self.assertTrue(repaired.changed)
+            self.assertEqual(healthy["state"], "healthy")
+
+    def test_legacy_codex_ownership_requires_catalog_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = CodexClientIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(self.configuration)
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "missing")
+            self.assertIn("mlxctl client configure codex", report["next_actions"])
+
+    def test_codex_inspect_detects_real_config_catalog_pointer_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            configuration = replace(
+                self.configuration,
+                context_window=131_072,
+                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
+            )
+            adapter = CodexClientIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                catalog_path=root / "catalog.json",
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(configuration)
+            document = tomlkit.parse((root / "config.toml").read_text())
+            document["model_catalog_json"] = "/tmp/other-catalog.json"
+            (root / "config.toml").write_text(document.as_string())
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "drifted")
+            self.assertIn("model_catalog_json", report["detail"])
+
+    def test_legacy_codex_migration_restores_preexisting_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog.json"
+            original = b'{"models":[{"slug":"user"}]}\n'
+            adapter = CodexClientIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                catalog_path=catalog,
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(self.configuration)
+            catalog.write_bytes(original)
+            document = tomlkit.parse((root / "config.toml").read_text())
+            document["model_catalog_json"] = str(catalog)
+            (root / "config.toml").write_text(document.as_string())
+            adapter.apply(
+                replace(
+                    self.configuration,
+                    context_window=131_072,
+                    codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
+                )
+            )
+
+            adapter.remove()
+
+            self.assertEqual(catalog.read_bytes(), original)
+            restored = tomlkit.parse((root / "config.toml").read_text())
+            self.assertEqual(restored["model_catalog_json"], str(catalog))
+
+    def test_codex_catalog_validation_failure_restores_both_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.toml"
+            catalog = root / "catalog.json"
+            config.write_text('unrelated = "keep"\n', encoding="utf-8")
+            catalog.write_text('{"models":[{"slug":"user"}]}\n', encoding="utf-8")
+
+            def reject(_path: Path) -> None:
+                raise RuntimeError("Codex rejected catalog")
+
+            adapter = CodexClientIntegration(
+                config,
+                root / "owner.json",
+                root / "config.backup",
+                catalog_path=catalog,
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=reject,
+            )
+            configuration = replace(
+                self.configuration,
+                context_window=131_072,
+                codex_model=CodexModelMetadata(
+                    slug="coding",
+                    display_name="Local coding model",
+                    description="Local model",
+                ),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "rejected"):
+                adapter.apply(configuration)
+
+            self.assertEqual(config.read_text(), 'unrelated = "keep"\n')
+            self.assertEqual(catalog.read_text(), '{"models":[{"slug":"user"}]}\n')
+            self.assertFalse((root / "owner.json").exists())
+
+    def test_codex_catalog_remove_failure_rolls_back_all_owned_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                root / "catalog.json",
+                root / "catalog.backup",
+            )
+            configuration = replace(
+                self.configuration,
+                context_window=131_072,
+                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
+            )
+            paths[3].write_text('{"models":[{"slug":"user"}]}\n')
+            adapter = CodexClientIntegration(
+                *paths[:3],
+                catalog_path=paths[3],
+                catalog_backup_path=paths[4],
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(configuration)
+            before = {path: path.read_bytes() for path in paths if path.exists()}
+
+            def fail_catalog(path: Path, payload: bytes) -> None:
+                if path == paths[3]:
+                    raise OSError("catalog replace failed")
+                path.write_bytes(payload)
+
+            failing = CodexClientIntegration(
+                *paths[:3],
+                catalog_path=paths[3],
+                catalog_backup_path=paths[4],
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+                replace=fail_catalog,
+            )
+            with self.assertRaisesRegex(OSError, "catalog replace failed"):
+                failing.remove()
+
+            self.assertEqual(
+                {path: path.read_bytes() for path in paths if path.exists()}, before
+            )
+
+    def test_codex_catalog_restore_failure_rolls_back_all_owned_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                root / "catalog.json",
+                root / "catalog.backup",
+            )
+            paths[0].write_text('unrelated = "keep"\n')
+            paths[3].write_text('{"models":[{"slug":"user"}]}\n')
+            configuration = replace(
+                self.configuration,
+                context_window=131_072,
+                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
+            )
+            adapter = CodexClientIntegration(
+                *paths[:3],
+                catalog_path=paths[3],
+                catalog_backup_path=paths[4],
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(configuration)
+            before = {path: path.read_bytes() for path in paths if path.exists()}
+
+            def fail_catalog(path: Path, payload: bytes) -> None:
+                if path == paths[3]:
+                    raise OSError("catalog restore failed")
+                path.write_bytes(payload)
+
+            failing = CodexClientIntegration(
+                *paths[:3],
+                catalog_path=paths[3],
+                catalog_backup_path=paths[4],
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+                replace=fail_catalog,
+            )
+            with self.assertRaisesRegex(OSError, "catalog restore failed"):
+                failing.restore()
+
+            self.assertEqual(
+                {path: path.read_bytes() for path in paths if path.exists()}, before
+            )
+
+    @unittest.skipUnless(shutil.which("codex"), "Codex is not installed")
+    def test_installed_codex_resolves_catalog_without_fallback_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = CodexClientIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                catalog_path=root / "catalog.json",
+                catalog_backup_path=root / "catalog.backup",
+            )
+            result = adapter.apply(
+                replace(
+                    self.configuration,
+                    context_window=131_072,
+                    codex_model=CodexModelMetadata(
+                        slug="qwen36-optiq",
+                        display_name="Qwen3.6 35B A3B OptiQ 4-bit",
+                        description="Local coding model",
+                    ),
+                )
+            )
+
+            self.assertTrue(result.changed)
+            self.assertEqual(adapter.inspect()["state"], "healthy")
 
     def test_codex_preview_apply_and_remove_preserve_unrelated_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

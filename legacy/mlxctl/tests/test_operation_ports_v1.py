@@ -158,16 +158,14 @@ class OperationPortTests(unittest.TestCase):
         persisted = {}
 
         def configuration(name, parameters, settings):
-            service = (
-                settings.service if settings is not None else str(parameters["service"])
-            )
             return ClientConfiguration(
                 "http://127.0.0.1:8766/v1",
-                service,
+                "coding",
                 sampling_profiles={
                     "coding": SamplingProfile(temperature=0.0),
                     "reflect": SamplingProfile(temperature=0.9),
                 },
+                service_identity="coding-internal",
             )
 
         port = ClientOperationPort(
@@ -190,6 +188,7 @@ class OperationPortTests(unittest.TestCase):
         removed = port.execute("client.remove", {"resource": "codex"})
 
         self.assertTrue(configured["result"]["changed"])
+        self.assertEqual(records[0][1].service, "coding-internal")
         self.assertEqual(tested["response"]["model"], "coding")
         self.assertTrue(removed["changed"])
         self.assertEqual(

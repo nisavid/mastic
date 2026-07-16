@@ -1083,7 +1083,7 @@ def _estimate_fit(
         )
         kv_source = f"config.json@{envelope.commit_sha}; fp16/bf16 KV scenario"
     else:
-        kv_bytes = _optiq_kv_bytes(
+        kv_bytes = optiq_kv_bytes(
             config,
             kv_config,
             context_tokens=context_tokens,
@@ -1189,7 +1189,7 @@ def _standard_kv_bytes(
     return 2 * layers * kv_heads * head_dimension * 2 * context_tokens * concurrency
 
 
-def _optiq_kv_bytes(
+def optiq_kv_bytes(
     config: Mapping[str, object],
     kv_config: object,
     *,
@@ -1224,12 +1224,14 @@ def _optiq_kv_bytes(
     if not isinstance(layers, list) or not layers:
         return None
     bit_sum = 0
+    metadata_bytes_per_token = 0
     layer_indexes: set[int] = set()
     for position, layer in enumerate(layers):
         if not isinstance(layer, dict):
             return None
         bits = layer.get("bits")
         layer_index = layer.get("layer_idx", position)
+        group_size = layer.get("group_size")
         if (
             type(bits) is not int
             or bits not in {2, 3, 4, 5, 6, 8, 16}
@@ -1240,7 +1242,22 @@ def _optiq_kv_bytes(
             return None
         layer_indexes.add(layer_index)
         bit_sum += bits
-    return 2 * bit_sum * kv_heads * head_dimension * context_tokens * concurrency // 8
+        if group_size is not None:
+            values_per_token = 2 * kv_heads * head_dimension
+            if (
+                type(group_size) is not int
+                or group_size <= 0
+                or values_per_token % group_size
+            ):
+                return None
+            # One float16 scale and bias per quantization group for K and V.
+            metadata_bytes_per_token += values_per_token // group_size * 4
+    quantized_bytes_per_token = 2 * bit_sum * kv_heads * head_dimension // 8
+    return (
+        (quantized_bytes_per_token + metadata_bytes_per_token)
+        * context_tokens
+        * concurrency
+    )
 
 
 def _nested(value: Mapping[str, object], *keys: str) -> object | None:

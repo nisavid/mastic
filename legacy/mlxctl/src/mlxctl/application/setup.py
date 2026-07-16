@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from ipaddress import ip_address
 from types import MappingProxyType
@@ -34,6 +34,36 @@ class SetupPreflight:
     memory_bytes: int
     disk_free_bytes: int
     online: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityProfile:
+    """A coherent service context, concurrency, and prompt-cache budget."""
+
+    name: str
+    title: str
+    context_window: int
+    max_concurrent: int
+    projected_kv_bytes: int
+    prompt_cache_bytes: int
+    description: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "context_window",
+            "max_concurrent",
+            "projected_kv_bytes",
+            "prompt_cache_bytes",
+        ):
+            if (
+                type(getattr(self, field_name)) is not int
+                or getattr(self, field_name) <= 0
+            ):
+                raise ValueError(f"capacity {field_name} must be a positive integer")
+        if not self.name or not self.title or not self.description:
+            raise ValueError(
+                "capacity profile name, title, and description are required"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +173,30 @@ class ExactSetupSelection:
             raise ValueError(
                 "Hindsight setup requires client_options.hindsight.profile"
             )
+        max_context = self.service_options.get("max_context")
+        if max_context is not None and (
+            type(max_context) is not int or max_context <= 0
+        ):
+            raise ValueError("service_options.max_context must be a positive integer")
+        if (
+            self.context_window is not None
+            and max_context is not None
+            and self.context_window > max_context
+        ):
+            raise ValueError("context_window cannot exceed service_options.max_context")
+        if max_context is not None:
+            for client, options in self.client_options.items():
+                client_context = options.get("context_window")
+                if client_context is not None and (
+                    type(client_context) is not int or client_context <= 0
+                ):
+                    raise ValueError(
+                        f"client_options.{client}.context_window must be a positive integer"
+                    )
+                if client_context is not None and client_context > max_context:
+                    raise ValueError(
+                        f"client_options.{client}.context_window cannot exceed service_options.max_context"
+                    )
         lock_algorithm, separator, lock_value = self.runtime_lock_digest.partition(":")
         if (
             separator != ":"
@@ -188,6 +242,7 @@ class RecommendedProfile:
 @dataclass(frozen=True, slots=True)
 class SetupRequest:
     selection: ExactSetupSelection | None = None
+    capacity_profile: str | None = None
     noninteractive: bool = False
     confirmed: bool = False
 
@@ -227,6 +282,7 @@ class SetupPlan:
     offline: bool
     editable: bool
     confirmation_required: bool
+    capacity_profile: CapacityProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +307,9 @@ class SetupPreview:
     context_window: int | None
     steps: tuple[PlanStep, ...]
     offline_note: str
+    capacity_profile: str | None = None
+    projected_kv_bytes: int | None = None
+    capacity_description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +368,13 @@ EvidenceRecorder = Callable[[SetupEvidence], object]
 class SetupPlanner:
     """Create exact guided, unattended, resume, and removal plans."""
 
-    def __init__(self, recommended_profiles: Sequence[RecommendedProfile]) -> None:
+    def __init__(
+        self,
+        recommended_profiles: Sequence[RecommendedProfile],
+        *,
+        capacity_profiles: Sequence[CapacityProfile] = (),
+        default_capacity_profile: str | None = None,
+    ) -> None:
         profiles = tuple(
             sorted(recommended_profiles, key=lambda item: item.minimum_memory_bytes)
         )
@@ -318,6 +383,19 @@ class SetupPlanner:
         for profile in profiles:
             profile.selection.validate_exact()
         self._profiles = profiles
+        self._capacity_profiles = {item.name: item for item in capacity_profiles}
+        if len(self._capacity_profiles) != len(tuple(capacity_profiles)):
+            raise ValueError("capacity profile names must be unique")
+        if (
+            default_capacity_profile is not None
+            and default_capacity_profile not in self._capacity_profiles
+        ):
+            raise ValueError("default capacity profile must name a configured profile")
+        self._default_capacity_profile = default_capacity_profile
+
+    @property
+    def capacity_profiles(self) -> tuple[CapacityProfile, ...]:
+        return tuple(self._capacity_profiles.values())
 
     @property
     def expert_template(self) -> ExactSetupSelection:
@@ -340,6 +418,17 @@ class SetupPlanner:
         else:
             profile = None
             selection = request.selection
+        capacity_name = request.capacity_profile
+        if capacity_name is None and request.selection is None:
+            capacity_name = self._default_capacity_profile
+        capacity = self._capacity_profiles.get(capacity_name) if capacity_name else None
+        if capacity_name and capacity is None:
+            accepted = ", ".join(self._capacity_profiles) or "none"
+            raise ValueError(
+                f"unknown capacity profile {capacity_name!r}; accepted values: {accepted}"
+            )
+        if capacity is not None:
+            selection = self._apply_capacity(selection, capacity)
         selection.validate_exact()
         if request.noninteractive:
             if request.selection is None:
@@ -387,6 +476,7 @@ class SetupPlanner:
             offline=not preflight.online,
             editable=not request.noninteractive,
             confirmation_required=not request.confirmed,
+            capacity_profile=capacity,
         )
 
     def preview(self, plan: SetupPlan) -> SetupPreview:
@@ -416,6 +506,44 @@ class SetupPlanner:
                 if plan.offline
                 else "Online preflight succeeded."
             ),
+            capacity_profile=(
+                plan.capacity_profile.name
+                if plan.capacity_profile is not None
+                else None
+            ),
+            projected_kv_bytes=(
+                plan.capacity_profile.projected_kv_bytes
+                if plan.capacity_profile is not None
+                else None
+            ),
+            capacity_description=(
+                plan.capacity_profile.description
+                if plan.capacity_profile is not None
+                else ""
+            ),
+        )
+
+    @staticmethod
+    def _apply_capacity(
+        selection: ExactSetupSelection, capacity: CapacityProfile
+    ) -> ExactSetupSelection:
+        options = dict(selection.service_options)
+        options.update(
+            {
+                "max_context": capacity.context_window,
+                "max_concurrent": capacity.max_concurrent,
+                "prompt_cache_bytes": capacity.prompt_cache_bytes,
+            }
+        )
+        client_options = {
+            name: {**settings, "context_window": capacity.context_window}
+            for name, settings in selection.client_options.items()
+        }
+        return replace(
+            selection,
+            service_options=options,
+            client_options=client_options,
+            context_window=capacity.context_window,
         )
 
     def apply(

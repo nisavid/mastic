@@ -3,6 +3,7 @@ import unittest
 
 from mlxctl.application.dispatch import ApplicationError
 from mlxctl.application.setup import (
+    CapacityProfile,
     ExactSetupSelection,
     RecommendedProfile,
     RemovalInventory,
@@ -88,7 +89,30 @@ class SetupOperationPortTests(unittest.TestCase):
     def setUp(self):
         compact = RecommendedProfile("compact", 16 * GIB, selection(revision="1" * 40))
         workstation = RecommendedProfile("workstation", 64 * GIB, selection())
-        self.planner = SetupPlanner((compact, workstation))
+        capacities = (
+            CapacityProfile(
+                "balanced",
+                "Balanced",
+                131_072,
+                6,
+                5_737_807_872,
+                2 * GIB,
+                "Parallel work.",
+            ),
+            CapacityProfile(
+                "long-context",
+                "Long context",
+                196_608,
+                4,
+                5_737_807_872,
+                2 * GIB,
+                "Larger requests.",
+            ),
+        )
+        self.planner = SetupPlanner(
+            (compact, workstation),
+            capacity_profiles=capacities,
+        )
         self.facts = SetupPreflight("darwin", "arm64", 96 * GIB, 500 * GIB, True)
         self.runtime = FakeOwner(
             {
@@ -179,6 +203,17 @@ class SetupOperationPortTests(unittest.TestCase):
             + self.supervisor.calls,
             [],
         )
+
+    def test_capacity_choice_is_discoverable_and_changes_plan_identity(self):
+        baseline = self.port().preview({})
+        selected = self.port().preview({"capacity": "long-context"})
+
+        self.assertIn("capacity", selected)
+        self.assertEqual(selected["capacity"]["profile"], "long-context")
+        self.assertEqual(selected["capacity"]["context_window"], 196_608)
+        self.assertEqual(selected["capacity"]["max_concurrent"], 4)
+        self.assertIn("simultaneous inference requests", selected["capacity"]["note"])
+        self.assertNotEqual(baseline["plan_fingerprint"], selected["plan_fingerprint"])
 
     def test_confirmed_exact_plan_orchestrates_owners_and_persists_evidence(self):
         port = self.port()

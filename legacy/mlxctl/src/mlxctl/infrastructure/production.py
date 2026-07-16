@@ -11,6 +11,7 @@ from typing import Protocol
 from mlxctl.application.config_schema import MlxctlConfig, validate_config
 from mlxctl.application.dispatch import ApplicationError, OperationRequest
 from mlxctl.application.setup import (
+    CapacityProfile,
     ExactSetupSelection,
     RecommendedProfile,
     SetupPlanner,
@@ -33,6 +34,7 @@ from mlxctl.infrastructure.model_intelligence import (
     HuggingFaceModelRepository,
     ModelIntelligence,
     PsutilMachineInventory,
+    optiq_kv_bytes,
 )
 from mlxctl.infrastructure.model_supply import (
     HuggingFaceHubClient,
@@ -612,13 +614,73 @@ def _setup_planner() -> SetupPlanner:
         activation="manual",
         service_options={
             "kv_config": "kv_config.json",
-            "max_context": 32768,
             "mtp": True,
-            "temp": 0.0,
+            "temperature": 0.0,
         },
         gateway_endpoint="http://127.0.0.1:8766/v1",
-        clients=(),
-        context_window=32768,
+        clients=("codex", "hindsight"),
+        client_options={
+            "codex": {
+                "sampling_profiles": {"coding": {"temperature": 0.0}},
+            },
+            "hindsight": {
+                "profile": "default",
+                "max_concurrent": 1,
+                "sampling_profiles": {
+                    "verification": {"temperature": 0.0},
+                    "retain": {"temperature": 0.1},
+                    "reflect": {"temperature": 0.9},
+                    "consolidation": {"temperature": 0.0},
+                },
+            },
+        },
+    )
+    pinned_config = {"head_dim": 256, "num_key_value_heads": 2}
+    pinned_kv_config = [
+        {"layer_idx": index, "bits": bits, "group_size": 64}
+        for index, bits in zip(
+            (3, 7, 11, 15, 19, 23, 27, 31, 35, 39),
+            (4, 8, 4, 8, 8, 4, 4, 4, 4, 4),
+            strict=True,
+        )
+    ]
+    projected_kv_bytes = optiq_kv_bytes(
+        pinned_config,
+        pinned_kv_config,
+        context_tokens=131_072,
+        concurrency=6,
+    )
+    if projected_kv_bytes is None:
+        raise RuntimeError("pinned OptiQ KV geometry is invalid")
+    prompt_cache_bytes = 2 * 1024**3
+    capacities = (
+        CapacityProfile(
+            "balanced",
+            "Balanced",
+            131_072,
+            6,
+            projected_kv_bytes,
+            prompt_cache_bytes,
+            "Best default for several active tools while retaining a 128K context window.",
+        ),
+        CapacityProfile(
+            "long-context",
+            "Long context",
+            196_608,
+            4,
+            projected_kv_bytes,
+            prompt_cache_bytes,
+            "More context per request with four simultaneous inference requests.",
+        ),
+        CapacityProfile(
+            "native-context",
+            "Native context",
+            262_144,
+            3,
+            projected_kv_bytes,
+            prompt_cache_bytes,
+            "The model's native context with three simultaneous inference requests.",
+        ),
     )
     return SetupPlanner(
         (
@@ -628,5 +690,7 @@ def _setup_planner() -> SetupPlanner:
                 selection,
                 minimum_disk_bytes=24 * 1024**3,
             ),
-        )
+        ),
+        capacity_profiles=capacities,
+        default_capacity_profile="balanced",
     )

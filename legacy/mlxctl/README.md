@@ -50,6 +50,22 @@ Run guided setup:
 mlxctl setup
 ```
 
+On the 48 GiB target, guided setup offers three coherent capacity profiles:
+
+| Profile | Context per request | Simultaneous requests | Use when |
+| --- | ---: | ---: | --- |
+| `balanced` | 128K | 6 | Several coding and memory clients may be active; this is the default. |
+| `long-context` | 192K | 4 | Individual tasks need more source or retrieval context. |
+| `native-context` | 256K | 3 | A request needs the model's full native context. |
+
+Choose one directly with `mlxctl setup --capacity long-context`. A concurrency
+slot is used only by an in-flight inference request: idle agents use no slot,
+and requests beyond the selected limit queue. All three profiles keep the same
+projected persistent KV budget and a 2 GiB prompt-prefix cache; they trade
+context per request for concurrency without silently giving clients a larger
+window than the service accepts. The complete resolved values remain visible
+and editable in the CLI and TUI review plan.
+
 mlxctl checks the Mac, renders an editable plan, and asks before changing
 anything. The built-in recommendation currently targets Macs with at least
 48 GiB of unified memory and 24 GiB of free disk. It installs the tested OptiQ
@@ -238,18 +254,26 @@ pinned service.
 
 Client integrations are owned and reversible. They write only the settings
 needed for the selected Gateway route and retain ownership evidence for safe
-removal.
+removal. Guided setup configures both clients with the selected service context
+and conservative sampling defaults.
+
+For Codex, mlxctl also creates a custom model catalog from the installed
+Codex version's bundled catalog, preserves its bundled coding instructions,
+and declares only capabilities verified for the local route. This prevents
+Codex from guessing fallback metadata for `qwen36-optiq`. `client inspect`
+reports a missing, malformed, incompatible, or externally changed catalog and
+gives the repair command; re-running `client configure codex` repairs it.
 
 ```sh
 mlxctl client configure codex \
   --service assistant \
-  --context-window 32768 \
+  --context-window 131072 \
   --sampling-profiles '{"coding":{"temperature":0}}'
 
 mlxctl client configure hindsight \
   --service assistant \
   --profile default \
-  --context-window 32768 \
+  --context-window 131072 \
   --max-concurrent 1 \
   --sampling-profiles '{
     "verification":{"temperature":0},

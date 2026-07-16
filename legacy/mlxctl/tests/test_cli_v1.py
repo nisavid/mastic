@@ -192,6 +192,18 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(parameters["clients"], ["codex", "hindsight"])
         self.assertEqual(parameters["plan_fingerprint"], "sha256:exact")
 
+    def test_setup_help_explains_capacity_choices_and_concurrency(self) -> None:
+        result = self.runner.invoke(self.app, ["setup", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--capacity", result.output)
+        self.assertIn("balanced", result.output)
+        self.assertIn("long-context", result.output)
+        self.assertIn("native-context", result.output)
+        self.assertIn("simultaneous inference requests", result.output)
+        self.assertIn("prefill at 4-7 requests", result.output)
+        self.assertIn("8 permits", result.output)
+
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])
         self.assertEqual(machine.exit_code, 1)

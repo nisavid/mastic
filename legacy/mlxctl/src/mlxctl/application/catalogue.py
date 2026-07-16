@@ -349,6 +349,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 accepted=("recommended", "expert"),
             ),
             _option(
+                "capacity",
+                "Capacity profile: balanced allows 6 simultaneous inference requests at 128K; long-context allows 4 at 192K; native-context allows 3 at 256K. OptiQ 0.3.3 retains one simultaneous prefill at 4-7 requests; 8 permits two and is riskier on 48 GiB Macs.",
+                accepted=("balanced", "long-context", "native-context"),
+            ),
+            _option(
                 "offline",
                 "Use only installed definitions, local evidence, and cached bytes.",
                 value_type="boolean",
