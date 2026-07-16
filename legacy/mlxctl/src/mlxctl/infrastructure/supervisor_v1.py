@@ -337,7 +337,7 @@ class Supervisor:
         with self._lock:
             self._gateway.stop(self._drain_timeout)
             self._state = "stopped"
-            self._shedding_new_work = False
+            self._set_shedding_locked(False)
             self._finish_operation_locked(operation_id, "stopped")
             return self._status_locked(operation_id=operation_id)
 

@@ -165,6 +165,7 @@ class FakeProbe:
 class FakeGateway:
     def __init__(self) -> None:
         self.running = False
+        self.shedding = False
         self.routes: dict[str, tuple[str, str | None]] = {}
         self.calls: list[object] = []
         self.busy_services: set[str] = set()
@@ -188,7 +189,14 @@ class FakeGateway:
         self.calls.append(("remove_route", service))
 
     def shed_new_work(self, enabled: bool):
+        self.shedding = enabled
         self.calls.append(("shed", enabled))
+
+    def effective_route(self, service: str) -> tuple[str, str | None]:
+        state, endpoint = self.routes[service]
+        if self.shedding and state == "ready":
+            return ("unavailable", None)
+        return (state, endpoint)
 
     def is_busy(self, service: str) -> bool:
         return service in self.busy_services
@@ -381,6 +389,18 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(stopped.state, "stopped")
         self.assertFalse(self.gateway.running)
         self.assertIn(("drain", 2), self.gateway.calls)
+
+    def test_supervisor_restart_restores_gateway_admission_for_ready_service(self):
+        self.supervisor.start_service("coding")
+
+        self.supervisor.restart()
+        restarted = self.supervisor.start_service("coding")
+
+        self.assertEqual(restarted.run.state, ServiceRunState.READY)
+        self.assertEqual(
+            self.gateway.effective_route("coding"),
+            ("ready", "http://127.0.0.1:49153"),
+        )
 
     def test_service_drain_rejects_new_route_work_and_waits_for_idle(self) -> None:
         supervisor = self.supervisor
