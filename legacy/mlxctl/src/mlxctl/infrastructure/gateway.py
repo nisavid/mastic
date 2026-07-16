@@ -27,6 +27,10 @@ _RESPONSE_HEADER_ALLOWLIST = frozenset(
 )
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
 DEFAULT_UPSTREAM_RESPONSE_TIMEOUT = 30.0
+_SSE_INSPECTION_LIMIT = 1024 * 1024
+_TERMINAL_RESPONSE_EVENTS = frozenset(
+    {"response.completed", "response.failed", "response.incomplete"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,16 +72,85 @@ class _UpstreamStreamingResponse(StreamingResponse):
     ) -> None:
         self._upstream = upstream
         self._on_close = on_close
-        super().__init__(upstream.aiter_raw(), **kwargs)
+        content_type = upstream.headers.get("content-type", "").partition(";")[0]
+        content_encoding = upstream.headers.get("content-encoding", "identity")
+        body = (
+            _iter_sse_until_terminal(upstream)
+            if content_type.strip().lower() == "text/event-stream"
+            and content_encoding.strip().lower() in {"", "identity"}
+            else upstream.aiter_raw()
+        )
+        super().__init__(body, **kwargs)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await self._upstream.aclose()
-            if self._on_close is not None:
-                self._on_close()
-                self._on_close = None
+            try:
+                await self._upstream.aclose()
+            finally:
+                if self._on_close is not None:
+                    self._on_close()
+                    self._on_close = None
+
+
+async def _iter_sse_until_terminal(
+    upstream: httpx.Response,
+) -> AsyncIterator[bytes]:
+    """Stop an SSE transport after its protocol-level terminal event."""
+
+    pending = bytearray()
+    async for chunk in upstream.aiter_raw():
+        yield chunk
+        pending.extend(chunk)
+        while True:
+            event = _pop_sse_event(pending)
+            if event is None:
+                break
+            if _is_terminal_sse_event(event):
+                return
+        if len(pending) > _SSE_INSPECTION_LIMIT:
+            del pending[:-_SSE_INSPECTION_LIMIT]
+
+
+def _pop_sse_event(pending: bytearray) -> bytes | None:
+    boundaries = tuple(
+        (index, separator)
+        for separator in (b"\r\n\r\n", b"\n\n", b"\r\r")
+        if (index := pending.find(separator)) >= 0
+    )
+    if not boundaries:
+        return None
+    index, separator = min(boundaries, key=lambda item: item[0])
+    event = bytes(pending[:index])
+    del pending[: index + len(separator)]
+    return event
+
+
+def _is_terminal_sse_event(event: bytes) -> bool:
+    event_name = ""
+    data_lines: list[bytes] = []
+    for line in event.splitlines():
+        field, separator, value = line.partition(b":")
+        if not separator:
+            continue
+        value = value.lstrip(b" ")
+        if field == b"event":
+            event_name = value.decode("utf-8", errors="replace")
+        elif field == b"data":
+            data_lines.append(value)
+    if event_name in _TERMINAL_RESPONSE_EVENTS:
+        return True
+    data = b"\n".join(data_lines).strip()
+    if data == b"[DONE]":
+        return True
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict) and payload.get("type") in _TERMINAL_RESPONSE_EVENTS
+    )
 
 
 def validate_loopback_bind(host: str) -> str:

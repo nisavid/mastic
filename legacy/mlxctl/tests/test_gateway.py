@@ -55,6 +55,14 @@ class ChunkStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class PostTerminalStream(ChunkStream):
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.pulled += 1
+            yield chunk
+        raise AssertionError("Gateway pulled the upstream after semantic completion")
+
+
 class FakeUpstreamClient:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
@@ -343,6 +351,74 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(response.headers["x-request-id"], "upstream-1")
         self.assertEqual(stream.pulled, 3)
         self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_stream_stops_and_releases_activity_at_terminal_event(self):
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        terminal = (
+            b": keepalive\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp-1"}}\n\n'
+        )
+        stream = PostTerminalStream([terminal[:37], terminal[37:]])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            with client.stream(
+                "POST",
+                "/v1/responses",
+                json={"model": "coding", "stream": True, "input": "hello"},
+            ) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(body, terminal)
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_stream_close_failure_still_releases_activity(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = ChunkStream([b"data: [DONE]\n\n"])
+        upstream = FakeUpstreamClient()
+        upstream_response = httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+        async def fail_close() -> None:
+            raise RuntimeError("upstream close failed")
+
+        upstream_response.aclose = fail_close  # type: ignore[method-assign]
+        upstream.responses.append(upstream_response)
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "upstream close failed"):
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "coding", "stream": True, "messages": []},
+                )
+
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
