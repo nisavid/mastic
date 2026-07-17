@@ -681,7 +681,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             request = OperationRequest("service.remove", {"resource": "chat"})
             fingerprint = backend.prepare(request).events[-1]["preview_fingerprint"]
 
-            backend._config_store.edit(  # noqa: SLF001 - verifies stale-plan boundary.
+            backend._config_store.edit(  # noqa: SLF001 - verifies stale-preview boundary.
                 lambda document: document["gateway"].update({"port": 9000})
             )
 

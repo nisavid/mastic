@@ -1076,7 +1076,7 @@ route = "coding"
         self.assertEqual(result["preview"]["revision_hashes"], [_SHA_B])
         self.assertTrue(supply.strategies[-1].executed)
 
-    def test_cache_move_exposes_plan_and_confirms_source_cleanup(self) -> None:
+    def test_cache_move_exposes_preview_and_confirms_source_cleanup(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
         mover = FakeCacheMover()
         port = ModelSupplyPort(supply, self.store, self.security, cache_mover=mover)
