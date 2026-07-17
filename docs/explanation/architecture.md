@@ -169,7 +169,7 @@ Critical memory pressure immediately blocks new starts and sheds new Gateway
 work while bounded in-flight requests finish. The Supervisor may then stop the
 least-recently-used idle Service Runs until pressure recovers, but never stops a
 Pinned Inference Service automatically. If only pinned or busy services remain,
-it keeps shedding work and presents an exact operator stop plan. Every pressure
+it keeps shedding work and presents an ordered operator stop sequence. Every pressure
 decision and lifecycle action is journaled and visible in CLI and TUI.
 
 ## User interfaces
