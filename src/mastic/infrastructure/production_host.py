@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import plistlib
@@ -21,6 +22,7 @@ from mastic.application.config_schema import (
     ApplicationTargetSamplingSettings,
     ApplicationTargetSettings,
     MasticConfig,
+    validate_hindsight_profile_name,
     validate_config,
 )
 from mastic.application.dispatch import ApplicationError
@@ -31,7 +33,7 @@ from mastic.infrastructure.application_target_integrations import (
     LocalApplicationTargetIntegrationFactory,
     SamplingProfile,
 )
-from mastic.infrastructure.config_store import ConfigStore
+from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.gateway_credential import GatewayCredential
 from mastic.infrastructure.launchd import LaunchdAdapter
 from mastic.infrastructure.model_supply import (
@@ -363,6 +365,9 @@ def application_target_port(
         ),
         settings=settings,
         record=record,
+        transition=lambda name: private_file_lock(
+            paths.state_dir / "application-targets" / f"{name}.transition.lock"
+        ),
     )
 
 
@@ -501,12 +506,85 @@ def removal_inventory(
     return RemovalInventory(
         running_services=running,
         registered=launchd.status().registered,
-        application_target_integrations=tuple(sorted(config.application_targets)),
+        application_target_integrations=_removal_application_targets(
+            paths, config, home
+        ),
         product_owned_paths=owned,
         product_owned_bytes=sum(tree_size(Path(path)) for path in owned),
         shared_cache_paths=tuple(str(item.snapshot_path) for item in cache.revisions),
         shared_cache_bytes=sum(item.size_on_disk for item in cache.revisions),
         unrelated_settings=(str(home / ".codex"), str(home / ".hindsight")),
+    )
+
+
+def _removal_application_targets(
+    paths: MasticPaths, config: MasticConfig, home: Path
+) -> tuple[str, ...]:
+    targets = set(config.application_targets)
+    ownership_dir = paths.state_dir / "application-targets"
+    try:
+        directory_metadata = ownership_dir.lstat()
+    except FileNotFoundError:
+        return tuple(sorted(targets))
+    if stat.S_ISLNK(directory_metadata.st_mode) or not stat.S_ISDIR(
+        directory_metadata.st_mode
+    ):
+        raise _removal_recovery_required("application targets")
+
+    hindsight_profiles: list[str] = []
+    for manifest_path in ownership_dir.iterdir():
+        if manifest_path.name == "codex.ownership.json":
+            integration = "codex"
+            config_path = home / ".codex/config.toml"
+            backup_path = ownership_dir / "codex.config.backup"
+        elif manifest_path.name.startswith(
+            "hindsight-"
+        ) and manifest_path.name.endswith(".ownership.json"):
+            integration = "hindsight"
+            profile = manifest_path.name[len("hindsight-") : -len(".ownership.json")]
+            try:
+                profile = validate_hindsight_profile_name(profile)
+            except ValueError as error:
+                raise _removal_recovery_required(integration) from error
+            config_path = home / f".hindsight/profiles/{profile}.env"
+            backup_path = ownership_dir / f"hindsight-{profile}.config.backup"
+        else:
+            continue
+
+        try:
+            metadata = manifest_path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("ownership manifest must be a regular file")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(manifest, dict)
+                or manifest.get("schema_version") != 1
+                or manifest.get("integration") != integration
+                or not isinstance(manifest.get("fields"), list)
+                or manifest.get("config_path") != str(config_path)
+                or manifest.get("backup_path") != str(backup_path)
+            ):
+                raise ValueError("invalid ownership manifest")
+        except (OSError, UnicodeError, ValueError) as error:
+            raise _removal_recovery_required(integration) from error
+
+        targets.add(integration)
+        if integration == "hindsight":
+            hindsight_profiles.append(profile)
+
+    if len(hindsight_profiles) > 1:
+        raise _removal_recovery_required("hindsight")
+    return tuple(sorted(targets))
+
+
+def _removal_recovery_required(target: str) -> ApplicationError:
+    return ApplicationError(
+        "application_target_recovery_required",
+        f"Application Configuration Target {target!r} requires manual recovery",
+        next_actions=(
+            "inspect the application-target ownership manifests",
+            "resolve invalid or ambiguous recovery evidence before removing mastic",
+        ),
     )
 
 

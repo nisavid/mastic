@@ -508,6 +508,16 @@ class CodexApplicationTargetIntegration:
             self.manifest_path,
         )
 
+    def rollback_point(self) -> Callable[[], None]:
+        snapshot = _snapshot_files(
+            self.config_path,
+            self.catalog_path,
+            self.manifest_path,
+            self.backup_path,
+            self.catalog_backup_path,
+        )
+        return lambda: _restore_files(snapshot)
+
     def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
         if not manifest:
@@ -926,6 +936,14 @@ class HindsightApplicationTargetIntegration:
             self.manifest_path,
         )
 
+    def rollback_point(self) -> Callable[[], None]:
+        snapshot = _snapshot_files(
+            self.config_path,
+            self.manifest_path,
+            self.backup_path,
+        )
+        return lambda: _restore_files(snapshot)
+
     def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
         if not manifest:
@@ -1006,6 +1024,85 @@ class HindsightApplicationTargetIntegration:
         except Exception:
             _restore_files(snapshot)
             raise
+
+    def inspect(self) -> Mapping[str, object]:
+        try:
+            manifest = self._manifest(optional=True)
+        except (
+            ApplicationTargetIntegrationConflict,
+            OSError,
+            UnicodeError,
+            ValueError,
+        ):
+            return self._inspection_report(
+                "malformed", "Hindsight ownership manifest is malformed."
+            )
+        if not manifest:
+            return self._inspection_report(
+                "unmanaged", "Hindsight profile has no mastic ownership manifest."
+            )
+        try:
+            backup, backup_exists = _read(self.backup_path)
+        except (OSError, ValueError):
+            return self._inspection_report(
+                "malformed", "Hindsight ownership support path is invalid."
+            )
+        if not backup_exists:
+            return self._inspection_report(
+                "missing", "Hindsight ownership backup is missing."
+            )
+        if _digest(backup) != manifest.get("before_digest"):
+            return self._inspection_report(
+                "drifted", "Hindsight ownership backup differs from its manifest."
+            )
+        try:
+            raw, config_exists = _read(self.config_path)
+            if not config_exists:
+                return self._inspection_report(
+                    "missing", "Hindsight owned profile is missing."
+                )
+            env = _EnvDocument(raw.decode())
+            for item in manifest["fields"]:
+                path = tuple(item["path"])
+                present, current, _line = env.lookup(path[0])
+                matches = (
+                    _secret_matches(current, item)
+                    if path[0] == _HINDSIGHT_API_KEY and present
+                    else current == item.get("after")
+                )
+                if not present or not matches:
+                    detail = (
+                        "Hindsight credential differs from mastic ownership."
+                        if path[0] == _HINDSIGHT_API_KEY
+                        else f"Hindsight setting {path[0]} differs from mastic ownership."
+                    )
+                    return self._inspection_report("drifted", detail)
+        except (
+            ApplicationTargetIntegrationConflict,
+            IndexError,
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            return self._inspection_report(
+                "malformed",
+                "Hindsight owned profile or ownership fields are malformed.",
+            )
+        return self._inspection_report(
+            "healthy", "Hindsight profile matches mastic ownership."
+        )
+
+    def _inspection_report(self, state: str, detail: str) -> Mapping[str, object]:
+        return {
+            "state": state,
+            "detail": detail,
+            "config_path": str(self.config_path),
+            "next_actions": []
+            if state == "healthy"
+            else ["mastic application-target configure hindsight --help"],
+        }
 
     def test(
         self,

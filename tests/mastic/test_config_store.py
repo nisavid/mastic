@@ -1,3 +1,4 @@
+import multiprocessing
 import stat
 import shutil
 import tempfile
@@ -7,10 +8,56 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from mastic.infrastructure.config_store import ConfigChange, ConfigStore
+from mastic.infrastructure.config_store import (
+    ConfigChange,
+    ConfigStore,
+    private_file_lock,
+)
+
+
+def _hold_private_lock(path: str, acquired, release) -> None:
+    with private_file_lock(path):
+        acquired.set()
+        release.wait(5)
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_private_file_lock_serializes_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = str(Path(directory) / "application-target.lock")
+            context = multiprocessing.get_context("fork")
+            first_acquired = context.Event()
+            first_release = context.Event()
+            second_acquired = context.Event()
+            second_release = context.Event()
+            second_release.set()
+            first = context.Process(
+                target=_hold_private_lock,
+                args=(lock_path, first_acquired, first_release),
+            )
+            second = context.Process(
+                target=_hold_private_lock,
+                args=(lock_path, second_acquired, second_release),
+            )
+            try:
+                first.start()
+                self.assertTrue(first_acquired.wait(2))
+                second.start()
+                self.assertFalse(second_acquired.wait(0.2))
+                first_release.set()
+                self.assertTrue(second_acquired.wait(2))
+            finally:
+                first_release.set()
+                second_release.set()
+                first.join(2)
+                second.join(2)
+                if first.is_alive():
+                    first.terminate()
+                if second.is_alive():
+                    second.terminate()
+            self.assertEqual(first.exitcode, 0)
+            self.assertEqual(second.exitcode, 0)
+
     def test_rejects_symlinked_config_history_lock_and_journal_targets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
