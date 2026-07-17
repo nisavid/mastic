@@ -416,7 +416,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "context_window",
-                "Client and inference context window.",
+                "Application target and inference context window.",
                 value_type="integer",
             ),
             _option(
@@ -662,13 +662,17 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 required=True,
             ),
             _option("profile", "Hindsight profile name when configuring Hindsight."),
-            _option("context_window", "Client context window.", value_type="integer"),
+            _option(
+                "context_window",
+                "Application Configuration Target context window.",
+                value_type="integer",
+            ),
             _option(
                 "sampling_profiles",
                 "JSON object of named sampling profiles.",
                 value_type="json",
             ),
-            _option("provider", "Client provider identifier."),
+            _option("provider", "Application target provider identifier."),
             _option(
                 "max_concurrent",
                 "Maximum concurrent client requests.",

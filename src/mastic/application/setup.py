@@ -155,7 +155,7 @@ class ExactSetupSelection:
         unselected_options = sorted(set(self.client_options) - set(self.clients))
         if unselected_options:
             raise ValueError(
-                "client_options require selected clients: "
+                "client_options require selected Application Configuration Targets: "
                 + ", ".join(unselected_options)
             )
         allowed_client_options = {
@@ -756,7 +756,7 @@ class SetupPlanner:
             ("service.configure", "Configure the Inference Service", common, False),
             (
                 "client.configure",
-                "Configure selected clients",
+                "Configure selected Application Configuration Targets",
                 {
                     "clients": selection.clients,
                     "client_options": selection.client_options,
