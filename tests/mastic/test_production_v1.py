@@ -423,6 +423,8 @@ class ProductionCompositionTests(unittest.TestCase):
         revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
         coding = default_sampling(repository, revision, "codex")["coding"]
         self.assertIs(sampling_profile(coding), coding)
+        with self.assertRaisesRegex(ValueError, "unknown sampling profile fields"):
+            sampling_profile({"temprature": 0.6})
         self.assertEqual(coding.temperature, 0.6)
         self.assertEqual(coding.top_p, 0.95)
         self.assertEqual(coding.top_k, 20)
