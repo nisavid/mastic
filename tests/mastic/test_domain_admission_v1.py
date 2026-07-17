@@ -26,9 +26,9 @@ class AdmissionPolicyTests(unittest.TestCase):
             AdmissionDecision.CONFIRM,
         )
 
-    def test_no_fit_requires_named_transition_plan(self) -> None:
+    def test_no_fit_requires_named_transition_sequence(self) -> None:
         fit = FitAssessment(FitClass.NO_FIT, 80, 64, ("exact model bytes",))
-        self.assertEqual(fit.decision, AdmissionDecision.TRANSITION_PLAN)
+        self.assertEqual(fit.decision, AdmissionDecision.TRANSITION_SEQUENCE)
         with self.assertRaisesRegex(ValueError, "named transition"):
             fit.approve_transition(())
         self.assertEqual(fit.approve_transition(("stop:chat",)), ("stop:chat",))
@@ -55,8 +55,8 @@ class AdmissionPolicyTests(unittest.TestCase):
         result = PressurePolicy().evaluate(PressureLevel.CRITICAL, services)
 
         self.assertEqual(result.stop_services, ())
-        self.assertIn(PressureAction.PRESENT_STOP_PLAN, result.actions)
-        self.assertEqual(result.operator_stop_plan, ("vision", "coding"))
+        self.assertIn(PressureAction.PRESENT_STOP_SEQUENCE, result.actions)
+        self.assertEqual(result.operator_stop_sequence, ("vision", "coding"))
 
 
 if __name__ == "__main__":

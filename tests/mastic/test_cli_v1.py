@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from click.utils import strip_ansi
 from typer.testing import CliRunner
 
 from mastic.application.catalogue import build_operation_catalogue
@@ -211,11 +212,12 @@ class CliV1Tests(unittest.TestCase):
         result = self.runner.invoke(self.app, ["setup", "--help"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("--capacity", result.output)
-        self.assertIn("balanced", result.output)
-        self.assertIn("long-context", result.output)
-        self.assertIn("native-context", result.output)
-        normalized = " ".join(result.output.replace("│", " ").split())
+        output = strip_ansi(result.output)
+        self.assertIn("--capacity", output)
+        self.assertIn("balanced", output)
+        self.assertIn("long-context", output)
+        self.assertIn("native-context", output)
+        normalized = " ".join(output.replace("│", " ").split())
         self.assertIn("simultaneous inference requests", normalized)
         self.assertIn("prefill at 4-7 requests", normalized)
         self.assertIn("8 permits", normalized)

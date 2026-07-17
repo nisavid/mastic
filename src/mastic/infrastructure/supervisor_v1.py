@@ -107,7 +107,7 @@ class PressureOutcome:
     level: PressureLevel
     shedding_new_work: bool
     stopped_services: tuple[str, ...] = ()
-    operator_stop_plan: tuple[str, ...] = ()
+    operator_stop_sequence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,7 +604,7 @@ class Supervisor:
                     ServiceRunState.UNHEALTHY,
                 }
             ]
-            plan = tuple(
+            sequence = tuple(
                 run.status.service
                 for run in sorted(
                     remaining,
@@ -619,10 +619,10 @@ class Supervisor:
                 operation_id,
                 "pressure_decision",
                 stopped_services=stopped,
-                operator_stop_plan=plan,
+                operator_stop_sequence=sequence,
             )
             self._finish_operation_locked(operation_id, "complete")
-            return PressureOutcome(level, True, tuple(stopped), plan)
+            return PressureOutcome(level, True, tuple(stopped), sequence)
 
     def maintain(self) -> MaintenanceStatus:
         """Converge live routes/runs and pressure without a client request."""
