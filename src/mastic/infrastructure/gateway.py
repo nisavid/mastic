@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from mastic.infrastructure.responses_adapter import (
@@ -24,6 +24,7 @@ from mastic.infrastructure.responses_adapter import (
     CodexNamespaceAdapter,
     ReconstructionMap,
     TransformationError,
+    TransformationTooLarge,
 )
 
 RouteState = Literal["ready", "stopped", "unavailable"]
@@ -40,6 +41,19 @@ DEFAULT_UPSTREAM_RESPONSE_TIMEOUT = 30.0
 _SSE_INSPECTION_LIMIT = 1024 * 1024
 _TERMINAL_RESPONSE_EVENTS = frozenset(
     {"response.completed", "response.failed", "response.incomplete"}
+)
+_RESPONSE_ADAPTATION_FAILED_SSE = (
+    b"event: response.failed\n"
+    b'data: {"type":"response.failed","response":'
+    b'{"id":"mastic_gateway","object":"response","created_at":0,'
+    b'"status":"failed","completed_at":null,"error":'
+    b'{"code":"server_error","message":"MASTIC could not safely adapt the upstream response."},'
+    b'"incomplete_details":null,"instructions":null,"max_output_tokens":null,'
+    b'"model":"mastic-gateway","output":[],"previous_response_id":null,'
+    b'"reasoning_effort":null,"store":false,"temperature":1,'
+    b'"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],'
+    b'"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}},'
+    b'"sequence_number":0}\n\n'
 )
 
 
@@ -85,9 +99,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
         self,
         upstream: httpx.Response,
         *,
-        responses_adapter: CodexNamespaceAdapter | None = None,
-        reconstruction: ReconstructionMap | None = None,
-        max_response_adaptation_bytes: int = DEFAULT_MAX_RESPONSE_ADAPTATION_BYTES,
+        body: AsyncIterator[bytes] | None = None,
         on_close: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -95,15 +107,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
         self._on_close = on_close
         content_type = upstream.headers.get("content-type", "").partition(";")[0]
         content_encoding = upstream.headers.get("content-encoding", "identity")
-        if responses_adapter is not None:
-            body = _iter_adapted_responses(
-                upstream,
-                responses_adapter,
-                reconstruction or {},
-                content_type=content_type.strip().lower(),
-                limit=max_response_adaptation_bytes,
-            )
-        else:
+        if body is None:
             body = (
                 _iter_sse_until_terminal(upstream)
                 if content_type.strip().lower() == "text/event-stream"
@@ -143,61 +147,127 @@ async def _iter_sse_until_terminal(
             del pending[:-_SSE_INSPECTION_LIMIT]
 
 
-async def _iter_adapted_responses(
+async def _adapt_non_sse_response(
     upstream: httpx.Response,
     adapter: CodexNamespaceAdapter,
     reconstruction: ReconstructionMap,
     *,
     content_type: str,
     limit: int,
-) -> AsyncIterator[bytes]:
-    if content_type != "text/event-stream":
-        body = bytearray()
-        async for chunk in upstream.aiter_bytes():
-            if len(body) + len(chunk) > limit:
-                raise ResponseAdaptationTooLarge(limit)
-            body.extend(chunk)
-        raw = bytes(body)
-        if "json" not in content_type or not raw:
-            yield raw
-            return
-        try:
-            original = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            yield raw
-            return
-        transformed = adapter.transform_response(original, reconstruction)
-        encoded = (
-            raw
-            if transformed == original
-            else json.dumps(transformed, separators=(",", ":")).encode()
+) -> bytes:
+    body = bytearray()
+    async for chunk in upstream.aiter_bytes():
+        if len(body) + len(chunk) > limit:
+            raise ResponseAdaptationTooLarge(limit)
+        body.extend(chunk)
+    raw = bytes(body)
+    if "json" not in content_type or not raw:
+        return raw
+    try:
+        original = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return raw
+    try:
+        return adapter.transform_response_body(
+            original,
+            raw,
+            reconstruction,
+            max_bytes=limit,
         )
-        yield _bounded_response_adaptation(encoded, limit)
+    except TransformationTooLarge as error:
+        raise ResponseAdaptationTooLarge(limit) from error
+
+
+async def _prefetch_adapted_sse(
+    upstream: httpx.Response,
+    adapter: CodexNamespaceAdapter,
+    reconstruction: ReconstructionMap,
+    *,
+    limit: int,
+) -> AsyncIterator[bytes]:
+    chunks = upstream.aiter_bytes().__aiter__()
+    pending = bytearray()
+    while True:
+        frame = _pop_sse_message(pending, include_separator=True)
+        if frame is not None:
+            first = _adapt_sse_frame(frame, adapter, reconstruction, limit)
+            return _iter_adapted_sse_after_first(
+                first,
+                frame,
+                chunks,
+                pending,
+                adapter,
+                reconstruction,
+                limit,
+            )
+        if len(pending) > limit:
+            raise ResponseAdaptationTooLarge(limit)
+        try:
+            chunk = await anext(chunks)
+        except StopAsyncIteration:
+            if pending:
+                first = bytes(pending)
+                pending.clear()
+                return _single_chunk(first)
+            return _empty_chunks()
+        pending.extend(chunk)
+
+
+async def _iter_adapted_sse_after_first(
+    first: bytes,
+    first_raw: bytes,
+    chunks: AsyncIterator[bytes],
+    pending: bytearray,
+    adapter: CodexNamespaceAdapter,
+    reconstruction: ReconstructionMap,
+    limit: int,
+) -> AsyncIterator[bytes]:
+    yield first
+    if _is_terminal_sse_event(first_raw):
         return
 
-    pending = bytearray()
-    async for chunk in upstream.aiter_bytes():
+    async for chunk in chunks:
         pending.extend(chunk)
         while True:
             frame = _pop_sse_message(pending, include_separator=True)
             if frame is None:
                 break
-            if len(frame) > limit:
-                raise ResponseAdaptationTooLarge(limit)
-            transformed = adapter.transform_sse_frame(frame, reconstruction)
-            yield _bounded_response_adaptation(transformed, limit)
+            try:
+                transformed = _adapt_sse_frame(frame, adapter, reconstruction, limit)
+            except ResponseAdaptationTooLarge:
+                yield _RESPONSE_ADAPTATION_FAILED_SSE
+                return
+            yield transformed
             if _is_terminal_sse_event(frame):
                 return
         if len(pending) > limit:
-            raise ResponseAdaptationTooLarge(limit)
+            yield _RESPONSE_ADAPTATION_FAILED_SSE
+            return
     if pending:
         yield bytes(pending)
 
 
-def _bounded_response_adaptation(output: bytes, limit: int) -> bytes:
-    if len(output) > limit:
+def _adapt_sse_frame(
+    frame: bytes,
+    adapter: CodexNamespaceAdapter,
+    reconstruction: ReconstructionMap,
+    limit: int,
+) -> bytes:
+    if len(frame) > limit:
         raise ResponseAdaptationTooLarge(limit)
-    return output
+    try:
+        return adapter.transform_sse_frame(frame, reconstruction, max_bytes=limit)
+    except TransformationTooLarge as error:
+        raise ResponseAdaptationTooLarge(limit) from error
+
+
+async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
+    yield chunk
+
+
+async def _empty_chunks() -> AsyncIterator[bytes]:
+    if False:
+        yield b""
 
 
 def _pop_sse_message(pending: bytearray, *, include_separator: bool) -> bytes | None:
@@ -329,7 +399,7 @@ def create_gateway(
             data.append(item)
         return JSONResponse({"object": "list", "data": data})
 
-    async def proxy(request: Request) -> JSONResponse | StreamingResponse:
+    async def proxy(request: Request) -> Response:
         denied = _authenticate(request, authenticate)
         if denied is not None:
             return denied
@@ -542,19 +612,72 @@ def create_gateway(
                 parameter="model",
             )
 
+        response_headers = {
+            name: value
+            for name, value in upstream.headers.items()
+            if name.lower() in _RESPONSE_HEADER_ALLOWLIST
+            and (not is_responses or name.lower() != "content-encoding")
+        }
+        if is_responses:
+            assert responses_adapter is not None
+            content_type = (
+                upstream.headers.get("content-type", "")
+                .partition(";")[0]
+                .strip()
+                .lower()
+            )
+            if content_type == "text/event-stream":
+                try:
+                    adapted_stream = await _prefetch_adapted_sse(
+                        upstream,
+                        responses_adapter,
+                        reconstruction,
+                        limit=max_response_adaptation_bytes,
+                    )
+                except ResponseAdaptationTooLarge:
+                    await _close_upstream_and_release(
+                        upstream, activity, service, suppress_errors=True
+                    )
+                    return _response_adaptation_error(max_response_adaptation_bytes)
+                return _UpstreamStreamingResponse(
+                    upstream,
+                    body=adapted_stream,
+                    on_close=(
+                        (lambda: activity.end(service))
+                        if activity is not None
+                        else None
+                    ),
+                    status_code=upstream.status_code,
+                    headers=response_headers,
+                )
+
+            try:
+                adapted_body = await _adapt_non_sse_response(
+                    upstream,
+                    responses_adapter,
+                    reconstruction,
+                    content_type=content_type,
+                    limit=max_response_adaptation_bytes,
+                )
+            except ResponseAdaptationTooLarge:
+                await _close_upstream_and_release(
+                    upstream, activity, service, suppress_errors=True
+                )
+                return _response_adaptation_error(max_response_adaptation_bytes)
+            await _close_upstream_and_release(
+                upstream, activity, service, suppress_errors=False
+            )
+            return Response(
+                adapted_body,
+                status_code=upstream.status_code,
+                headers=response_headers,
+            )
+
         return _UpstreamStreamingResponse(
             upstream,
-            responses_adapter=responses_adapter,
-            reconstruction=reconstruction,
-            max_response_adaptation_bytes=max_response_adaptation_bytes,
             on_close=(lambda: activity.end(service)) if activity is not None else None,
             status_code=upstream.status_code,
-            headers={
-                name: value
-                for name, value in upstream.headers.items()
-                if name.lower() in _RESPONSE_HEADER_ALLOWLIST
-                and (not is_responses or name.lower() != "content-encoding")
-            },
+            headers=response_headers,
         )
 
     return Starlette(
@@ -635,6 +758,32 @@ class ResponseAdaptationTooLarge(RuntimeError):
 
     def __init__(self, limit: int) -> None:
         super().__init__(f"response adaptation exceeded the {limit}-byte limit")
+
+
+async def _close_upstream_and_release(
+    upstream: httpx.Response,
+    activity: GatewayActivity | None,
+    service: str,
+    *,
+    suppress_errors: bool,
+) -> None:
+    try:
+        await upstream.aclose()
+    except Exception:
+        if not suppress_errors:
+            raise
+    finally:
+        if activity is not None:
+            activity.end(service)
+
+
+def _response_adaptation_error(limit: int) -> JSONResponse:
+    return _error_response(
+        502,
+        "response_adaptation_too_large",
+        f"The upstream response adaptation exceeded the {limit}-byte limit.",
+        action="Reduce the upstream response size and retry.",
+    )
 
 
 async def _read_limited_body(request: Request, limit: int) -> bytes:

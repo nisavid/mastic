@@ -18,6 +18,10 @@ class TransformationError(ValueError):
     """Raised when namespace flattening would be ambiguous or lossy."""
 
 
+class TransformationTooLarge(RuntimeError):
+    """Raised before a transformed representation exceeds its byte budget."""
+
+
 class NamespaceState:
     """Bounded process-local reconstruction state for Responses continuations."""
 
@@ -108,11 +112,38 @@ class CodexNamespaceAdapter:
             self._state.remember(response_id, reconstruction)
         return transformed
 
+    def transform_response_body(
+        self,
+        data: Any,
+        raw: bytes,
+        reconstruction: ReconstructionMap,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """Reconstruct and encode one JSON response within a strict byte budget."""
+
+        transformed = transform_response(data, reconstruction)
+        if transformed == data:
+            if len(raw) > max_bytes:
+                raise TransformationTooLarge
+            encoded = raw
+        else:
+            encoded = _encode_json_limited(transformed, max_bytes)
+        for response_id in response_ids(data):
+            self._state.remember(response_id, reconstruction)
+        return encoded
+
     def transform_sse_frame(
-        self, frame: bytes, reconstruction: ReconstructionMap
+        self,
+        frame: bytes,
+        reconstruction: ReconstructionMap,
+        *,
+        max_bytes: int | None = None,
     ) -> bytes:
         lines = frame.splitlines(keepends=True)
-        transformed, response_id_values = _transform_sse_lines(lines, reconstruction)
+        transformed, response_id_values = _transform_sse_lines(
+            lines, reconstruction, max_bytes=max_bytes
+        )
         for response_id in response_id_values:
             self._state.remember(response_id, reconstruction)
         return transformed
@@ -136,6 +167,8 @@ def flatten_request(
                         "namespace tools require a non-empty name"
                     )
                 namespace_description = tool.get("description", "")
+                if not isinstance(namespace_description, str):
+                    raise TransformationError("namespace descriptions must be strings")
                 children = tool.get("tools", [])
                 if not isinstance(children, list):
                     raise TransformationError("namespace tools require a tools list")
@@ -161,6 +194,10 @@ def flatten_request(
                     )
                     nested["name"] = flat_name
                     description = nested.get("description", "")
+                    if not isinstance(description, str):
+                        raise TransformationError(
+                            "namespace function descriptions must be strings"
+                        )
                     if namespace_description and description:
                         nested["description"] = (
                             f"[{namespace}] {namespace_description}\n\n{description}"
@@ -348,7 +385,10 @@ def _split_call_name(item: Any, reconstruction: ReconstructionMap) -> None:
 
 
 def _transform_sse_lines(
-    lines: list[bytes], reconstruction: ReconstructionMap
+    lines: list[bytes],
+    reconstruction: ReconstructionMap,
+    *,
+    max_bytes: int | None,
 ) -> tuple[bytes, set[str]]:
     raw = b"".join(lines)
     data_indexes: list[int] = []
@@ -373,15 +413,105 @@ def _transform_sse_lines(
     ids = response_ids(original)
     transformed = transform_response(original, reconstruction)
     if transformed == original:
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise TransformationTooLarge
         return raw, ids
     first = data_indexes[0]
     newline = b"\r\n" if lines[first].endswith(b"\r\n") else b"\n"
-    replacement = (
-        b"data: " + json.dumps(transformed, separators=(",", ":")).encode() + newline
-    )
-    rebuilt = [
-        replacement if index == first else line
-        for index, line in enumerate(lines)
-        if index not in data_indexes[1:]
-    ]
-    return b"".join(rebuilt), ids
+    rebuilt = bytearray()
+    for index, line in enumerate(lines):
+        if index == first:
+            _append_limited(rebuilt, b"data: ", max_bytes)
+            _append_json_limited(rebuilt, transformed, max_bytes)
+            _append_limited(rebuilt, newline, max_bytes)
+        elif index not in data_indexes[1:]:
+            _append_limited(rebuilt, line, max_bytes)
+    return bytes(rebuilt), ids
+
+
+def _encode_json_limited(value: Any, max_bytes: int) -> bytes:
+    encoded = bytearray()
+    _append_json_limited(encoded, value, max_bytes)
+    return bytes(encoded)
+
+
+def _append_json_limited(output: bytearray, value: Any, max_bytes: int | None) -> None:
+    for part in _iter_json_bytes(value):
+        _append_limited(output, part, max_bytes)
+
+
+def _append_limited(output: bytearray, part: bytes, max_bytes: int | None) -> None:
+    if max_bytes is not None and len(output) + len(part) > max_bytes:
+        raise TransformationTooLarge
+    output.extend(part)
+
+
+def _iter_json_bytes(value: Any):
+    if value is None:
+        yield b"null"
+    elif value is True:
+        yield b"true"
+    elif value is False:
+        yield b"false"
+    elif isinstance(value, str):
+        yield from _iter_json_string_bytes(value)
+    elif isinstance(value, int):
+        yield str(value).encode("ascii")
+    elif isinstance(value, float):
+        yield json.dumps(value).encode("ascii")
+    elif isinstance(value, list):
+        yield b"["
+        for index, item in enumerate(value):
+            if index:
+                yield b","
+            yield from _iter_json_bytes(item)
+        yield b"]"
+    elif isinstance(value, dict):
+        yield b"{"
+        for index, (key, item) in enumerate(value.items()):
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            if index:
+                yield b","
+            yield from _iter_json_string_bytes(key)
+            yield b":"
+            yield from _iter_json_bytes(item)
+        yield b"}"
+    else:
+        raise TypeError(
+            f"Object of type {type(value).__name__} is not JSON serializable"
+        )
+
+
+def _iter_json_string_bytes(value: str):
+    chunk = bytearray(b'"')
+    escapes = {
+        '"': b'\\"',
+        "\\": b"\\\\",
+        "\b": b"\\b",
+        "\f": b"\\f",
+        "\n": b"\\n",
+        "\r": b"\\r",
+        "\t": b"\\t",
+    }
+    for character in value:
+        escaped = escapes.get(character)
+        if escaped is None:
+            codepoint = ord(character)
+            if codepoint < 0x20:
+                escaped = f"\\u{codepoint:04x}".encode("ascii")
+            elif codepoint <= 0x7F:
+                escaped = bytes((codepoint,))
+            elif codepoint <= 0xFFFF:
+                escaped = f"\\u{codepoint:04x}".encode("ascii")
+            else:
+                codepoint -= 0x10000
+                high = 0xD800 | (codepoint >> 10)
+                low = 0xDC00 | (codepoint & 0x3FF)
+                escaped = f"\\u{high:04x}\\u{low:04x}".encode("ascii")
+        if len(chunk) + len(escaped) > 1024:
+            yield bytes(chunk)
+            chunk.clear()
+        chunk.extend(escaped)
+    chunk.extend(b'"')
+    yield bytes(chunk)
