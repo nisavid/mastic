@@ -1,0 +1,44 @@
+{
+  "models": [
+    {
+      "repository": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+      "revision": "70a3aa32c7feef511182bf16aa332f37e8d82014",
+      "source": {
+        "url": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/995ad96eacd98c81ed38be0c5b274b04031597b0/README.md#best-practices",
+        "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0"
+      },
+      "profiles": [
+        {
+          "name": "general-thinking",
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "top_k": 20,
+          "min_p": 0.0,
+          "presence_penalty": 1.5,
+          "repetition_penalty": 1.0,
+          "enable_thinking": true
+        },
+        {
+          "name": "precise-coding-thinking",
+          "temperature": 0.6,
+          "top_p": 0.95,
+          "top_k": 20,
+          "min_p": 0.0,
+          "presence_penalty": 0.0,
+          "repetition_penalty": 1.0,
+          "enable_thinking": true
+        },
+        {
+          "name": "non-thinking",
+          "temperature": 0.7,
+          "top_p": 0.8,
+          "top_k": 20,
+          "min_p": 0.0,
+          "presence_penalty": 1.5,
+          "repetition_penalty": 1.0,
+          "enable_thinking": false
+        }
+      ]
+    }
+  ]
+}
