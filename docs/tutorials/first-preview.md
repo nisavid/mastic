@@ -71,7 +71,7 @@ mastic setup --profile recommended
 
 MASTIC inspects the host and presents the selected runtime, exact model
 revision, service and route names, capacity, Application Configuration Targets,
-host preflight, and planned mutations. Notice that the preview keeps desired
+host preflight, and proposed mutations. Notice that the preview keeps desired
 configuration, observed state, validation evidence, and readiness separate.
 
 When MASTIC asks for confirmation, answer `n`. The command exits without

@@ -7,7 +7,7 @@ Choose the page that matches what you need to do or understand now.
 Start here when you are new to the project and want a safe first encounter
 with its preview workflow.
 
-- [Preview your first local inference service](tutorials/first-plan.md) — install
+- [Preview your first local inference service](tutorials/first-preview.md) — install
   MASTIC, inspect an empty system, and review a resolved setup preview without
   applying it.
 

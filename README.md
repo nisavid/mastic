@@ -68,7 +68,7 @@ substantial; review the selected revisions, projected resources, Application
 Configuration Targets, preflight, and ordered operations before continuing.
 
 To learn the workflow without applying the previewed operations, follow
-[Preview your first local inference service](docs/tutorials/first-plan.md).
+[Preview your first local inference service](docs/tutorials/first-preview.md).
 
 ## Operate an existing stack
 
