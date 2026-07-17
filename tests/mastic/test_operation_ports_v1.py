@@ -168,7 +168,11 @@ class OperationPortTests(unittest.TestCase):
         port = ClientOperationPort(
             lambda operation, name, parameters, settings: adapter,
             configuration,
-            request=lambda endpoint, model, sampling: {"model": model, **sampling},
+            request=lambda target, endpoint, model, sampling: {
+                "target": target,
+                "model": model,
+                **sampling,
+            },
             settings=lambda name: persisted.get(name),
             record=lambda name, value: (
                 records.append((name, value)),
@@ -186,6 +190,7 @@ class OperationPortTests(unittest.TestCase):
 
         self.assertTrue(configured["result"]["changed"])
         self.assertEqual(records[0][1].service, "coding-internal")
+        self.assertEqual(tested["response"]["target"], "codex")
         self.assertEqual(tested["response"]["model"], "coding")
         self.assertTrue(removed["changed"])
         self.assertEqual(
@@ -221,7 +226,11 @@ class OperationPortTests(unittest.TestCase):
         port = ClientOperationPort(
             adapter_factory,
             configuration,
-            request=lambda endpoint, model, sampling: {"model": model, **sampling},
+            request=lambda target, endpoint, model, sampling: {
+                "target": target,
+                "model": model,
+                **sampling,
+            },
             settings=lambda name: records.get(name),
             record=lambda name, value: (
                 records.pop(name, None)
@@ -251,9 +260,12 @@ class OperationPortTests(unittest.TestCase):
             stored.sampling["reflect"], ClientSamplingSettings(temperature=0.9)
         )
 
-        port.execute("client.test", {"resource": "hindsight", "profile": "retain"})
+        tested = port.execute(
+            "client.test", {"resource": "hindsight", "profile": "retain"}
+        )
         port.execute("client.remove", {"resource": "hindsight"})
 
+        self.assertEqual(tested["response"]["target"], "hindsight")
         self.assertEqual(factory_calls[1][3].profile, "agent-memory")
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
         self.assertNotIn("hindsight", records)
@@ -270,7 +282,7 @@ class OperationPortTests(unittest.TestCase):
                     "surprise": SamplingProfile(temperature=0.6),
                 },
             ),
-            request=lambda endpoint, model, sampling: {},
+            request=lambda target, endpoint, model, sampling: {},
         )
 
         with self.assertRaisesRegex(ApplicationError, "requires sampling profiles"):
@@ -294,7 +306,7 @@ class OperationPortTests(unittest.TestCase):
             lambda name, parameters, settings: ClientConfiguration(
                 "http://127.0.0.1:8766/v1", "memory"
             ),
-            request=lambda endpoint, model, sampling: {},
+            request=lambda target, endpoint, model, sampling: {},
             settings=lambda name: stored,
         )
 
@@ -331,7 +343,7 @@ class OperationPortTests(unittest.TestCase):
             lambda name, parameters, settings: ClientConfiguration(
                 "http://127.0.0.1:8766/v1", "coding"
             ),
-            request=lambda endpoint, model, sampling: {},
+            request=lambda target, endpoint, model, sampling: {},
             settings=lambda name: stored,
             record=lambda name, value: recorded.append((name, value)),
         )

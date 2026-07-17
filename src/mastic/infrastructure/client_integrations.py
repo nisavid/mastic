@@ -239,7 +239,7 @@ TestRequest = Callable[[str, str, Mapping[str, object]], TestResult]
 
 
 class LocalClientIntegrationFactory:
-    """Select one precise local client integration from operation intent and state."""
+    """Select one precise Application Configuration Target from intent and state."""
 
     def __init__(
         self,
@@ -256,7 +256,7 @@ class LocalClientIntegrationFactory:
         for path, label in (
             (self.codex_config_path, "Codex config path"),
             (self.hindsight_profiles_dir, "Hindsight profiles directory"),
-            (self.ownership_dir, "client ownership directory"),
+            (self.ownership_dir, "application-target ownership directory"),
         ):
             if not path.is_absolute():
                 raise ValueError(f"{label} must be absolute")
@@ -268,7 +268,7 @@ class LocalClientIntegrationFactory:
         parameters: Mapping[str, object],
         settings: ClientSettings | None,
     ) -> CodexClientIntegration | HindsightClientIntegration:
-        _safe_directory(self.ownership_dir, "client ownership directory")
+        _safe_directory(self.ownership_dir, "application-target ownership directory")
         if name == "codex":
             _safe_target(self.codex_config_path, "Codex config")
             return CodexClientIntegration(
@@ -279,7 +279,7 @@ class LocalClientIntegrationFactory:
                 catalog_backup_path=self.ownership_dir / "codex-model-catalog.backup",
             )
         if name != "hindsight":
-            raise ValueError(f"unsupported Client Integration: {name}")
+            raise ValueError(f"unsupported Application Configuration Target: {name}")
         _safe_directory(self.hindsight_profiles_dir, "Hindsight profiles directory")
         if operation == "client.configure":
             profile = parameters.get("profile")
@@ -1089,7 +1089,9 @@ def _profile_endpoint(
     configuration: ClientConfiguration, client: str, profile: str
 ) -> str:
     if profile not in configuration.sampling_profiles:
-        raise ValueError(f"required {client} sampling profile is missing: {profile}")
+        raise ValueError(
+            f"required {client} Application Configuration Target profile is missing: {profile}"
+        )
     root = configuration.gateway_endpoint.removesuffix("/").removesuffix("/v1")
     return f"{root}/clients/{client}/profiles/{profile}/v1"
 
@@ -1103,7 +1105,7 @@ def _validate_client_profiles(configuration: ClientConfiguration, client: str) -
     missing = required - set(configuration.sampling_profiles)
     if missing:
         raise ValueError(
-            f"{client} requires sampling profiles: {', '.join(sorted(required))}"
+            f"{client} Application Configuration Target requires sampling profiles: {', '.join(sorted(required))}"
         )
     if client == "codex":
         coding = configuration.sampling_profiles["coding"]
@@ -1135,10 +1137,14 @@ def _redact_change(change: SemanticChange) -> SemanticChange:
 def _backup_env_value(path: Path, key: str) -> tuple[str, str]:
     raw, existed = _read(path)
     if not existed:
-        raise ClientIntegrationConflict("client backup is missing")
+        raise ClientIntegrationConflict(
+            "Application Configuration Target backup is missing"
+        )
     present, value, line = _EnvDocument(raw.decode()).lookup(key)
     if not present or value is None or line is None:
-        raise ClientIntegrationConflict(f"client backup lacks {key}")
+        raise ClientIntegrationConflict(
+            f"Application Configuration Target backup lacks {key}"
+        )
     return value, line
 
 
@@ -1308,7 +1314,7 @@ def _validate_manifest_paths(
 
 
 def _read(path: Path) -> tuple[bytes, bool]:
-    _safe_target(path, "managed client file")
+    _safe_target(path, "managed application-target file")
     try:
         return path.read_bytes(), True
     except FileNotFoundError:
@@ -1352,7 +1358,7 @@ def _restore_files(snapshot: tuple[tuple[Path, bytes, bool], ...]) -> None:
 
 
 def _atomic_replace(path: Path, payload: bytes) -> None:
-    _safe_target(path, "managed client file")
+    _safe_target(path, "managed application-target file")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"

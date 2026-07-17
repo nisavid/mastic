@@ -684,7 +684,7 @@ class MasticApp(App[None]):
             "runtimes": ("Runtime Installations", "runtime.list"),
             "models": ("Models", "model.list"),
             "operations": ("Durable operations", "operation.list"),
-            "clients": ("Client Integrations", "client.list"),
+            "clients": ("Application Configuration Targets", "client.list"),
             "configuration": ("Configuration", "config.show"),
             "doctor": ("Doctor", "doctor"),
         }

@@ -227,9 +227,9 @@ class SetupOperationPort:
 
     def _setup_plan(self, parameters: Mapping[str, object]) -> SetupPlan:
         profile = str(parameters.get("profile", "recommended"))
-        if profile not in {"recommended", "expert"}:
+        if profile not in {"recommended", "exact"}:
             raise ApplicationError(
-                "invalid_parameter", "setup profile must be recommended or expert"
+                "invalid_parameter", "setup profile must be recommended or exact"
             )
         offline = bool(parameters.get("offline", False))
         try:
@@ -237,14 +237,13 @@ class SetupOperationPort:
             prior = tuple(self._evidence.load("setup"))
             capacity = parameters.get("capacity")
             capacity_name = str(capacity) if capacity is not None else None
-            if profile == "expert":
-                missing = _missing_expert_selection(parameters)
+            if profile == "exact":
+                missing = _missing_exact_selection(parameters)
                 if missing:
                     raise ValueError(
-                        "expert setup requires an exact selection: "
-                        + ", ".join(missing)
+                        "exact setup requires an exact selection: " + ", ".join(missing)
                     )
-                selection = _selection(parameters, self._planner.expert_template)
+                selection = _selection(parameters, self._planner.exact_template)
                 explicit_selection = True
             else:
                 baseline = self._planner.plan(
@@ -422,6 +421,25 @@ class SetupOperationPort:
             return self._supervisor.execute(
                 "service.start", {"resource": selection.service_name}
             )
+        if step.id in {"client.test.codex", "client.test.hindsight"}:
+            target = str(step.inputs["target"])
+            result = self._clients.execute(
+                "client.test",
+                {
+                    "resource": target,
+                    "profile": str(step.inputs["profile"]),
+                },
+            )
+            response = result.get("response")
+            if (
+                not isinstance(response, Mapping)
+                or response.get("ok") is not True
+                or response.get("text") != "mastic target ready"
+            ):
+                raise RuntimeError(
+                    f"the {target} Application Configuration Target canary did not return the exact readiness response"
+                )
+            return result
         if step.id == "verify.request":
             result = self._verifier.execute("verify.request", step.inputs)
             if result.get("ok") is not True or result.get("text") != "mastic ready":
@@ -641,7 +659,7 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
     )
 
 
-def _missing_expert_selection(parameters: Mapping[str, object]) -> tuple[str, ...]:
+def _missing_exact_selection(parameters: Mapping[str, object]) -> tuple[str, ...]:
     supplied = parameters.get("selection")
     if isinstance(supplied, ExactSetupSelection):
         return ()
@@ -715,6 +733,16 @@ def _restore_material(evidence: Sequence[SetupEvidence]) -> dict[str, object]:
 def _content_free_result(
     step_id: str, result: Mapping[str, object]
 ) -> Mapping[str, object]:
+    if step_id.startswith("client.test."):
+        response = result.get("response")
+        if not isinstance(response, Mapping):
+            return {"profile": result.get("profile"), "ok": False}
+        text = str(response.get("text", ""))
+        return {
+            "profile": result.get("profile"),
+            "ok": response.get("ok") is True,
+            "response_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        }
     if step_id != "verify.request":
         return result
     text = str(result.get("text", ""))

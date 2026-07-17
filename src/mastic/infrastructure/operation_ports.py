@@ -113,7 +113,7 @@ class SupervisorOperationPort:
 
 
 class ClientOperationPort:
-    """Preview, apply, test, and precisely remove owned client integrations."""
+    """Operate owned Application Configuration Targets through one contract."""
 
     def __init__(
         self,
@@ -124,7 +124,7 @@ class ClientOperationPort:
             [str, Mapping[str, object], ClientSettings | None], ClientConfiguration
         ],
         *,
-        request: Callable[[str, str, Mapping[str, object]], object],
+        request: Callable[[str, str, str, Mapping[str, object]], object],
         settings: Callable[[str], ClientSettings | None] | None = None,
         record: Callable[[str, ClientSettings | None], object] | None = None,
     ) -> None:
@@ -142,7 +142,7 @@ class ClientOperationPort:
         if operation != "client.configure" and stored is None:
             raise ApplicationError(
                 "resource_not_found",
-                f"Client Integration {name!r} is not configured",
+                f"Application Configuration Target {name!r} is not configured",
                 next_actions=(f"mastic client configure {name}",),
             )
         try:
@@ -205,7 +205,9 @@ class ClientOperationPort:
             try:
                 response = adapter.test(
                     configuration,
-                    self._request,
+                    lambda endpoint, model, payload: self._request(
+                        name, endpoint, model, payload
+                    ),
                     profile=profile,
                 )
             except KeyError as error:

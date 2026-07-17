@@ -277,11 +277,11 @@ def _summary(name: str) -> str:
         "service.check": "Check one service's desired state, run, and Gateway route.",
         "operation.list": "List durable physical operations and their current status.",
         "operation.inspect": "Inspect one durable operation and its recorded events.",
-        "client.list": "List mastic-owned Client Integrations.",
-        "client.inspect": "Inspect one owned client endpoint and sampling configuration.",
-        "client.configure": "Configure Codex or Hindsight for one Gateway route.",
-        "client.test": "Send a bounded verification request through one configured client.",
-        "client.remove": "Remove only the settings owned by one Client Integration.",
+        "client.list": "List MASTIC-owned Application Configuration Targets.",
+        "client.inspect": "Inspect one owned Application Configuration Target and its sampling configuration.",
+        "client.configure": "Configure Codex or Hindsight as one Application Configuration Target.",
+        "client.test": "Send a bounded verification request through one configured Application Configuration Target.",
+        "client.remove": "Remove only the settings owned by one Application Configuration Target.",
         "config.path": "Show the active desired-state file path.",
         "config.show": "Show validated desired state without starting the Supervisor.",
         "config.validate": "Validate current desired state and report its revision.",
@@ -339,14 +339,14 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         "model": "Model repository, installation, alias, or exact revision; discover values with `mastic model search` or `model list`.",
         "service": "Inference Service name; discover values with `mastic service list`.",
         "operation": "Durable operation ID; discover values with `mastic operation list`.",
-        "client": "Client Integration name; discover values with `mastic client list`.",
+        "client": "Application Configuration Target name; discover values with `mastic client list`.",
     }
     if name == "setup":
         return (
             _option(
                 "profile",
                 "Setup profile to preselect; the complete plan remains editable.",
-                accepted=("recommended", "expert"),
+                accepted=("recommended", "exact"),
             ),
             _option(
                 "capacity",
@@ -401,12 +401,12 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "clients",
-                "JSON array of Client Integrations to configure.",
+                "JSON array of Application Configuration Targets to configure.",
                 value_type="json",
             ),
             _option(
                 "client_options",
-                "JSON object of per-client settings; Hindsight requires a profile.",
+                "JSON object of per-target settings; Hindsight requires a profile.",
                 value_type="json",
             ),
             _option(
@@ -652,7 +652,9 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
     if name == "client.configure":
         return (
             _argument(
-                "client", "Client Integration name.", accepted=("codex", "hindsight")
+                "client",
+                "Application Configuration Target name.",
+                accepted=("codex", "hindsight"),
             ),
             _option(
                 "service",

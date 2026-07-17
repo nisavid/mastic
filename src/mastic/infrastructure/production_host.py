@@ -352,7 +352,8 @@ def client_port(
     return ClientOperationPort(
         factory,
         configuration,
-        request=lambda endpoint, route, payload: client_request(
+        request=lambda target, endpoint, route, payload: client_request(
+            target,
             endpoint,
             route,
             payload,
@@ -380,24 +381,37 @@ def coherent_client_context(
 
 
 def client_request(
+    target: str,
     endpoint: str,
     route: str,
     payload: Mapping[str, object],
     *,
     credential: GatewayCredential | None = None,
 ) -> Mapping[str, object]:
-    response = httpx.post(
-        endpoint.rstrip("/") + "/chat/completions",
-        json={
+    if target == "codex":
+        path = "/responses"
+        body = {
+            **dict(payload),
+            "model": route,
+            "input": "Respond with exactly: mastic target ready",
+        }
+    elif target == "hindsight":
+        path = "/chat/completions"
+        body = {
             **dict(payload),
             "model": route,
             "messages": [
                 {
                     "role": "user",
-                    "content": "Respond with exactly: mastic client ready",
+                    "content": "Respond with exactly: mastic target ready",
                 }
             ],
-        },
+        }
+    else:
+        raise ValueError(f"unsupported Application Configuration Target: {target}")
+    response = httpx.post(
+        endpoint.rstrip("/") + path,
+        json=body,
         headers=(
             {"authorization": credential.authorization_header()}
             if credential is not None
@@ -411,7 +425,45 @@ def client_request(
     value = response.json()
     if not isinstance(value, Mapping):
         raise RuntimeError("Gateway returned a non-object response")
-    return dict(value)
+    try:
+        if target == "codex":
+            output = value["output"]
+            if not isinstance(output, list):
+                raise TypeError("Responses output must be a list")
+            message = next(
+                item
+                for item in output
+                if isinstance(item, Mapping) and item.get("type") == "message"
+            )
+            content = message["content"]
+            if not isinstance(content, list):
+                raise TypeError("Responses message content must be a list")
+            text = next(
+                item["text"]
+                for item in content
+                if isinstance(item, Mapping) and item.get("type") == "output_text"
+            )
+        else:
+            choices = value["choices"]
+            if not isinstance(choices, list):
+                raise TypeError("Chat Completions choices must be a list")
+            first = choices[0]
+            if not isinstance(first, Mapping):
+                raise TypeError("Chat Completions choice must be an object")
+            message = first["message"]
+            if not isinstance(message, Mapping):
+                raise TypeError("Chat Completions message must be an object")
+            text = message["content"]
+    except (KeyError, IndexError, StopIteration, TypeError) as error:
+        contract = "Responses" if target == "codex" else "Chat Completions"
+        raise RuntimeError(
+            f"Gateway returned an invalid {contract} response"
+        ) from error
+    return {
+        "ok": response.is_success,
+        "text": str(text).strip(),
+        "response": dict(value),
+    }
 
 
 def removal_inventory(
@@ -506,7 +558,7 @@ def default_sampling(
 ) -> Mapping[str, ClientSamplingSettings]:
     bindings = _CLIENT_PROFILE_BINDINGS.get(name)
     if bindings is None:
-        raise ValueError(f"unsupported Client Integration: {name}")
+        raise ValueError(f"unsupported Application Configuration Target: {name}")
     catalogue = ModelProfileCatalogue.load_builtin()
     result = {}
     for workload, profile_name in bindings.items():

@@ -185,11 +185,64 @@ class SetupV1Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
             self.planner.plan(undersized)
 
-        expert = self.planner.plan(
+        exact = self.planner.plan(
             undersized,
             SetupRequest(selection=self.compact.selection),
         )
-        self.assertEqual(expert.profile_name, "custom")
+        self.assertEqual(exact.profile_name, "custom")
+
+    def test_selected_codex_target_has_its_own_resumable_canary_step(self) -> None:
+        exact = replace(
+            self.workstation.selection,
+            clients=("codex",),
+            client_options={},
+        )
+
+        plan = self.planner.plan(
+            SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True),
+            SetupRequest(selection=exact, confirmed=True),
+        )
+
+        canary = plan.steps[-1]
+        self.assertEqual(canary.id, "client.test.codex")
+        self.assertEqual(
+            dict(canary.inputs),
+            {
+                "target": "codex",
+                "profile": "coding",
+                "service": "coding",
+                "route": "coding",
+                "endpoint": "http://127.0.0.1:8766/v1",
+                "request": "Respond with exactly: mastic target ready",
+            },
+        )
+
+    def test_selected_hindsight_target_has_its_own_resumable_canary_step(self) -> None:
+        exact = replace(
+            self.workstation.selection,
+            clients=("hindsight",),
+            client_options={"hindsight": {"profile": "project-memory"}},
+        )
+
+        plan = self.planner.plan(
+            SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True),
+            SetupRequest(selection=exact, confirmed=True),
+        )
+
+        canary = plan.steps[-1]
+        self.assertEqual(canary.id, "client.test.hindsight")
+        self.assertEqual(
+            dict(canary.inputs),
+            {
+                "target": "hindsight",
+                "configuration_profile": "project-memory",
+                "profile": "retain",
+                "service": "coding",
+                "route": "coding",
+                "endpoint": "http://127.0.0.1:8766/v1",
+                "request": "Respond with exactly: mastic target ready",
+            },
+        )
 
     def test_service_identity_and_options_are_exact_immutable_plan_inputs(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
@@ -326,7 +379,7 @@ class SetupV1Tests(unittest.TestCase):
                 ),
             )
 
-    def test_resume_skips_a_completed_download_and_ends_with_a_real_request(
+    def test_resume_skips_a_completed_download_and_ends_with_target_canaries(
         self,
     ) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
@@ -343,8 +396,8 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         self.assertNotIn("model.install", executed)
-        self.assertEqual(executed[-1], "verify.request")
-        self.assertEqual(result.evidence[-1].step_id, "verify.request")
+        self.assertEqual(executed[-2:], ["client.test.codex", "client.test.hindsight"])
+        self.assertEqual(result.evidence[-1].step_id, "client.test.hindsight")
         self.assertTrue(result.complete)
 
     def test_changed_supervisor_protocol_invalidates_old_activation_evidence(

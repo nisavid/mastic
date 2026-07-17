@@ -136,7 +136,14 @@ class SetupOperationPortTests(unittest.TestCase):
             }
         )
         self.config = FakeOwner()
-        self.clients = FakeOwner()
+        self.clients = FakeOwner(
+            {
+                "client.test": lambda parameters: {
+                    "profile": parameters["profile"],
+                    "response": {"ok": True, "text": "mastic target ready"},
+                }
+            }
+        )
         self.supervisor = FakeOwner()
         self.verifier = FakeOwner(
             {"verify.request": {"ok": True, "text": "mastic ready"}}
@@ -194,7 +201,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertTrue(preview["selection"]["pinned"])
         self.assertTrue(preview["selection"]["service_options"]["mtp"])
         self.assertEqual(len(preview["plan_fingerprint"]), 64)
-        self.assertEqual(preview["steps"][-1]["id"], "verify.request")
+        self.assertEqual(preview["steps"][-1]["id"], "client.test.hindsight")
         self.assertEqual(
             self.runtime.calls
             + self.model.calls
@@ -265,15 +272,122 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(
             self.supervisor.calls[-1], ("service.start", {"resource": "coding"})
         )
-        self.assertEqual(self.verifier.calls[-1][0], "verify.request")
-        self.assertEqual(self.verifier.calls[-1][1]["model"], "engineering")
+        self.assertEqual(self.verifier.calls, [])
         self.assertEqual(
-            {call[1]["service"] for call in self.clients.calls}, {"coding"}
+            [call[1]["resource"] for call in self.clients.calls[-2:]],
+            ["codex", "hindsight"],
         )
-        self.assertEqual(len(self.evidence.items["setup"]), 9)
+        self.assertEqual(
+            {
+                call[1]["service"]
+                for call in self.clients.calls
+                if call[0] == "client.configure"
+            },
+            {"coding"},
+        )
+        self.assertEqual(len(self.evidence.items["setup"]), 10)
         verification_evidence = self.evidence.items["setup"][-1].detail
         self.assertNotIn("mastic ready", verification_evidence)
         self.assertIn("response_sha256", verification_evidence)
+
+    def test_confirmed_plan_executes_each_selected_target_canary(self) -> None:
+        self.clients.results["client.test"] = lambda parameters: {
+            "profile": parameters["profile"],
+            "response": {
+                "ok": True,
+                "text": "mastic target ready",
+                "contract": parameters["resource"],
+            },
+        }
+        port = self.port()
+        preview = port.preview({})
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "plan_fingerprint": preview["plan_fingerprint"],
+            },
+        )
+
+        tests = [call for call in self.clients.calls if call[0] == "client.test"]
+        self.assertEqual(
+            tests,
+            [
+                (
+                    "client.test",
+                    {"resource": "codex", "profile": "coding"},
+                ),
+                (
+                    "client.test",
+                    {"resource": "hindsight", "profile": "retain"},
+                ),
+            ],
+        )
+        self.assertEqual(self.verifier.calls, [])
+        self.assertEqual(
+            list(result["results"])[-2:],
+            ["client.test.codex", "client.test.hindsight"],
+        )
+
+    def test_failed_target_canary_is_attributed_and_resumes_at_that_target(
+        self,
+    ) -> None:
+        def fail_hindsight(parameters):
+            if parameters["resource"] == "hindsight":
+                return {
+                    "profile": parameters["profile"],
+                    "response": {"ok": False, "text": "wrong"},
+                }
+            return {
+                "profile": parameters["profile"],
+                "response": {"ok": True, "text": "mastic target ready"},
+            }
+
+        self.clients.results["client.test"] = fail_hindsight
+        port = self.port()
+        preview = port.preview({})
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "setup",
+                {
+                    "confirmed": True,
+                    "plan_fingerprint": preview["plan_fingerprint"],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "setup_interrupted")
+        self.assertIn("client.test.hindsight", str(raised.exception))
+        self.assertEqual(
+            [item.step_id for item in self.evidence.items["setup"]][-1],
+            "client.test.codex",
+        )
+
+        self.clients.calls.clear()
+        self.clients.results["client.test"] = lambda parameters: {
+            "profile": parameters["profile"],
+            "response": {"ok": True, "text": "mastic target ready"},
+        }
+        resumed = port.preview({})
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "plan_fingerprint": resumed["plan_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(
+            self.clients.calls,
+            [
+                (
+                    "client.test",
+                    {"resource": "hindsight", "profile": "retain"},
+                )
+            ],
+        )
 
     def test_editing_service_identity_or_options_changes_plan_identity(self):
         port = self.port()
@@ -316,15 +430,15 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "plan_changed")
         self.assertEqual(self.runtime.calls, [])
 
-    def test_expert_setup_requires_every_exact_identity_field(self) -> None:
+    def test_exact_setup_requires_every_exact_identity_field(self) -> None:
         port = self.port()
 
-        with self.assertRaisesRegex(ApplicationError, "expert setup requires"):
-            port.preview({"profile": "expert", "model_repository": "acme/model"})
+        with self.assertRaisesRegex(ApplicationError, "exact setup requires"):
+            port.preview({"profile": "exact", "model_repository": "acme/model"})
 
         preview = port.preview(
             {
-                "profile": "expert",
+                "profile": "exact",
                 "runtime_name": "optiq",
                 "runtime_version": "0.3.3",
                 "runtime_lock_digest": "sha256:" + "a" * 64,
