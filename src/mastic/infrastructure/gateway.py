@@ -42,19 +42,6 @@ _SSE_INSPECTION_LIMIT = 1024 * 1024
 _TERMINAL_RESPONSE_EVENTS = frozenset(
     {"response.completed", "response.failed", "response.incomplete"}
 )
-_RESPONSE_ADAPTATION_FAILED_SSE = (
-    b"event: response.failed\n"
-    b'data: {"type":"response.failed","response":'
-    b'{"id":"mastic_gateway","object":"response","created_at":0,'
-    b'"status":"failed","completed_at":null,"error":'
-    b'{"code":"server_error","message":"MASTIC could not safely adapt the upstream response."},'
-    b'"incomplete_details":null,"instructions":null,"max_output_tokens":null,'
-    b'"model":"mastic-gateway","output":[],"previous_response_id":null,'
-    b'"reasoning_effort":null,"store":false,"temperature":1,'
-    b'"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],'
-    b'"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{}},'
-    b'"sequence_number":0}\n\n'
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +61,30 @@ class GatewayRequestProfile:
 
     service: str
     parameters: Mapping[str, object]
+
+
+@dataclass(slots=True)
+class _ResponsesSSEState:
+    response_id: str | None = None
+    next_sequence_number: int = 0
+
+    def observe(self, frame: bytes) -> None:
+        payload = _sse_json_payload(frame)
+        if not isinstance(payload, dict):
+            return
+        sequence_number = payload.get("sequence_number")
+        if type(sequence_number) is int:
+            self.next_sequence_number = max(
+                self.next_sequence_number, sequence_number + 1
+            )
+        response = payload.get("response")
+        if isinstance(response, dict):
+            response_id = response.get("id")
+            if isinstance(response_id, str) and response_id:
+                self.response_id = response_id
+        response_id = payload.get("response_id")
+        if isinstance(response_id, str) and response_id:
+            self.response_id = response_id
 
 
 class GatewayRouteResolver(Protocol):
@@ -185,66 +196,80 @@ async def _prefetch_adapted_sse(
     *,
     limit: int,
 ) -> AsyncIterator[bytes]:
-    chunks = upstream.aiter_bytes().__aiter__()
+    frames = _iter_bounded_sse_frames(upstream, limit).__aiter__()
+    try:
+        first_raw, complete = await anext(frames)
+    except StopAsyncIteration:
+        return _empty_chunks()
+    if not complete:
+        return _single_chunk(first_raw)
+    first = _adapt_sse_frame(first_raw, adapter, reconstruction, limit)
+    state = _ResponsesSSEState()
+    state.observe(first_raw)
+    return _iter_adapted_sse_after_first(
+        first,
+        first_raw,
+        frames,
+        adapter,
+        reconstruction,
+        limit,
+        state,
+    )
+
+
+async def _iter_bounded_sse_frames(
+    upstream: httpx.Response, limit: int
+) -> AsyncIterator[tuple[bytes, bool]]:
     pending = bytearray()
-    while True:
-        frame = _pop_sse_message(pending, include_separator=True)
-        if frame is not None:
-            first = _adapt_sse_frame(frame, adapter, reconstruction, limit)
-            return _iter_adapted_sse_after_first(
-                first,
-                frame,
-                chunks,
-                pending,
-                adapter,
-                reconstruction,
-                limit,
-            )
-        if len(pending) > limit:
-            raise ResponseAdaptationTooLarge(limit)
-        try:
-            chunk = await anext(chunks)
-        except StopAsyncIteration:
-            if pending:
-                first = bytes(pending)
-                pending.clear()
-                return _single_chunk(first)
-            return _empty_chunks()
-        pending.extend(chunk)
+    async for chunk in upstream.aiter_bytes():
+        view = memoryview(chunk)
+        offset = 0
+        while offset < len(view):
+            available = limit - len(pending)
+            if available <= 0:
+                raise ResponseAdaptationTooLarge(limit)
+            take = min(available, len(view) - offset)
+            pending.extend(view[offset : offset + take])
+            offset += take
+            while (
+                frame := _pop_sse_message(pending, include_separator=True)
+            ) is not None:
+                yield frame, True
+            if len(pending) == limit and offset < len(view):
+                raise ResponseAdaptationTooLarge(limit)
+    if pending:
+        yield bytes(pending), False
 
 
 async def _iter_adapted_sse_after_first(
     first: bytes,
     first_raw: bytes,
-    chunks: AsyncIterator[bytes],
-    pending: bytearray,
+    frames: AsyncIterator[tuple[bytes, bool]],
     adapter: CodexNamespaceAdapter,
     reconstruction: ReconstructionMap,
     limit: int,
+    state: _ResponsesSSEState,
 ) -> AsyncIterator[bytes]:
     yield first
     if _is_terminal_sse_event(first_raw):
         return
 
-    async for chunk in chunks:
-        pending.extend(chunk)
-        while True:
-            frame = _pop_sse_message(pending, include_separator=True)
-            if frame is None:
-                break
+    try:
+        async for frame, complete in frames:
+            if not complete:
+                yield frame
+                return
             try:
                 transformed = _adapt_sse_frame(frame, adapter, reconstruction, limit)
             except ResponseAdaptationTooLarge:
-                yield _RESPONSE_ADAPTATION_FAILED_SSE
+                yield _response_adaptation_failed_sse(state)
                 return
+            state.observe(frame)
             yield transformed
             if _is_terminal_sse_event(frame):
                 return
-        if len(pending) > limit:
-            yield _RESPONSE_ADAPTATION_FAILED_SSE
-            return
-    if pending:
-        yield bytes(pending)
+    except ResponseAdaptationTooLarge:
+        yield _response_adaptation_failed_sse(state)
 
 
 def _adapt_sse_frame(
@@ -268,6 +293,54 @@ async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
 async def _empty_chunks() -> AsyncIterator[bytes]:
     if False:
         yield b""
+
+
+def _response_adaptation_failed_sse(state: _ResponsesSSEState) -> bytes:
+    if state.response_id is None:
+        event_name = "error"
+        payload: dict[str, Any] = {
+            "type": "error",
+            "code": "response_adaptation_too_large",
+            "message": "MASTIC could not safely adapt the upstream response.",
+            "param": None,
+            "sequence_number": state.next_sequence_number,
+        }
+    else:
+        event_name = "response.failed"
+        payload = {
+            "type": "response.failed",
+            "response": {
+                "id": state.response_id,
+                "object": "response",
+                "created_at": 0,
+                "status": "failed",
+                "completed_at": None,
+                "error": {
+                    "code": "server_error",
+                    "message": "MASTIC could not safely adapt the upstream response.",
+                },
+                "incomplete_details": None,
+                "instructions": None,
+                "max_output_tokens": None,
+                "model": "mastic-gateway",
+                "output": [],
+                "previous_response_id": None,
+                "reasoning_effort": None,
+                "store": False,
+                "temperature": 1,
+                "text": {"format": {"type": "text"}},
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1,
+                "truncation": "disabled",
+                "usage": None,
+                "user": None,
+                "metadata": {},
+            },
+            "sequence_number": state.next_sequence_number,
+        }
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    return f"event: {event_name}\n".encode() + b"data: " + encoded + b"\n\n"
 
 
 def _pop_sse_message(pending: bytearray, *, include_separator: bool) -> bytes | None:
@@ -309,6 +382,21 @@ def _is_terminal_sse_event(event: bytes) -> bool:
     return (
         isinstance(payload, dict) and payload.get("type") in _TERMINAL_RESPONSE_EVENTS
     )
+
+
+def _sse_json_payload(event: bytes) -> Any:
+    data_lines = []
+    for line in event.splitlines():
+        field, separator, value = line.partition(b":")
+        if separator and field == b"data":
+            data_lines.append(value.lstrip(b" "))
+    data = b"\n".join(data_lines).strip()
+    if not data or data == b"[DONE]":
+        return None
+    try:
+        return json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def validate_loopback_bind(host: str) -> str:
