@@ -86,7 +86,7 @@ class OperationDispatcher:
         self._handlers[name] = handler
 
     def register_preview(self, name: str, handler: Handler) -> None:
-        """Register a side-effect-free resolved-plan handler."""
+        """Register a side-effect-free resolved-preview handler."""
 
         if name not in self._catalogue:
             raise ApplicationError("unknown_operation", f"unknown operation: {name}")
@@ -95,7 +95,7 @@ class OperationDispatcher:
         self._preview_handlers[name] = handler
 
     def preview(self, request: OperationRequest) -> OperationResult:
-        """Resolve an operation plan without activating or executing it."""
+        """Resolve an operation preview without activating or executing it."""
 
         if request.name not in self._catalogue:
             raise ApplicationError(

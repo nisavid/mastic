@@ -64,6 +64,14 @@ class PostTerminalStream(ChunkStream):
         raise AssertionError("Gateway pulled the upstream after semantic completion")
 
 
+class FailingReadStream(ChunkStream):
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.pulled += 1
+            yield chunk
+        raise httpx.ReadError("upstream reset while reading")
+
+
 class FakeUpstreamClient:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
@@ -906,6 +914,38 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
+    def test_responses_json_read_failure_closes_upstream_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = FailingReadStream([b'{"id":"resp-1",'])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "upstream_unavailable")
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
     def test_responses_json_limit_rejects_namespace_reconstruction_expansion(
         self,
     ) -> None:
@@ -1037,6 +1077,38 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(
             response.json()["error"]["code"], "response_adaptation_too_large"
         )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_sse_prefetch_read_failure_closes_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = FailingReadStream([b'data: {"type":"response.output_text.delta"'])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "stream": True, "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["error"]["code"], "upstream_unavailable")
         self.assertTrue(stream.closed)
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)

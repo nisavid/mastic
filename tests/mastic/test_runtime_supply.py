@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from mastic.infrastructure.runtime_supply import (
     RuntimeCatalogue,
-    RuntimeChangePlanner,
+    RuntimeChangeResolver,
     RuntimeInstallation,
     RuntimeManager,
     RuntimeProbeResult,
@@ -414,21 +414,23 @@ class RuntimeChangePlannerTests(unittest.TestCase):
             capabilities=frozenset(),
         )
 
-        plan = RuntimeChangePlanner().plan_remove(
+        preview = RuntimeChangeResolver().preview_remove(
             installation, referenced_services=("coding", "memory")
         )
 
-        self.assertFalse(plan.allowed)
-        self.assertEqual(plan.referenced_services, ("coding", "memory"))
-        self.assertIn("reassign referenced services", plan.steps[0])
+        self.assertFalse(preview.allowed)
+        self.assertEqual(preview.referenced_services, ("coding", "memory"))
+        self.assertIn("reassign referenced services", preview.steps[0])
 
     def test_update_and_rollback_retain_the_other_installation(self) -> None:
         current = self._installation("optiq-old", "0.2.18")
         target = self._installation("optiq-new", "0.3.3")
-        planner = RuntimeChangePlanner()
+        resolver = RuntimeChangeResolver()
 
-        update = planner.plan_update(current, target, referenced_services=("coding",))
-        rollback = planner.plan_rollback(
+        update = resolver.preview_update(
+            current, target, referenced_services=("coding",)
+        )
+        rollback = resolver.preview_rollback(
             target, current, referenced_services=("coding",)
         )
 

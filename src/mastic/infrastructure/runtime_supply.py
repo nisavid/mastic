@@ -485,8 +485,8 @@ class RuntimeManager:
 
 
 @dataclass(frozen=True)
-class RuntimeChangePlan:
-    """A safe, inspectable transition plan; it does not mutate state."""
+class RuntimeChangePreview:
+    """A safe, inspectable transition preview; it does not mutate state."""
 
     operation: str
     allowed: bool
@@ -496,19 +496,19 @@ class RuntimeChangePlan:
     steps: tuple[str, ...]
 
 
-class RuntimeChangePlanner:
-    """Plan reference-aware update, rollback, and removal transitions."""
+class RuntimeChangeResolver:
+    """Resolve reference-aware update, rollback, and removal previews."""
 
-    def plan_update(
+    def preview_update(
         self,
         current: RuntimeInstallation,
         target: RuntimeInstallation,
         *,
         referenced_services: tuple[str, ...] = (),
-    ) -> RuntimeChangePlan:
+    ) -> RuntimeChangePreview:
         self._same_runtime(current, target)
         services = tuple(sorted(referenced_services))
-        return RuntimeChangePlan(
+        return RuntimeChangePreview(
             operation="update",
             allowed=True,
             current_installation=current.installation_id,
@@ -521,16 +521,16 @@ class RuntimeChangePlanner:
             ),
         )
 
-    def plan_rollback(
+    def preview_rollback(
         self,
         current: RuntimeInstallation,
         previous: RuntimeInstallation,
         *,
         referenced_services: tuple[str, ...] = (),
-    ) -> RuntimeChangePlan:
+    ) -> RuntimeChangePreview:
         self._same_runtime(current, previous)
         services = tuple(sorted(referenced_services))
-        return RuntimeChangePlan(
+        return RuntimeChangePreview(
             operation="rollback",
             allowed=True,
             current_installation=current.installation_id,
@@ -543,12 +543,12 @@ class RuntimeChangePlanner:
             ),
         )
 
-    def plan_remove(
+    def preview_remove(
         self,
         installation: RuntimeInstallation,
         *,
         referenced_services: tuple[str, ...] = (),
-    ) -> RuntimeChangePlan:
+    ) -> RuntimeChangePreview:
         services = tuple(sorted(referenced_services))
         if services:
             steps = (
@@ -557,7 +557,7 @@ class RuntimeChangePlanner:
             )
         else:
             steps = (f"remove immutable environment {installation.root}",)
-        return RuntimeChangePlan(
+        return RuntimeChangePreview(
             operation="remove",
             allowed=not services,
             current_installation=installation.installation_id,
