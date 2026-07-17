@@ -4,11 +4,11 @@ from dataclasses import replace
 from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
-    PlanExecutionError,
+    MutationExecutionError,
     RecommendedProfile,
     RemovalInventory,
     SetupEvidence,
-    SetupPlanner,
+    SetupResolver,
     SetupPreflight,
     SetupRequest,
     StepState,
@@ -49,12 +49,12 @@ class SetupV1Tests(unittest.TestCase):
             64 * GIB,
             _selection(service="coding", revision="2" * 40),
         )
-        self.planner = SetupPlanner((self.compact, self.workstation))
+        self.resolver = SetupResolver((self.compact, self.workstation))
 
     def test_capacity_profile_coherently_caps_service_and_application_targets(
         self,
     ) -> None:
-        planner = SetupPlanner(
+        resolver = SetupResolver(
             (self.compact,),
             capacity_profiles=(
                 CapacityProfile(
@@ -80,9 +80,9 @@ class SetupV1Tests(unittest.TestCase):
         )
         facts = SetupPreflight("darwin", "arm64", 48 * GIB, 200 * GIB, True)
 
-        balanced = planner.preview(planner.plan(facts))
-        native = planner.preview(
-            planner.plan(facts, SetupRequest(capacity_profile="native-context"))
+        balanced = resolver.preview(resolver.resolve(facts))
+        native = resolver.preview(
+            resolver.resolve(facts, SetupRequest(capacity_profile="native-context"))
         )
 
         self.assertEqual(balanced.capacity_profile, "balanced")
@@ -113,7 +113,7 @@ class SetupV1Tests(unittest.TestCase):
             invalid.validate_exact()
 
     def test_exact_selection_is_not_overwritten_by_default_capacity(self) -> None:
-        planner = SetupPlanner(
+        resolver = SetupResolver(
             (self.compact,),
             capacity_profiles=(
                 CapacityProfile(
@@ -138,19 +138,19 @@ class SetupV1Tests(unittest.TestCase):
             context_window=262_144,
         )
 
-        plan = planner.plan(
+        resolved = resolver.resolve(
             SetupPreflight("darwin", "arm64", 48 * GIB, 200 * GIB, True),
             SetupRequest(selection=exact, noninteractive=True, confirmed=True),
         )
 
-        self.assertIsNone(plan.capacity_profile)
-        self.assertEqual(plan.selection.context_window, 262_144)
-        self.assertEqual(plan.selection.service_options["max_concurrent"], 3)
+        self.assertIsNone(resolved.capacity_profile)
+        self.assertEqual(resolved.selection.context_window, 262_144)
+        self.assertEqual(resolved.selection.service_options["max_concurrent"], 3)
 
     def test_guided_plan_preselects_a_machine_aware_editable_exact_profile(
         self,
     ) -> None:
-        plan = self.planner.plan(
+        resolved = self.resolver.resolve(
             SetupPreflight(
                 platform="darwin",
                 machine="arm64",
@@ -160,9 +160,9 @@ class SetupV1Tests(unittest.TestCase):
             )
         )
 
-        preview = self.planner.preview(plan)
+        preview = self.resolver.preview(resolved)
 
-        self.assertEqual(plan.profile_name, "workstation")
+        self.assertEqual(resolved.profile_name, "workstation")
         self.assertTrue(preview.editable)
         self.assertEqual(preview.runtime, "optiq==0.2.18")
         self.assertEqual(preview.model_revision, "2" * 40)
@@ -189,9 +189,9 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
-            self.planner.plan(undersized)
+            self.resolver.resolve(undersized)
 
-        exact = self.planner.plan(
+        exact = self.resolver.resolve(
             undersized,
             SetupRequest(selection=self.compact.selection),
         )
@@ -204,12 +204,12 @@ class SetupV1Tests(unittest.TestCase):
             application_target_options={},
         )
 
-        plan = self.planner.plan(
+        resolved = self.resolver.resolve(
             SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True),
             SetupRequest(selection=exact, confirmed=True),
         )
 
-        canary = plan.steps[-1]
+        canary = resolved.steps[-1]
         self.assertEqual(canary.id, "gateway.contract.codex")
         self.assertEqual(
             dict(canary.inputs),
@@ -230,12 +230,12 @@ class SetupV1Tests(unittest.TestCase):
             application_target_options={"hindsight": {"profile": "project-memory"}},
         )
 
-        plan = self.planner.plan(
+        resolved = self.resolver.resolve(
             SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True),
             SetupRequest(selection=exact, confirmed=True),
         )
 
-        canary = plan.steps[-1]
+        canary = resolved.steps[-1]
         self.assertEqual(canary.id, "gateway.contract.hindsight")
         self.assertEqual(
             dict(canary.inputs),
@@ -274,10 +274,14 @@ class SetupV1Tests(unittest.TestCase):
             gateway_endpoint="http://127.0.0.1:8766/v1",
         )
 
-        plan = self.planner.plan(facts, SetupRequest(selection=exact))
-        service = next(step for step in plan.steps if step.id == "service.configure")
-        gateway = next(step for step in plan.steps if step.id == "gateway.configure")
-        verify = next(step for step in plan.steps if step.id == "verify.request")
+        resolved = self.resolver.resolve(facts, SetupRequest(selection=exact))
+        service = next(
+            step for step in resolved.steps if step.id == "service.configure"
+        )
+        gateway = next(
+            step for step in resolved.steps if step.id == "gateway.configure"
+        )
+        verify = next(step for step in resolved.steps if step.id == "verify.request")
 
         options["mtp"] = False
         self.assertTrue(exact.service_options["mtp"])
@@ -304,7 +308,7 @@ class SetupV1Tests(unittest.TestCase):
             gateway_endpoint="http://127.0.0.1:8766/v1",
         )
         with self.assertRaisesRegex(ValueError, "resource name"):
-            self.planner.plan(facts, SetupRequest(selection=invalid_name))
+            self.resolver.resolve(facts, SetupRequest(selection=invalid_name))
 
         with self.assertRaisesRegex(ValueError, "service_options"):
             ExactSetupSelection(
@@ -344,12 +348,12 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "trust_grants"):
-            self.planner.plan(
+            self.resolver.resolve(
                 facts,
                 SetupRequest(selection=incomplete, noninteractive=True, confirmed=True),
             )
         with self.assertRaisesRegex(ValueError, "confirmed"):
-            self.planner.plan(
+            self.resolver.resolve(
                 facts,
                 SetupRequest(
                     selection=self.workstation.selection,
@@ -369,7 +373,7 @@ class SetupV1Tests(unittest.TestCase):
             gateway_endpoint="http://127.0.0.1:8766/v1",
         )
         with self.assertRaisesRegex(ValueError, "runtime_lock_digest"):
-            self.planner.plan(
+            self.resolver.resolve(
                 facts,
                 SetupRequest(selection=not_locked, noninteractive=True, confirmed=True),
             )
@@ -385,7 +389,7 @@ class SetupV1Tests(unittest.TestCase):
             gateway_endpoint="http://localhost:8766/v1",
         )
         with self.assertRaisesRegex(ValueError, "literal HTTP loopback"):
-            self.planner.plan(
+            self.resolver.resolve(
                 facts,
                 SetupRequest(
                     selection=hostname_endpoint,
@@ -398,13 +402,13 @@ class SetupV1Tests(unittest.TestCase):
         self,
     ) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
-        initial = self.planner.plan(facts)
+        initial = self.resolver.resolve(facts)
         model_step = next(step for step in initial.steps if step.id == "model.install")
         evidence = SetupEvidence.complete(model_step)
-        resumed = self.planner.plan(facts, evidence=(evidence,))
+        resumed = self.resolver.resolve(facts, evidence=(evidence,))
         executed: list[str] = []
 
-        result = self.planner.apply(
+        result = self.resolver.apply(
             resumed,
             lambda step: executed.append(step.id) or SetupEvidence.complete(step),
             evidence=(evidence,),
@@ -429,7 +433,7 @@ class SetupV1Tests(unittest.TestCase):
             "supervisor.activate", old_fingerprint, StepState.COMPLETE
         )
 
-        resumed = self.planner.plan(facts, evidence=(old_evidence,))
+        resumed = self.resolver.resolve(facts, evidence=(old_evidence,))
         activation = next(
             step for step in resumed.steps if step.id == "supervisor.activate"
         )
@@ -439,7 +443,7 @@ class SetupV1Tests(unittest.TestCase):
 
     def test_apply_records_only_completed_steps_before_a_failure(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
-        plan = self.planner.plan(facts)
+        resolved = self.resolver.resolve(facts)
         recorded: list[SetupEvidence] = []
 
         def execute(step):
@@ -447,8 +451,8 @@ class SetupV1Tests(unittest.TestCase):
                 raise RuntimeError("download interrupted")
             return SetupEvidence.complete(step)
 
-        with self.assertRaises(PlanExecutionError) as failure:
-            self.planner.apply(plan, execute, record=recorded.append)
+        with self.assertRaises(MutationExecutionError) as failure:
+            self.resolver.apply(resolved, execute, record=recorded.append)
 
         self.assertEqual(failure.exception.step_id, "model.install")
         self.assertEqual(
@@ -464,17 +468,19 @@ class SetupV1Tests(unittest.TestCase):
     def test_offline_plan_exposes_evidence_and_blocks_missing_network_artifacts(
         self,
     ) -> None:
-        plan = self.planner.plan(
+        resolved = self.resolver.resolve(
             SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, False)
         )
 
-        self.assertTrue(plan.offline)
-        runtime = next(step for step in plan.steps if step.id == "runtime.install")
-        model = next(step for step in plan.steps if step.id == "model.install")
+        self.assertTrue(resolved.offline)
+        runtime = next(step for step in resolved.steps if step.id == "runtime.install")
+        model = next(step for step in resolved.steps if step.id == "model.install")
         self.assertEqual(runtime.state, StepState.BLOCKED)
         self.assertIn("offline", runtime.reason)
         self.assertEqual(model.state, StepState.BLOCKED)
-        self.assertIn("No completed evidence", self.planner.preview(plan).offline_note)
+        self.assertIn(
+            "No completed evidence", self.resolver.preview(resolved).offline_note
+        )
 
     def test_removal_is_reference_aware_and_retains_shared_and_unrelated_state(
         self,
@@ -491,10 +497,10 @@ class SetupV1Tests(unittest.TestCase):
             unrelated_settings=("Codex theme", "Hindsight bank ID"),
         )
 
-        plan = self.planner.plan_removal(inventory)
+        resolved = self.resolver.resolve_removal(inventory)
 
         self.assertEqual(
-            tuple(step.id for step in plan.steps),
+            tuple(step.id for step in resolved.steps),
             (
                 "service.drain",
                 "service.stop",
@@ -503,10 +509,10 @@ class SetupV1Tests(unittest.TestCase):
                 "state.remove",
             ),
         )
-        self.assertEqual(plan.freed_bytes_estimate, 2 * GIB)
-        self.assertEqual(plan.retained_paths, inventory.shared_cache_paths)
-        self.assertEqual(plan.retained_settings, inventory.unrelated_settings)
-        self.assertIn("coding", plan.references)
+        self.assertEqual(resolved.freed_bytes_estimate, 2 * GIB)
+        self.assertEqual(resolved.retained_paths, inventory.shared_cache_paths)
+        self.assertEqual(resolved.retained_settings, inventory.unrelated_settings)
+        self.assertIn("coding", resolved.references)
 
 
 if __name__ == "__main__":

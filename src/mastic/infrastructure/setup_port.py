@@ -1,7 +1,7 @@
 """Concrete supported-v1 setup and removal operation orchestration.
 
-The port keeps planning side-effect free and crosses owner boundaries only
-after the exact rendered plan has been confirmed.  Its collaborators are
+The port keeps resolution side-effect free and crosses owner boundaries only
+after the exact rendered preview has been confirmed. Its collaborators are
 operation ports so composition can bind real runtime, model, desired-state,
 Application Configuration Target, Supervisor, and Gateway implementations without hiding work here.
 """
@@ -19,13 +19,13 @@ from urllib.parse import urlsplit
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import (
     ExactSetupSelection,
-    PlanExecutionError,
-    PlanStep,
+    MutationExecutionError,
+    MutationStep,
     RemovalInventory,
-    RemovalPlan,
+    ResolvedRemoval,
     SetupEvidence,
-    SetupPlan,
-    SetupPlanner,
+    ResolvedSetup,
+    SetupResolver,
     SetupPreflight,
     SetupRequest,
     StepState,
@@ -41,7 +41,7 @@ class OperationOwner(Protocol):
 
 
 class EvidenceStore(Protocol):
-    """Durable, content-free completion evidence for resumable plans."""
+    """Durable, content-free completion evidence for resumable operations."""
 
     def load(self, scope: str) -> Sequence[SetupEvidence]: ...
 
@@ -90,11 +90,11 @@ RemovalInventoryProvider = Callable[[], RemovalInventory]
 
 
 class SetupOperationPort:
-    """Preview and apply one exact, resumable Plan."""
+    """Preview and apply one exact, resumable setup operation."""
 
     def __init__(
         self,
-        planner: SetupPlanner,
+        resolver: SetupResolver,
         *,
         preflight: PreflightProvider,
         runtime: OperationOwner,
@@ -106,7 +106,7 @@ class SetupOperationPort:
         evidence: EvidenceStore,
         removal_inventory: RemovalInventoryProvider,
     ) -> None:
-        self._planner = planner
+        self._resolver = resolver
         self._preflight = preflight
         self._runtime = runtime
         self._model = model
@@ -118,8 +118,8 @@ class SetupOperationPort:
         self._removal_inventory = removal_inventory
 
     def preview(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
-        plan = self._setup_plan(parameters)
-        return self._setup_preview(plan)
+        resolved = self._resolve_setup(parameters)
+        return self._setup_preview(resolved)
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -128,18 +128,18 @@ class SetupOperationPort:
             raise ApplicationError(
                 "operation_unavailable", f"{operation} is not a setup operation"
             )
-        plan = self._setup_plan(parameters)
-        preview = self._setup_preview(plan)
+        resolved = self._resolve_setup(parameters)
+        preview = self._setup_preview(resolved)
         if parameters.get("confirmed") is not True or not parameters.get(
             "preview_fingerprint"
         ):
             return preview
         self._assert_preview_identity(parameters, preview)
         blocked = next(
-            (step for step in plan.steps if step.state is StepState.BLOCKED), None
+            (step for step in resolved.steps if step.state is StepState.BLOCKED), None
         )
         if blocked is not None:
-            code = "offline_blocked" if plan.offline else "setup_blocked"
+            code = "offline_blocked" if resolved.offline else "setup_blocked"
             raise ApplicationError(
                 code,
                 f"setup is blocked at {blocked.id}: {blocked.reason}",
@@ -150,8 +150,8 @@ class SetupOperationPort:
         material = _restore_material(prior)
         results: dict[str, object] = {}
 
-        def execute_step(step: PlanStep) -> SetupEvidence:
-            result = self._execute_setup_step(plan, step, material)
+        def execute_step(step: MutationStep) -> SetupEvidence:
+            result = self._execute_setup_step(resolved, step, material)
             results[step.id] = result
             material[step.id] = result
             return SetupEvidence.complete(
@@ -160,13 +160,13 @@ class SetupOperationPort:
             )
 
         try:
-            execution = self._planner.apply(
-                plan,
+            execution = self._resolver.apply(
+                resolved,
                 execute_step,
                 evidence=prior,
                 record=lambda item: self._evidence.record("setup", item),
             )
-        except PlanExecutionError as error:
+        except MutationExecutionError as error:
             raise ApplicationError(
                 "setup_interrupted",
                 str(error),
@@ -182,7 +182,8 @@ class SetupOperationPort:
             "completion": "complete" if execution.complete else "partial",
             "readiness": "unverified",
             "application_target_readiness": {
-                target: "unverified" for target in plan.selection.application_targets
+                target: "unverified"
+                for target in resolved.selection.application_targets
             },
             "results": _plain(results),
             "evidence": [_plain(item) for item in execution.evidence],
@@ -190,12 +191,12 @@ class SetupOperationPort:
 
     def preview_removal(self) -> Mapping[str, object]:
         return self._removal_preview(
-            self._planner.plan_removal(self._removal_inventory())
+            self._resolver.resolve_removal(self._removal_inventory())
         )
 
     def remove(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
-        plan = self._planner.plan_removal(self._removal_inventory())
-        preview = self._removal_preview(plan)
+        resolved = self._resolver.resolve_removal(self._removal_inventory())
+        preview = self._removal_preview(resolved)
         if parameters.get("confirmed") is not True or not parameters.get(
             "preview_fingerprint"
         ):
@@ -204,23 +205,23 @@ class SetupOperationPort:
         prior = tuple(self._evidence.load("removal"))
         results: dict[str, object] = {}
 
-        def execute_step(step: PlanStep) -> SetupEvidence:
+        def execute_step(step: MutationStep) -> SetupEvidence:
             result = self._execute_removal_step(step)
             results[step.id] = result
             return SetupEvidence.complete(step, _json({"result": result}))
 
         try:
-            execution = self._planner.apply_removal(
-                plan,
+            execution = self._resolver.apply_removal(
+                resolved,
                 execute_step,
                 evidence=prior,
                 record=self._record_removal_evidence,
             )
-        except PlanExecutionError as error:
+        except MutationExecutionError as error:
             raise ApplicationError(
                 "removal_interrupted",
                 str(error),
-                next_actions=("review the removal plan and resume",),
+                next_actions=("review the removal preview and resume",),
             ) from error
         return {
             **preview,
@@ -230,7 +231,7 @@ class SetupOperationPort:
             "evidence": [_plain(item) for item in execution.evidence],
         }
 
-    def _setup_plan(self, parameters: Mapping[str, object]) -> SetupPlan:
+    def _resolve_setup(self, parameters: Mapping[str, object]) -> ResolvedSetup:
         profile = str(parameters.get("profile", "recommended"))
         if profile not in {"recommended", "exact"}:
             raise ApplicationError(
@@ -248,10 +249,10 @@ class SetupOperationPort:
                     raise ValueError(
                         "exact setup requires an exact selection: " + ", ".join(missing)
                     )
-                selection = _selection(parameters, self._planner.exact_template)
+                selection = _selection(parameters, self._resolver.exact_template)
                 explicit_selection = True
             else:
-                baseline = self._planner.plan(
+                baseline = self._resolver.resolve(
                     facts,
                     SetupRequest(capacity_profile=capacity_name),
                     evidence=prior,
@@ -266,18 +267,18 @@ class SetupOperationPort:
                 noninteractive=bool(parameters.get("noninteractive", False)),
                 confirmed=parameters.get("confirmed") is True,
             )
-            return self._planner.plan(facts, request, evidence=prior)
+            return self._resolver.resolve(facts, request, evidence=prior)
         except ValueError as error:
             raise ApplicationError("invalid_setup", str(error)) from error
 
-    def _setup_preview(self, plan: SetupPlan) -> Mapping[str, object]:
-        preview = self._planner.preview(plan)
+    def _setup_preview(self, resolved: ResolvedSetup) -> Mapping[str, object]:
+        preview = self._resolver.preview(resolved)
         identity = _preview_identity(
-            plan.steps,
+            resolved.steps,
             {
-                "profile": plan.profile_name,
-                "selection": _selection_value(plan.selection),
-                "offline": plan.offline,
+                "profile": resolved.profile_name,
+                "selection": _selection_value(resolved.selection),
+                "offline": resolved.offline,
             },
         )
         return {
@@ -321,20 +322,20 @@ class SetupOperationPort:
                 "sampling_profiles": _plain(preview.sampling_profiles),
                 "context_window": preview.context_window,
             },
-            "preflight": _plain(plan.preflight),
+            "preflight": _plain(resolved.preflight),
             "steps": [_plain(step) for step in preview.steps],
             "offline_note": preview.offline_note,
         }
 
     def _execute_setup_step(
         self,
-        plan: SetupPlan,
-        step: PlanStep,
+        resolved: ResolvedSetup,
+        step: MutationStep,
         material: Mapping[str, object],
     ) -> Mapping[str, object]:
-        selection = plan.selection
+        selection = resolved.selection
         if step.id == "preflight":
-            return {"validated": True, **_plain(plan.preflight)}
+            return {"validated": True, **_plain(resolved.preflight)}
         if step.id == "supervisor.activate":
             return self._supervisor.execute("supervisor.start", {"confirmed": True})
         if step.id == "runtime.install":
@@ -359,7 +360,7 @@ class SetupOperationPort:
                     "repository": selection.model_repository,
                     "revision": selection.model_revision,
                     "alias": selection.model_alias,
-                    "offline": plan.offline,
+                    "offline": resolved.offline,
                     "confirmed": True,
                 },
             )
@@ -458,30 +459,30 @@ class SetupOperationPort:
             return result
         raise RuntimeError(f"unsupported setup step: {step.id}")
 
-    def _removal_preview(self, plan: RemovalPlan) -> Mapping[str, object]:
+    def _removal_preview(self, resolved: ResolvedRemoval) -> Mapping[str, object]:
         identity = _preview_identity(
-            plan.steps,
+            resolved.steps,
             {
-                "references": plan.references,
-                "freed_bytes_estimate": plan.freed_bytes_estimate,
-                "retained_paths": plan.retained_paths,
-                "retained_bytes_estimate": plan.retained_bytes_estimate,
-                "retained_settings": plan.retained_settings,
+                "references": resolved.references,
+                "freed_bytes_estimate": resolved.freed_bytes_estimate,
+                "retained_paths": resolved.retained_paths,
+                "retained_bytes_estimate": resolved.retained_bytes_estimate,
+                "retained_settings": resolved.retained_settings,
             },
         )
         return {
             "state": "review_required",
             "confirmation_required": True,
             "preview_fingerprint": identity,
-            "steps": [_plain(step) for step in plan.steps],
-            "references": _plain(plan.references),
-            "freed_bytes_estimate": plan.freed_bytes_estimate,
-            "retained_paths": list(plan.retained_paths),
-            "retained_bytes_estimate": plan.retained_bytes_estimate,
-            "retained_settings": list(plan.retained_settings),
+            "steps": [_plain(step) for step in resolved.steps],
+            "references": _plain(resolved.references),
+            "freed_bytes_estimate": resolved.freed_bytes_estimate,
+            "retained_paths": list(resolved.retained_paths),
+            "retained_bytes_estimate": resolved.retained_bytes_estimate,
+            "retained_settings": list(resolved.retained_settings),
         }
 
-    def _execute_removal_step(self, step: PlanStep) -> Mapping[str, object]:
+    def _execute_removal_step(self, step: MutationStep) -> Mapping[str, object]:
         if step.id in {"service.drain", "service.stop"}:
             results = {}
             for service in _strings(step.inputs.get("services", ())):
@@ -770,7 +771,9 @@ def _content_free_result(
     }
 
 
-def _preview_identity(steps: Sequence[PlanStep], extra: Mapping[str, object]) -> str:
+def _preview_identity(
+    steps: Sequence[MutationStep], extra: Mapping[str, object]
+) -> str:
     payload = {
         "steps": [{"id": step.id, "fingerprint": step.fingerprint} for step in steps],
         **dict(extra),
