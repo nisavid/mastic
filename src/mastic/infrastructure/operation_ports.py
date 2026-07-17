@@ -17,6 +17,7 @@ from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.control_client import ControlClientError, UnixControlClient
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
+    ApplicationTargetOwnershipRecoveryRequired,
 )
 from mastic.infrastructure.supervisor_v1 import Supervisor
 
@@ -199,6 +200,8 @@ class ApplicationTargetOperationPort:
             adapter = self._adapter(operation, name, parameters, stored)
         except ApplicationError:
             raise
+        except ApplicationTargetOwnershipRecoveryRequired as error:
+            raise _application_target_ownership_recovery_required(name) from error
         except (KeyError, ValueError) as error:
             raise ApplicationError(
                 "invalid_parameter",
@@ -309,6 +312,17 @@ def _application_target_recovery_required(name: str) -> ApplicationError:
         next_actions=(
             f"mastic application-target configure {name}",
             f"mastic application-target remove {name}",
+        ),
+    )
+
+
+def _application_target_ownership_recovery_required(name: str) -> ApplicationError:
+    return ApplicationError(
+        "application_target_recovery_required",
+        f"Application Configuration Target {name!r} has ownership evidence that requires manual recovery",
+        next_actions=(
+            "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
+            f"mastic application-target inspect {name}",
         ),
     )
 

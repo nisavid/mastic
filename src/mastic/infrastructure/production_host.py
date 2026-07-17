@@ -28,6 +28,7 @@ from mastic.application.setup import RemovalInventory, SetupPreflight
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
     ApplicationTargetOwnershipDiscovery,
+    ApplicationTargetOwnershipRecoveryRequired,
     CodexModelMetadata,
     LocalApplicationTargetIntegrationFactory,
     OwnershipDiscoveryPolicy,
@@ -533,7 +534,7 @@ def _removal_application_targets(
             desired_hindsight.profile if desired_hindsight is not None else None,
             ownership,
         )
-    except (OSError, ValueError) as error:
+    except (ApplicationTargetOwnershipRecoveryRequired, OSError, ValueError) as error:
         raise _removal_recovery_required("application targets") from error
     targets.update(item.integration for item in ownership)
     return tuple(sorted(targets))
