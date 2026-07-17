@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.application.config_schema import (
-    ApplicationTargetSamplingSettings,
     MasticConfig,
     validate_config,
 )
@@ -499,7 +499,7 @@ def compose_local(
 def _sampling_matches_service_model(
     config: MasticConfig,
     service,
-    sampling: ApplicationTargetSamplingSettings,
+    sampling: SamplingProfile,
     catalogue: ModelProfileCatalogue | None = None,
 ) -> bool:
     """Fail closed unless stored provenance matches the service's exact model."""

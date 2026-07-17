@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +20,8 @@ from mastic.infrastructure.control_client import ControlClientError, UnixControl
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
     ApplicationTargetOwnershipRecoveryRequired,
+    CodexTargetOptions,
+    HindsightTargetOptions,
 )
 from mastic.infrastructure.supervisor_v1 import Supervisor
 
@@ -36,6 +38,8 @@ class ControlClient(Protocol):
 
 
 class ApplicationTargetAdapter(Protocol):
+    def inspect(self): ...
+
     def preview(self, configuration: ApplicationTargetConfiguration): ...
 
     def apply(
@@ -140,16 +144,16 @@ class ApplicationTargetOperationPort:
         ],
         *,
         request: Callable[[str, str, str, Mapping[str, object]], object],
-        settings: Callable[[str], ApplicationTargetSettings | None] | None = None,
-        record: Callable[[str, ApplicationTargetSettings | None], object] | None = None,
-        transition: Callable[[str], AbstractContextManager[None]] | None = None,
+        settings: Callable[[str], ApplicationTargetSettings | None],
+        record: Callable[[str, ApplicationTargetSettings | None], object],
+        transition: Callable[[str], AbstractContextManager[None]],
     ) -> None:
         self._adapter = adapter
         self._configuration = configuration
         self._request = request
-        self._settings = settings or (lambda _name: None)
-        self._record = record or (lambda _name, _configuration: None)
-        self._transition = transition or (lambda _name: nullcontext())
+        self._settings = settings
+        self._record = record
+        self._transition = transition
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -235,10 +239,7 @@ class ApplicationTargetOperationPort:
                 raise
             return plain_result
         if operation == "application-target.inspect":
-            inspect = getattr(adapter, "inspect", None)
-            if inspect is None:
-                return {"state": "healthy", "next_actions": []}
-            return _plain(inspect())
+            return _plain(adapter.inspect())
         assert configuration is not None
         if operation == "application-target.configure":
             try:
@@ -354,12 +355,18 @@ def _application_target_settings(
             "Application Configuration Target configuration requires an Inference Service",
         )
     if name == "hindsight":
+        if not isinstance(configuration.target, HindsightTargetOptions):
+            raise ValueError(
+                "Hindsight configuration requires Hindsight target options"
+            )
         profile = validate_hindsight_profile_name(parameters.get("profile"))
-        provider = configuration.hindsight_provider
-        max_concurrent: int | None = configuration.max_concurrent
+        provider = configuration.target.provider
+        max_concurrent: int | None = configuration.target.max_concurrent
     else:
+        if not isinstance(configuration.target, CodexTargetOptions):
+            raise ValueError("Codex configuration requires Codex target options")
         profile = None
-        provider = configuration.codex_provider_id
+        provider = configuration.target.provider_id
         max_concurrent = None
     return ApplicationTargetSettings(
         name=name,

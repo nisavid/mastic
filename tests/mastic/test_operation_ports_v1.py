@@ -7,11 +7,10 @@ from mastic.application.application_targets import SamplingProfile
 from mastic.application.dispatch import ApplicationError
 from mastic.application.config_schema import (
     ApplicationTargetSettings,
-    ApplicationTargetSamplingSettings,
 )
 from mastic.infrastructure.control_client import SupervisorUnavailableError
 from mastic.infrastructure.operation_ports import (
-    ApplicationTargetOperationPort,
+    ApplicationTargetOperationPort as ProductionApplicationTargetOperationPort,
     RemoteOperationPort,
     SupervisorOperationPort,
 )
@@ -19,6 +18,7 @@ from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
     ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
+    HindsightTargetOptions,
 )
 
 
@@ -104,6 +104,10 @@ class FakeApplicationTargetAdapter:
             configuration.sampling_profiles[profile].values(),
         )
 
+    def inspect(self):
+        self.calls.append(("inspect",))
+        return {"state": "healthy", "next_actions": []}
+
     def stop_service(self, resource):
         self.calls.append(("stop_service", resource))
         return {"service": resource, "state": "stopped"}
@@ -111,6 +115,34 @@ class FakeApplicationTargetAdapter:
     def restart_service(self, resource):
         self.calls.append(("restart_service", resource))
         return {"service": resource, "state": "ready"}
+
+
+@contextmanager
+def _unlocked_transition(_name):
+    yield
+
+
+class ApplicationTargetOperationPort(ProductionApplicationTargetOperationPort):
+    """Test composition with explicit in-memory lifecycle collaborators."""
+
+    def __init__(
+        self,
+        adapter,
+        configuration,
+        *,
+        request,
+        settings=lambda _name: None,
+        record=lambda _name, _value: None,
+        transition=_unlocked_transition,
+    ) -> None:
+        super().__init__(
+            adapter,
+            configuration,
+            request=request,
+            settings=settings,
+            record=record,
+            transition=transition,
+        )
 
 
 def _target_settings(service: str) -> ApplicationTargetSettings:
@@ -268,6 +300,7 @@ class OperationPortTests(unittest.TestCase):
                     "reflect": SamplingProfile(temperature=0.9),
                     "consolidation": SamplingProfile(temperature=0.0),
                 },
+                target=HindsightTargetOptions(),
             )
 
         port = ApplicationTargetOperationPort(
@@ -306,7 +339,7 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(stored.context_window, 32768)
         self.assertEqual(
             stored.sampling["reflect"],
-            ApplicationTargetSamplingSettings(temperature=0.9),
+            SamplingProfile(temperature=0.9),
         )
 
         tested = port.execute(
