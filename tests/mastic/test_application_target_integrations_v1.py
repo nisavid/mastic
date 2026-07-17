@@ -284,6 +284,38 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(report["state"], "drifted")
             self.assertIn("model_catalog_json", report["detail"])
 
+    def test_codex_inspect_reports_malformed_or_wrong_path_ownership_bounded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = CodexApplicationTargetIntegration(
+                root / "config.toml", root / "owner.json", root / "backup"
+            )
+            for payload in (
+                "not json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "integration": "codex",
+                        "config_path": str(root / "other.toml"),
+                        "backup_path": str(adapter.backup_path),
+                        "fields": [],
+                    }
+                ),
+            ):
+                with self.subTest(payload=payload[:8]):
+                    adapter.manifest_path.write_text(payload, encoding="utf-8")
+
+                    report = adapter.inspect()
+
+                    self.assertEqual(report["state"], "malformed")
+                    self.assertNotIn(str(root / "other.toml"), repr(report))
+                    self.assertEqual(
+                        report["next_actions"],
+                        ["mastic application-target configure codex"],
+                    )
+
     def test_legacy_codex_migration_restores_preexisting_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1313,9 +1345,6 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 None,
             )
             configured.apply(self.configuration)
-            (ownership / "hindsight-malformed.ownership.json").write_text(
-                "not json", encoding="utf-8"
-            )
 
             recovered = factory("application-target.inspect", "hindsight", {}, None)
             recorded = []
@@ -1339,6 +1368,102 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertFalse(configured.manifest_path.exists())
             self.assertEqual(recorded, [])
 
+    def test_local_factory_rejects_desired_hindsight_profile_mismatching_ownership(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=root / "ownership",
+            )
+            factory(
+                "application-target.configure",
+                "hindsight",
+                {"profile": "owned-profile"},
+                None,
+            ).apply(self.configuration)
+            desired = ApplicationTargetSettings(
+                name="hindsight",
+                kind="hindsight",
+                service="memory",
+                profile="desired-profile",
+                context_window=32768,
+                provider="openai",
+                max_concurrent=1,
+                sampling={},
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                factory("application-target.inspect", "hindsight", {}, desired)
+
+    def test_local_factory_inspects_one_malformed_orphan_hindsight_manifest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "profiles"
+            ownership = root / "ownership"
+            ownership.mkdir()
+            (ownership / "hindsight-agent-memory.ownership.json").write_text(
+                "not json", encoding="utf-8"
+            )
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=profiles,
+                ownership_dir=ownership,
+            )
+
+            adapter = factory("application-target.inspect", "hindsight", {}, None)
+            report = adapter.inspect()
+
+            self.assertEqual(adapter.config_path, profiles / "agent-memory.env")
+            self.assertEqual(report["state"], "malformed")
+            self.assertNotIn("not json", repr(report))
+
+    def test_local_factory_refuses_to_remove_malformed_orphan_hindsight_manifest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ownership = root / "ownership"
+            ownership.mkdir()
+            (ownership / "hindsight-agent-memory.ownership.json").write_text(
+                "not json", encoding="utf-8"
+            )
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=ownership,
+            )
+
+            with self.assertRaisesRegex(ValueError, "invalid hindsight"):
+                factory("application-target.remove", "hindsight", {}, None)
+
+    def test_hindsight_factory_discovery_ignores_codex_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ownership = root / "ownership"
+            ownership.mkdir()
+            (ownership / "codex.ownership.json").write_text(
+                "not json", encoding="utf-8"
+            )
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=ownership,
+            )
+
+            adapter = factory(
+                "application-target.configure",
+                "hindsight",
+                {"profile": "agent-memory"},
+                None,
+            )
+
+            self.assertEqual(adapter.config_path, root / "profiles/agent-memory.env")
+
     def test_local_factory_refuses_ambiguous_manifest_backed_hindsight_profiles(
         self,
     ) -> None:
@@ -1349,15 +1474,23 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 hindsight_profiles_dir=root / "profiles",
                 ownership_dir=root / "ownership",
             )
-            for profile in ("agent-memory", "research-memory"):
-                factory(
-                    "application-target.configure",
-                    "hindsight",
-                    {"profile": profile},
-                    None,
-                ).apply(self.configuration)
+            configured = factory(
+                "application-target.configure",
+                "hindsight",
+                {"profile": "agent-memory"},
+                None,
+            )
+            configured.apply(self.configuration)
+            manifest = json.loads(configured.manifest_path.read_text(encoding="utf-8"))
+            manifest["config_path"] = str(root / "profiles/research-memory.env")
+            manifest["backup_path"] = str(
+                root / "ownership/hindsight-research-memory.config.backup"
+            )
+            (root / "ownership/hindsight-research-memory.ownership.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
 
-            with self.assertRaisesRegex(ValueError, "exactly one valid"):
+            with self.assertRaisesRegex(ValueError, "exactly one recognizable"):
                 factory("application-target.remove", "hindsight", {}, None)
 
     def test_local_factory_rejects_missing_traversal_and_symlink_profiles(self) -> None:

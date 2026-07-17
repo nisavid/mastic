@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mastic.application.config_schema import validate_config
@@ -1040,6 +1041,53 @@ class ProductionCompositionTests(unittest.TestCase):
                     Supply(),
                     home,
                 )
+
+            self.assertEqual(
+                raised.exception.code, "application_target_recovery_required"
+            )
+
+    def test_removal_inventory_fails_closed_on_desired_owned_profile_mismatch(
+        self,
+    ) -> None:
+        class Supply:
+            def inventory(self):
+                return CacheInventory((), "local-observed", ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = MasticPaths(
+                home / "config", home / "state", home / "data", home / "logs"
+            )
+            paths.prepare()
+            ownership = paths.state_dir / "application-targets"
+            ownership.mkdir(mode=0o700)
+            owned_profile = "owned-memory"
+            (ownership / f"hindsight-{owned_profile}.ownership.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "integration": "hindsight",
+                        "config_path": str(
+                            home / f".hindsight/profiles/{owned_profile}.env"
+                        ),
+                        "backup_path": str(
+                            ownership / f"hindsight-{owned_profile}.config.backup"
+                        ),
+                        "fields": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            desired = SimpleNamespace(profile="desired-memory")
+            store = SimpleNamespace(
+                exists=True,
+                load=lambda: SimpleNamespace(
+                    value=SimpleNamespace(application_targets={"hindsight": desired})
+                ),
+            )
+
+            with self.assertRaises(ApplicationError) as raised:
+                removal_inventory(paths, _Launchd(False), store, Supply(), home)
 
             self.assertEqual(
                 raised.exception.code, "application_target_recovery_required"

@@ -15,7 +15,9 @@ from mastic.infrastructure.config_store import (
 )
 
 
-def _hold_private_lock(path: str, acquired, release) -> None:
+def _hold_private_lock(path: str, acquired, release, attempting=None) -> None:
+    if attempting is not None:
+        attempting.set()
     with private_file_lock(path):
         acquired.set()
         release.wait(5)
@@ -28,6 +30,7 @@ class ConfigStoreTests(unittest.TestCase):
             context = multiprocessing.get_context("fork")
             first_acquired = context.Event()
             first_release = context.Event()
+            second_attempting = context.Event()
             second_acquired = context.Event()
             second_release = context.Event()
             second_release.set()
@@ -37,12 +40,18 @@ class ConfigStoreTests(unittest.TestCase):
             )
             second = context.Process(
                 target=_hold_private_lock,
-                args=(lock_path, second_acquired, second_release),
+                args=(
+                    lock_path,
+                    second_acquired,
+                    second_release,
+                    second_attempting,
+                ),
             )
             try:
                 first.start()
                 self.assertTrue(first_acquired.wait(2))
                 second.start()
+                self.assertTrue(second_attempting.wait(2))
                 self.assertFalse(second_acquired.wait(0.2))
                 first_release.set()
                 self.assertTrue(second_acquired.wait(2))
