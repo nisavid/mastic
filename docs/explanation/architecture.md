@@ -120,9 +120,12 @@ findings or integrity failures.
 ## Gateway
 
 The Gateway is a Starlette ASGI application served inside `masticd`. A
-lifespan-managed HTTPX client streams requests and responses without buffering
-model output. The Gateway binds only to configured loopback addresses and
-routes the OpenAI-compatible `model` field by Inference Service name.
+lifespan-managed HTTPX client forwards bounded JSON requests and streams
+upstream responses. Chat output and unadapted streams are forwarded
+incrementally. Namespace-adapted non-SSE responses and individual SSE frames
+are buffered only within configured response-adaptation limits. The Gateway
+binds only to configured loopback addresses and routes the OpenAI-compatible
+`model` field by Inference Service name.
 
 Every managed profile route and ordinary `/v1` route requires the same private
 bearer credential. MASTIC creates the credential as a user-owned mode-0600 file
