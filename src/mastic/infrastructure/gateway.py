@@ -641,7 +641,7 @@ def _authenticate(
         401,
         "authentication_required",
         "The Gateway requires its private bearer credential.",
-        action="Configure the client through mastic or read the credential location with mastic gateway inspect.",
+        action="Configure the Application Configuration Target through MASTIC or read the credential location with mastic gateway inspect.",
     )
     response.headers["www-authenticate"] = "Bearer"
     return response

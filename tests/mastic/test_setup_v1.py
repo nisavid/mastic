@@ -204,7 +204,7 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         canary = plan.steps[-1]
-        self.assertEqual(canary.id, "client.test.codex")
+        self.assertEqual(canary.id, "gateway.contract.codex")
         self.assertEqual(
             dict(canary.inputs),
             {
@@ -213,7 +213,7 @@ class SetupV1Tests(unittest.TestCase):
                 "service": "coding",
                 "route": "coding",
                 "endpoint": "http://127.0.0.1:8766/v1",
-                "request": "Respond with exactly: mastic target ready",
+                "request": "Respond with exactly: mastic gateway contract ok",
             },
         )
 
@@ -230,7 +230,7 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         canary = plan.steps[-1]
-        self.assertEqual(canary.id, "client.test.hindsight")
+        self.assertEqual(canary.id, "gateway.contract.hindsight")
         self.assertEqual(
             dict(canary.inputs),
             {
@@ -240,7 +240,7 @@ class SetupV1Tests(unittest.TestCase):
                 "service": "coding",
                 "route": "coding",
                 "endpoint": "http://127.0.0.1:8766/v1",
-                "request": "Respond with exactly: mastic target ready",
+                "request": "Respond with exactly: mastic gateway contract ok",
             },
         )
 
@@ -396,8 +396,10 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         self.assertNotIn("model.install", executed)
-        self.assertEqual(executed[-2:], ["client.test.codex", "client.test.hindsight"])
-        self.assertEqual(result.evidence[-1].step_id, "client.test.hindsight")
+        self.assertEqual(
+            executed[-2:], ["gateway.contract.codex", "gateway.contract.hindsight"]
+        )
+        self.assertEqual(result.evidence[-1].step_id, "gateway.contract.hindsight")
         self.assertTrue(result.complete)
 
     def test_changed_supervisor_protocol_invalidates_old_activation_evidence(

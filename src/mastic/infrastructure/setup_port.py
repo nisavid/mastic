@@ -179,6 +179,11 @@ class SetupOperationPort:
             **preview,
             "state": "complete",
             "complete": execution.complete,
+            "completion": "complete" if execution.complete else "partial",
+            "readiness": "unverified",
+            "application_target_readiness": {
+                target: "unverified" for target in plan.selection.clients
+            },
             "results": _plain(results),
             "evidence": [_plain(item) for item in execution.evidence],
         }
@@ -421,7 +426,7 @@ class SetupOperationPort:
             return self._supervisor.execute(
                 "service.start", {"resource": selection.service_name}
             )
-        if step.id in {"client.test.codex", "client.test.hindsight"}:
+        if step.id in {"gateway.contract.codex", "gateway.contract.hindsight"}:
             target = str(step.inputs["target"])
             result = self._clients.execute(
                 "client.test",
@@ -434,17 +439,17 @@ class SetupOperationPort:
             if (
                 not isinstance(response, Mapping)
                 or response.get("ok") is not True
-                or response.get("text") != "mastic target ready"
+                or response.get("text") != "mastic gateway contract ok"
             ):
                 raise RuntimeError(
-                    f"the {target} Application Configuration Target canary did not return the exact readiness response"
+                    f"the {target} managed Gateway contract did not return the exact response"
                 )
             return result
         if step.id == "verify.request":
             result = self._verifier.execute("verify.request", step.inputs)
             if result.get("ok") is not True or result.get("text") != "mastic ready":
                 raise RuntimeError(
-                    "the first Gateway request did not return the exact readiness response"
+                    "the first Gateway request did not return the exact contract response"
                 )
             return result
         raise RuntimeError(f"unsupported setup step: {step.id}")
@@ -733,7 +738,7 @@ def _restore_material(evidence: Sequence[SetupEvidence]) -> dict[str, object]:
 def _content_free_result(
     step_id: str, result: Mapping[str, object]
 ) -> Mapping[str, object]:
-    if step_id.startswith("client.test."):
+    if step_id.startswith("gateway.contract."):
         response = result.get("response")
         if not isinstance(response, Mapping):
             return {"profile": result.get("profile"), "ok": False}

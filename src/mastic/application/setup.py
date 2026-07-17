@@ -614,7 +614,7 @@ class SetupPlanner:
             specs.append(
                 (
                     "client.remove",
-                    "Remove only mastic-owned client fields",
+                    "Remove only MASTIC-owned application-target fields",
                     {"clients": inventory.client_integrations},
                 )
             )
@@ -773,15 +773,15 @@ class SetupPlanner:
         if "codex" in selection.clients:
             canaries.append(
                 (
-                    "client.test.codex",
-                    "Canary the Codex Application Configuration Target",
+                    "gateway.contract.codex",
+                    "Validate the Codex managed Gateway contract",
                     {
                         "target": "codex",
                         "profile": "coding",
                         "service": selection.service_name,
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
-                        "request": "Respond with exactly: mastic target ready",
+                        "request": "Respond with exactly: mastic gateway contract ok",
                     },
                     False,
                 )
@@ -790,8 +790,8 @@ class SetupPlanner:
             hindsight_options = selection.client_options["hindsight"]
             canaries.append(
                 (
-                    "client.test.hindsight",
-                    "Canary the Hindsight Application Configuration Target",
+                    "gateway.contract.hindsight",
+                    "Validate the Hindsight managed Gateway contract",
                     {
                         "target": "hindsight",
                         "configuration_profile": hindsight_options["profile"],
@@ -799,7 +799,7 @@ class SetupPlanner:
                         "service": selection.service_name,
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
-                        "request": "Respond with exactly: mastic target ready",
+                        "request": "Respond with exactly: mastic gateway contract ok",
                     },
                     False,
                 )
