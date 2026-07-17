@@ -639,7 +639,7 @@ class CodexClientIntegration:
         *,
         profile: str = "coding",
     ) -> TestResult:
-        return _test_request(configuration, request, profile)
+        return _test_request(configuration, request, profile, target="codex")
 
     def _manifest(self, *, optional: bool = False) -> dict[str, object]:
         manifest = _load_manifest(self.manifest_path, "codex", optional)
@@ -943,7 +943,7 @@ class HindsightClientIntegration:
         *,
         profile: str = "reflect",
     ) -> TestResult:
-        return _test_request(configuration, request, profile)
+        return _test_request(configuration, request, profile, target="hindsight")
 
     def _manifest(self, *, optional: bool = False) -> dict[str, object]:
         manifest = _load_manifest(self.manifest_path, "hindsight", optional)
@@ -1152,13 +1152,14 @@ def _test_request(
     configuration: ClientConfiguration,
     request: TestRequest[TestResult],
     profile: str,
+    *,
+    target: str,
 ) -> TestResult:
     if profile not in configuration.sampling_profiles:
         error = KeyError(profile)
         raise KeyError(f"unknown sampling profile: {profile}") from error
-    client = "codex" if profile == "coding" else "hindsight"
     return request(
-        _profile_endpoint(configuration, client, profile),
+        _profile_endpoint(configuration, target, profile),
         configuration.service_name,
         {},
     )

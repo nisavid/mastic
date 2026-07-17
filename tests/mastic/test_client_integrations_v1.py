@@ -810,6 +810,33 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_API_LLM_MODEL=cloud", restored)
             self.assertNotIn("HINDSIGHT_API_LLM_BASE_URL", restored)
 
+    def test_application_target_test_route_is_independent_of_profile_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = CodexClientIntegration(
+                root / "codex.toml", root / "codex-owner.json", root / "codex-backup"
+            )
+            hindsight = HindsightClientIntegration(
+                root / "hindsight.env",
+                root / "hindsight-owner.json",
+                root / "hindsight-backup",
+            )
+            endpoints: list[str] = []
+
+            def request(endpoint: str, model: str, sampling: dict[str, object]) -> None:
+                endpoints.append(endpoint)
+
+            codex.test(self.configuration, request, profile="reflect")
+            hindsight.test(self.configuration, request, profile="coding")
+
+            self.assertEqual(
+                endpoints,
+                [
+                    "http://127.0.0.1:8766/clients/codex/profiles/reflect/v1",
+                    "http://127.0.0.1:8766/clients/hindsight/profiles/coding/v1",
+                ],
+            )
+
     def test_hindsight_takeover_records_already_equal_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
