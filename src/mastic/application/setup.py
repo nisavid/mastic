@@ -579,9 +579,21 @@ class SetupResolver:
         evidence: Sequence[SetupEvidence] = (),
         record: EvidenceRecorder | None = None,
     ) -> MutationExecutionResult:
+        return self._apply_steps(
+            resolved.steps, execute, evidence=evidence, record=record
+        )
+
+    @staticmethod
+    def _apply_steps(
+        steps: Sequence[MutationStep],
+        execute: MutationExecutor,
+        *,
+        evidence: Sequence[SetupEvidence] = (),
+        record: EvidenceRecorder | None = None,
+    ) -> MutationExecutionResult:
         known = {(item.step_id, item.fingerprint): item for item in evidence}
         ordered = list(evidence)
-        for step in resolved.steps:
+        for step in steps:
             prior = known.get((step.id, step.fingerprint))
             if step.state is StepState.COMPLETE and prior is None:
                 prior = SetupEvidence.complete(step)
@@ -609,7 +621,7 @@ class SetupResolver:
                 record(completed)
         return MutationExecutionResult(
             tuple(ordered),
-            all(step.state is not StepState.BLOCKED for step in resolved.steps),
+            all(step.state is not StepState.BLOCKED for step in steps),
         )
 
     def resolve_removal(self, inventory: RemovalInventory) -> ResolvedRemoval:
@@ -670,16 +682,9 @@ class SetupResolver:
         evidence: Sequence[SetupEvidence] = (),
         record: EvidenceRecorder | None = None,
     ) -> MutationExecutionResult:
-        synthetic = ResolvedSetup(
-            profile_name="removal",
-            selection=self._profiles[0].selection,
-            preflight=SetupPreflight("darwin", "arm64", 0, 0, True),
-            steps=resolved.steps,
-            offline=False,
-            editable=False,
-            confirmation_required=True,
+        return self._apply_steps(
+            resolved.steps, execute, evidence=evidence, record=record
         )
-        return self.apply(synthetic, execute, evidence=evidence, record=record)
 
     def _recommend(self, memory_bytes: int, disk_free_bytes: int) -> RecommendedProfile:
         eligible = [

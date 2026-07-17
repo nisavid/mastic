@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from mastic.application.setup import (
     CapacityProfile,
@@ -515,6 +516,32 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(resolved.retained_paths, inventory.shared_cache_paths)
         self.assertEqual(resolved.retained_settings, inventory.unrelated_settings)
         self.assertIn("coding", resolved.references)
+
+    def test_removal_execution_is_independent_of_setup_execution(self) -> None:
+        resolved = self.resolver.resolve_removal(
+            RemovalInventory(running_services=("coding",))
+        )
+        drain, stop = resolved.steps
+        prior = SetupEvidence.complete(drain, "already drained")
+        executed: list[str] = []
+        recorded: list[SetupEvidence] = []
+
+        with patch.object(
+            self.resolver,
+            "apply",
+            side_effect=AssertionError("removal delegated to setup execution"),
+        ):
+            result = self.resolver.apply_removal(
+                resolved,
+                lambda step: executed.append(step.id) or SetupEvidence.complete(step),
+                evidence=(prior,),
+                record=recorded.append,
+            )
+
+        self.assertEqual(executed, [stop.id])
+        self.assertEqual(result.evidence, (prior, SetupEvidence.complete(stop)))
+        self.assertEqual(recorded, [SetupEvidence.complete(stop)])
+        self.assertTrue(result.complete)
 
 
 if __name__ == "__main__":
