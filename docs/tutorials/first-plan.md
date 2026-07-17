@@ -11,6 +11,8 @@ Use an Apple-silicon Mac with:
 
 - macOS;
 - Python 3.11 or newer;
+- at least 48 GiB of unified memory and 24 GiB of free disk for the
+  recommended profile used in this tutorial;
 - `git` and `uv` available in your shell;
 - internet access for live model and runtime evidence, or the required
   artifacts already cached for offline planning.
