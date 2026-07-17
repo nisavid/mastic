@@ -140,6 +140,20 @@ class GatewayTests(unittest.TestCase):
             with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
                 validate_loopback_bind(unsafe)
 
+    def test_gateway_requires_positive_response_adaptation_limits(self) -> None:
+        resolver = FakeResolver([])
+        for option in (
+            {"max_response_adaptation_bytes": 0},
+            {"max_response_adapters": 0},
+        ):
+            with (
+                self.subTest(option=option),
+                self.assertRaisesRegex(
+                    ValueError, "Gateway request limits must be positive"
+                ),
+            ):
+                create_gateway(resolver, **option)
+
     def test_models_lists_service_routes_and_readiness_without_upstream_addresses(
         self,
     ) -> None:
@@ -385,6 +399,101 @@ class GatewayTests(unittest.TestCase):
             json.loads(upstream.requests[1].content)["previous_response_id"],
             "resp-1",
         )
+
+    def test_responses_adapter_cache_is_service_isolated_and_bounded(self) -> None:
+        resolver = FakeResolver(
+            [
+                GatewayRoute(service, "ready", "http://127.0.0.1:49152")
+                for service in ("coding", "analysis", "vision")
+            ]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.extend(
+            [
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"shared","output":[]}']),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"shared","output":[]}']),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream(
+                        [
+                            b'{"id":"coding-next","output":[{"type":"function_call",',
+                            b'"name":"math__add","arguments":"{}"}]}',
+                        ]
+                    ),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"resp-vision","output":[]}']),
+                ),
+            ]
+        )
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            max_response_adapters=2,
+        )
+
+        def namespaced_tool(namespace: str, name: str) -> dict[str, object]:
+            return {
+                "type": "namespace",
+                "name": namespace,
+                "tools": [{"type": "function", "name": name, "parameters": {}}],
+            }
+
+        with TestClient(app) as client:
+            coding = client.post(
+                "/v1/responses",
+                json={
+                    "model": "coding",
+                    "input": [],
+                    "tools": [namespaced_tool("math", "add")],
+                },
+            )
+            analysis = client.post(
+                "/v1/responses",
+                json={
+                    "model": "analysis",
+                    "input": [],
+                    "tools": [namespaced_tool("geo", "locate")],
+                },
+            )
+            coding_continuation = client.post(
+                "/v1/responses",
+                json={
+                    "model": "coding",
+                    "previous_response_id": "shared",
+                    "input": [],
+                },
+            )
+            vision = client.post(
+                "/v1/responses",
+                json={"model": "vision", "input": []},
+            )
+            evicted_analysis = client.post(
+                "/v1/responses",
+                json={
+                    "model": "analysis",
+                    "previous_response_id": "shared",
+                    "input": [],
+                },
+            )
+
+        self.assertEqual((coding.status_code, analysis.status_code), (200, 200))
+        self.assertEqual(coding_continuation.json()["output"][0]["namespace"], "math")
+        self.assertEqual(vision.status_code, 200)
+        self.assertEqual(evicted_analysis.status_code, 400)
+        self.assertEqual(evicted_analysis.json()["error"]["code"], "invalid_namespace")
+        self.assertEqual(len(upstream.requests), 4)
 
     def test_profiled_endpoints_enforce_supported_generation_parameters(self) -> None:
         resolver = FakeResolver(
@@ -699,6 +808,150 @@ class GatewayTests(unittest.TestCase):
             response.content,
         )
         self.assertTrue(stream.closed)
+
+    def test_responses_json_body_limit_closes_upstream_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = ChunkStream([b'{"id":"resp-1",', b'"output":[]}'])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=16,
+        )
+
+        with self.assertRaises(Exception) as raised:
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/responses",
+                    json={"model": "coding", "input": "hello"},
+                )
+
+        self.assertIn(
+            "response adaptation exceeded the 16-byte limit",
+            repr(raised.exception),
+        )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_sse_frame_limit_closes_upstream_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = ChunkStream([b'data: {"delta":"', b'over-limit"}'])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=16,
+        )
+
+        with self.assertRaises(Exception) as raised:
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/responses",
+                    json={"model": "coding", "stream": True, "input": "hello"},
+                )
+
+        self.assertIn(
+            "response adaptation exceeded the 16-byte limit",
+            repr(raised.exception),
+        )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_sse_response_limit_allows_multiple_small_frames(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        frames = b"data: {}\n\ndata: {}\n\n"
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=ChunkStream([frames]),
+            )
+        )
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            max_response_adaptation_bytes=len(b"data: {}\n\n"),
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "stream": True, "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, frames)
+
+    def test_responses_sse_complete_frame_limit_closes_upstream_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = ChunkStream([b'data: {"delta":"over-limit"}\n\n'])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=16,
+        )
+
+        with self.assertRaises(Exception) as raised:
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/responses",
+                    json={"model": "coding", "stream": True, "input": "hello"},
+                )
+
+        self.assertIn(
+            "response adaptation exceeded the 16-byte limit",
+            repr(raised.exception),
+        )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
 
     def test_stream_close_failure_still_releases_activity(self) -> None:
         resolver = FakeResolver(
