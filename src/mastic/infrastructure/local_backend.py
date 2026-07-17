@@ -294,7 +294,7 @@ class LocalOperationBackend:
         return resolved
 
     def _validate_request(self, request: OperationRequest) -> None:
-        """Resolve named resources before returning an executable plan."""
+        """Resolve named resources before returning an exact Plan."""
         name = request.name
         config = self._config()
         if name == "runtime.inspect":
