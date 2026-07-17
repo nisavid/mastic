@@ -97,7 +97,7 @@ class MasticApp(App[None]):
     }
     #shell { height: 1fr; }
     #resource-nav {
-        width: 25;
+        width: 41;
         padding: 1;
         background: #0c1210;
         border-right: solid #2b3733;
@@ -220,7 +220,7 @@ class MasticApp(App[None]):
                 yield Button("◆  Services", id="nav-services")
                 yield Button("↻  Operations", id="nav-operations")
                 yield Button("⌘  Commands", id="nav-commands")
-                yield Button("⇄  Clients", id="nav-clients")
+                yield Button("⇄  Application Configuration Targets", id="nav-clients")
                 yield Button("⌁  Topology", id="nav-topology")
                 yield Button("⚙  Configuration", id="nav-configuration")
                 yield Button("✚  Doctor", id="nav-doctor")
@@ -273,8 +273,8 @@ class MasticApp(App[None]):
         inspector = self.query_one("#inspector", Static)
         workspace = self.query_one("#workspace", VerticalScroll)
         nav.styles.display = "none" if width < 80 else "block"
-        nav.styles.width = 21 if width < 100 else 25
-        inspector.styles.display = "none" if width < 100 else "block"
+        nav.styles.width = 41
+        inspector.styles.display = "none" if width < 120 else "block"
         workspace.styles.padding = (1, 1) if width < 80 else (1, 2)
 
     async def open_operation(self, name: str) -> None:
@@ -648,7 +648,8 @@ class MasticApp(App[None]):
                 "3  Pin an exact Model Revision and inspect fit, trust, and cache\n"
                 "4  Install and probe the tested Runtime Installation\n"
                 "5  Name the service and stable Gateway route\n"
-                "6  Preview clients, resource effects, and verification request\n\n"
+                "6  Preview Application Configuration Targets, resource effects, "
+                "and verification request\n\n"
                 "Nothing changes until the complete plan is reviewed and confirmed. "
                 "Every recommendation remains editable.",
             )

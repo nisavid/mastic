@@ -313,6 +313,13 @@ class SetupV1Tests(unittest.TestCase):
                 service_options={"bad": {1, 2}},
             )
 
+    def test_unsupported_setup_target_uses_canonical_name(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported Application Configuration Targets in setup: other",
+        ):
+            replace(self.workstation.selection, clients=("other",)).validate_exact()
+
     def test_exact_noninteractive_setup_requires_explicit_trust_and_confirmation(
         self,
     ) -> None:

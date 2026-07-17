@@ -227,6 +227,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             clients=ports.get("clients", _NeverCalled()),
             config_path=config_path,
             model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
+            gateway_credential_path=ports.get("gateway_credential_path"),
         )
         return backend, state
 
@@ -320,7 +321,11 @@ class LocalOperationBackendTests(unittest.TestCase):
     def test_diagnostic_queries_have_distinct_user_facing_results(self) -> None:
         with TemporaryDirectory() as directory:
             clients = _Port({"state": "healthy", "next_actions": []})
-            backend, state = self._backend(Path(directory), clients=clients)
+            backend, state = self._backend(
+                Path(directory),
+                clients=clients,
+                gateway_credential_path=Path(directory) / "gateway-token",
+            )
             state.put_snapshot(
                 {
                     "kind": "supervisor",
@@ -379,6 +384,11 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(gateway_status["route_count"], 2)
             self.assertNotIn("routes", gateway_status)
             self.assertEqual(len(gateway_inspect["routes"]), 2)
+            self.assertIn(
+                "Configure Application Configuration Targets with "
+                "mastic client configure",
+                gateway_inspect["credential"]["instructions"],
+            )
             self.assertEqual(
                 {item["service"] for item in routes["items"]}, {"chat", "coding"}
             )
@@ -425,6 +435,21 @@ class LocalOperationBackendTests(unittest.TestCase):
                 ).execute()
 
             self.assertEqual(raised.exception.code, "resource_not_found")
+
+    def test_unknown_configuration_target_uses_canonical_resource_name(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            with self.assertRaises(ApplicationError) as raised:
+                backend.prepare(
+                    OperationRequest("client.inspect", {"resource": "missing"})
+                ).execute()
+
+            self.assertEqual(raised.exception.code, "resource_not_found")
+            self.assertIn(
+                "Application Configuration Target 'missing' is not configured",
+                raised.exception.message,
+            )
 
     def test_empty_metrics_are_reported_as_absent_not_invented(self) -> None:
         with TemporaryDirectory() as directory:

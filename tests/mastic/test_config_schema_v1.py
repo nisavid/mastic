@@ -155,7 +155,9 @@ route = "coding"
             )
 
     def test_rejects_unsupported_client_kind_and_invalid_sampling(self) -> None:
-        with self.assertRaisesRegex(ConfigSchemaError, "client kind"):
+        with self.assertRaisesRegex(
+            ConfigSchemaError, "unsupported Application Configuration Target kind"
+        ):
             validate_config(
                 tomlkit.parse(VALID.replace('kind = "codex"', 'kind = "other"'))
             )

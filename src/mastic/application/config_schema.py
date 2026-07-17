@@ -326,9 +326,9 @@ def _clients(
 ) -> dict[str, ClientSettings]:
     result = {}
     for name, value in raw.items():
-        table = _table(value, f"client {name!r}")
+        table = _table(value, f"Application Configuration Target {name!r}")
         _reject_unknown(
-            f"client {name!r}",
+            f"Application Configuration Target {name!r}",
             table,
             {
                 "kind",
@@ -340,54 +340,65 @@ def _clients(
                 "sampling",
             },
         )
-        kind = _string(table, "kind", f"client {name!r}")
+        kind = _string(table, "kind", f"Application Configuration Target {name!r}")
         if kind not in {"codex", "hindsight"}:
-            raise ConfigSchemaError(f"unsupported client kind {kind!r}")
+            raise ConfigSchemaError(
+                f"unsupported Application Configuration Target kind {kind!r}"
+            )
         if name != kind:
             raise ConfigSchemaError(
-                f"client {name!r} name must match its supported kind {kind!r}"
+                f"Application Configuration Target {name!r} name must match its supported kind {kind!r}"
             )
-        service = _string(table, "service", f"client {name!r}")
+        service = _string(
+            table, "service", f"Application Configuration Target {name!r}"
+        )
         if service not in services:
             raise ConfigSchemaError(
-                f"client {name!r} references unknown Inference Service {service!r}"
+                f"Application Configuration Target {name!r} references unknown Inference Service {service!r}"
             )
         profile = table.get("profile")
         if profile is not None and not isinstance(profile, str):
-            raise ConfigSchemaError(f"client {name!r} profile must be a string")
+            raise ConfigSchemaError(
+                f"Application Configuration Target {name!r} profile must be a string"
+            )
         if kind == "hindsight":
             try:
                 profile = validate_hindsight_profile_name(profile)
             except ConfigSchemaError as error:
                 raise ConfigSchemaError(
-                    f"client {name!r} requires a safe Hindsight profile name"
+                    f"Application Configuration Target {name!r} requires a safe Hindsight profile name"
                 ) from error
         elif profile is not None:
             raise ConfigSchemaError(
-                f"client {name!r} profile is only valid for Hindsight"
+                f"Application Configuration Target {name!r} profile is only valid for Hindsight"
             )
         context_window = table.get("context_window")
         if context_window is not None and (
             type(context_window) is not int or context_window <= 0
         ):
             raise ConfigSchemaError(
-                f"client {name!r} context_window must be a positive integer"
+                f"Application Configuration Target {name!r} context_window must be a positive integer"
             )
         provider = table.get("provider", "mlx-local" if kind == "codex" else "openai")
         if not isinstance(provider, str) or not provider:
-            raise ConfigSchemaError(f"client {name!r} provider must be a string")
+            raise ConfigSchemaError(
+                f"Application Configuration Target {name!r} provider must be a string"
+            )
         max_concurrent = table.get("max_concurrent", 1 if kind == "hindsight" else None)
         if max_concurrent is not None and (
             type(max_concurrent) is not int or max_concurrent <= 0
         ):
             raise ConfigSchemaError(
-                f"client {name!r} max_concurrent must be a positive integer"
+                f"Application Configuration Target {name!r} max_concurrent must be a positive integer"
             )
         if kind == "codex" and max_concurrent is not None:
             raise ConfigSchemaError(
-                f"client {name!r} max_concurrent is only valid for Hindsight"
+                f"Application Configuration Target {name!r} max_concurrent is only valid for Hindsight"
             )
-        sampling_raw = _table(table.get("sampling", {}), f"client {name!r} sampling")
+        sampling_raw = _table(
+            table.get("sampling", {}),
+            f"Application Configuration Target {name!r} sampling",
+        )
         sampling: dict[str, ClientSamplingSettings] = {}
         normalized: set[str] = set()
         for sampling_name, sampling_value in sampling_raw.items():
@@ -395,22 +406,22 @@ def _clients(
                 sampling_name
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} has an invalid sampling profile name"
+                    f"Application Configuration Target {name!r} has an invalid sampling profile name"
                 )
             normalized_name = (
                 re.sub(r"[^A-Za-z0-9]+", "_", sampling_name).strip("_").upper()
             )
             if normalized_name in normalized:
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile names collide after normalization"
+                    f"Application Configuration Target {name!r} sampling profile names collide after normalization"
                 )
             normalized.add(normalized_name)
             values = _table(
                 sampling_value,
-                f"client {name!r} sampling profile {sampling_name!r}",
+                f"Application Configuration Target {name!r} sampling profile {sampling_name!r}",
             )
             _reject_unknown(
-                f"client {name!r} sampling profile {sampling_name!r}",
+                f"Application Configuration Target {name!r} sampling profile {sampling_name!r}",
                 values,
                 {
                     "temperature",
@@ -453,70 +464,70 @@ def _clients(
                 for value in numeric_values.values()
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} numeric values must be finite"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} numeric values must be finite"
                 )
             if temperature is not None and (
                 type(temperature) not in {int, float} or temperature < 0
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} temperature must be nonnegative"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} temperature must be nonnegative"
                 )
             if top_p is not None and (
                 type(top_p) not in {int, float} or not 0 < top_p <= 1
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} top_p must be in (0, 1]"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} top_p must be in (0, 1]"
                 )
             if top_k is not None and (type(top_k) is not int or top_k < 0):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} top_k must be a nonnegative integer"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} top_k must be a nonnegative integer"
                 )
             if min_p is not None and (
                 type(min_p) not in {int, float} or not 0 <= min_p <= 1
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} min_p must be in [0, 1]"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} min_p must be in [0, 1]"
                 )
             if presence_penalty is not None and (
                 type(presence_penalty) not in {int, float}
                 or not -2 <= presence_penalty <= 2
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} presence_penalty must be in [-2, 2]"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} presence_penalty must be in [-2, 2]"
                 )
             if repetition_penalty is not None and (
                 type(repetition_penalty) not in {int, float} or repetition_penalty <= 0
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} repetition_penalty must be positive"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} repetition_penalty must be positive"
                 )
             if max_tokens is not None and (
                 type(max_tokens) is not int or max_tokens <= 0
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} max_tokens must be positive"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} max_tokens must be positive"
                 )
             if enable_thinking is not None and type(enable_thinking) is not bool:
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} enable_thinking must be boolean"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} enable_thinking must be boolean"
                 )
             if preserve_thinking is not None and type(preserve_thinking) is not bool:
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} preserve_thinking must be boolean"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} preserve_thinking must be boolean"
                 )
             provenance = (upstream_profile, source_url, source_revision)
             if any(value is not None for value in provenance) and not all(
                 value is not None for value in provenance
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} provenance must include upstream_profile, source_url, and source_revision"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} provenance must include upstream_profile, source_url, and source_revision"
                 )
             if upstream_profile is not None and (
                 not isinstance(upstream_profile, str)
                 or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", upstream_profile)
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} upstream_profile is invalid"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} upstream_profile is invalid"
                 )
             if source_url is not None:
                 parsed_source = (
@@ -530,14 +541,14 @@ def _clients(
                     or parsed_source.password is not None
                 ):
                     raise ConfigSchemaError(
-                        f"client {name!r} sampling profile {sampling_name!r} source_url must be HTTPS"
+                        f"Application Configuration Target {name!r} sampling profile {sampling_name!r} source_url must be HTTPS"
                     )
             if source_revision is not None and (
                 not isinstance(source_revision, str)
                 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source_revision)
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile {sampling_name!r} source_revision must be an exact commit SHA"
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} source_revision must be an exact commit SHA"
                 )
             sampling[sampling_name] = ClientSamplingSettings(
                 temperature=float(temperature) if temperature is not None else None,
@@ -566,7 +577,7 @@ def _clients(
         )
         if set(sampling) != required_profiles:
             raise ConfigSchemaError(
-                f"client {name!r} requires sampling profiles: {', '.join(sorted(required_profiles))}"
+                f"Application Configuration Target {name!r} requires sampling profiles: {', '.join(sorted(required_profiles))}"
             )
         if kind == "codex":
             coding = sampling["coding"]
@@ -577,7 +588,7 @@ def _clients(
                 or coding.max_tokens is not None
             ):
                 raise ConfigSchemaError(
-                    f"client {name!r} sampling profile 'coding' contains values OptiQ Responses cannot represent"
+                    f"Application Configuration Target {name!r} sampling profile 'coding' contains values OptiQ Responses cannot represent"
                 )
         result[name] = ClientSettings(
             name=name,

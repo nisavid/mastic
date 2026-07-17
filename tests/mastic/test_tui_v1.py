@@ -1,7 +1,8 @@
 import unittest
 from threading import Event
 
-from textual.widgets import Checkbox, Input, Label, Select, Static
+from rich.cells import cell_len
+from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
 from mastic.application.catalogue import build_operation_catalogue
 from mastic.application.dispatch import ApplicationError, OperationResult
@@ -83,6 +84,16 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_navigation_preserves_capability_and_changes_context(self) -> None:
         async with self.app.run_test(size=(140, 45)) as pilot:
+            targets = self.app.query_one("#nav-clients", Button)
+            self.assertEqual(
+                str(targets.label),
+                "⇄  Application Configuration Targets",
+            )
+            self.assertGreaterEqual(
+                targets.size.width,
+                cell_len(str(targets.label)) + 2,
+            )
+
             await pilot.click("#nav-services")
             title = str(self.app.query_one("#view-title", Static).content)
             self.assertEqual(title, "Inference Services")
@@ -94,6 +105,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             topology = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Model → Runtime → Service → Gateway", topology)
             self.assertIn("qwen-optiq → optiq@0.2.15", topology)
+
+            self.app.show_view("first-run")
+            first_run = str(self.app.query_one("#view-body", Static).content)
+            self.assertIn("Preview Application Configuration Targets", first_run)
 
     async def test_resource_views_query_live_read_only_operations(self) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:
@@ -382,6 +397,14 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(self.app.query_one("#parameter-query"), Input)
             self.assertIsInstance(self.app.query_one("#parameter-source"), Select)
             self.assertIsInstance(self.app.query_one("#parameter-limit"), Input)
+
+    async def test_medium_layout_preserves_workspace_width(self) -> None:
+        async with self.app.run_test(size=(100, 35)):
+            self.assertEqual(
+                self.app.query_one("#resource-nav").styles.display, "block"
+            )
+            self.assertEqual(self.app.query_one("#resource-nav").styles.width.value, 41)
+            self.assertEqual(self.app.query_one("#inspector").styles.display, "none")
 
     async def test_help_explains_current_screen_and_shared_controls(self) -> None:
         async with self.app.run_test(size=(100, 35)) as pilot:
