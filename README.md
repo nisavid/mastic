@@ -20,9 +20,9 @@ MASTIC stands for **Modular, Adaptive, System-Tailored Inference Connector**.
 - **One stable gateway.** Named inference services remain behind an
   authenticated OpenAI-compatible loopback endpoint while private process
   ports change underneath it.
-- **Reversible client setup.** MASTIC configures only the Codex and Hindsight
-  fields it owns, then can remove those fields without erasing unrelated user
-  configuration.
+- **Reversible application setup.** MASTIC configures only the Codex and
+  Hindsight fields it owns, then can remove those fields without erasing
+  unrelated user configuration.
 - **Operational evidence.** Status, health checks, diagnostics, bounded logs,
   metrics, and durable operation records explain what is running and what to
   do next.

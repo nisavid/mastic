@@ -19,8 +19,8 @@ Use these guides when MASTIC is installed and you have a concrete goal.
   from a system overview to health checks, diagnosis, logs, and durable
   operation evidence.
 - [Validate a target-Mac deployment](how-to/validate-deployment.md) — verify
-  entry points, inactive launchd registration, client metadata, one bounded
-  request, and clean shutdown.
+  entry points, inactive launchd registration, Application Configuration
+  Target metadata, managed Gateway contracts, and clean shutdown.
 
 ## Look up exact behavior
 

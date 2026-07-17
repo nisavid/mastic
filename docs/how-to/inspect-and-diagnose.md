@@ -43,7 +43,8 @@ mastic doctor
 
 `doctor` correlates configuration, lifecycle, routing, runtime, and service
 evidence and returns stable next actions. Follow the narrowest suggested
-operation instead of editing MASTIC state or client configuration directly.
+operation instead of editing MASTIC state or application configuration
+directly.
 
 ## Inspect logs and durable work
 
