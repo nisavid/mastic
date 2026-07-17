@@ -147,7 +147,7 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(resolved.selection.context_window, 262_144)
         self.assertEqual(resolved.selection.service_options["max_concurrent"], 3)
 
-    def test_guided_plan_preselects_a_machine_aware_editable_exact_profile(
+    def test_guided_preview_preselects_a_machine_aware_editable_exact_profile(
         self,
     ) -> None:
         resolved = self.resolver.resolve(
@@ -250,7 +250,7 @@ class SetupV1Tests(unittest.TestCase):
             },
         )
 
-    def test_service_identity_and_options_are_exact_immutable_plan_inputs(self) -> None:
+    def test_service_identity_and_options_are_exact_immutable_preview_inputs(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
         options = {
             "kv_config": "kv_config.json",
@@ -465,7 +465,7 @@ class SetupV1Tests(unittest.TestCase):
             ],
         )
 
-    def test_offline_plan_exposes_evidence_and_blocks_missing_network_artifacts(
+    def test_offline_preview_exposes_evidence_and_blocks_missing_network_artifacts(
         self,
     ) -> None:
         resolved = self.resolver.resolve(

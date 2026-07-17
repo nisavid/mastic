@@ -131,7 +131,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("service.stop", body)
             self.assertIn("supervisor.stop", body)
 
-    async def test_first_run_is_intent_first_and_shows_exact_plan_before_change(
+    async def test_first_run_is_intent_first_and_shows_exact_preview_before_change(
         self,
     ) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:
@@ -353,7 +353,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                 [request.name for request in self.dispatcher.requests], ["model.list"]
             )
 
-    async def test_cancelled_plan_makes_no_change_and_preserves_inputs(self) -> None:
+    async def test_cancelled_preview_makes_no_change_and_preserves_inputs(self) -> None:
         async with self.app.run_test(size=(100, 40)) as pilot:
             await self.app.open_operation("service.remove")
             resource = self.app.query_one("#parameter-resource", Input)

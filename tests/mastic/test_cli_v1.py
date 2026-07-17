@@ -163,7 +163,7 @@ class CliV1Tests(unittest.TestCase):
         self.assertNotEqual(denied.exit_code, 0)
         self.assertFalse(self.dispatcher.requests)
 
-    def test_interactive_mutation_renders_backend_plan_before_confirmation(
+    def test_interactive_mutation_renders_backend_preview_before_confirmation(
         self,
     ) -> None:
         result = self.runner.invoke(

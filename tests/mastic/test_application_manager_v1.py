@@ -57,7 +57,7 @@ class ApplicationManagerTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "confirmation_required")
 
-    def test_preview_resolves_the_backend_plan_without_execution_or_activation(
+    def test_preview_resolves_the_backend_preview_without_execution_or_activation(
         self,
     ) -> None:
         self.backend.require.add("model.cache.evict")
