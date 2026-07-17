@@ -37,6 +37,8 @@ class ApplicationTargetAdapter(Protocol):
 
     def remove(self): ...
 
+    def restore(self) -> None: ...
+
     def test(
         self, configuration: ApplicationTargetConfiguration, request, *, profile: str
     ): ...
@@ -145,7 +147,15 @@ class ApplicationTargetOperationPort:
     ) -> Mapping[str, object]:
         name = str(parameters.get("application_target", ""))
         stored = self._settings(name)
-        if operation != "application-target.configure" and stored is None:
+        if (
+            operation
+            not in {
+                "application-target.configure",
+                "application-target.inspect",
+                "application-target.remove",
+            }
+            and stored is None
+        ):
             raise ApplicationError(
                 "resource_not_found",
                 f"Application Configuration Target {name!r} is not configured",
@@ -170,11 +180,28 @@ class ApplicationTargetOperationPort:
                 next_actions=(f"mastic {operation.replace('.', ' ')} --help",),
             ) from error
         if operation == "application-target.remove":
+            inverse_configuration = (
+                self._configuration(name, parameters, stored)
+                if stored is not None
+                else None
+            )
             result = adapter.remove()
             plain_result = _plain(result)
             if isinstance(plain_result, Mapping) and plain_result.get("skipped_paths"):
                 return {**plain_result, "desired_state_retained": True}
-            self._record(name, None)
+            if stored is None:
+                return plain_result
+            try:
+                self._record(name, None)
+            except Exception:
+                if inverse_configuration is not None:
+                    try:
+                        adapter.apply(inverse_configuration)
+                    except Exception as recovery_error:
+                        raise _application_target_recovery_required(
+                            name
+                        ) from recovery_error
+                raise
             return plain_result
         if operation == "application-target.inspect":
             inspect = getattr(adapter, "inspect", None)
@@ -196,14 +223,29 @@ class ApplicationTargetOperationPort:
                         f"mastic application-target configure {name} --help",
                     ),
                 )
+            desired_settings = _application_target_settings(
+                name, parameters, configuration, stored
+            )
+            previous_configuration = (
+                self._configuration(name, {}, stored) if stored is not None else None
+            )
             preview = adapter.preview(configuration)
             result = adapter.apply(
                 configuration, takeover=bool(parameters.get("takeover", False))
             )
-            self._record(
-                name,
-                _application_target_settings(name, parameters, configuration, stored),
-            )
+            try:
+                self._record(name, desired_settings)
+            except Exception:
+                try:
+                    if previous_configuration is None:
+                        adapter.restore()
+                    else:
+                        adapter.apply(previous_configuration)
+                except Exception as recovery_error:
+                    raise _application_target_recovery_required(
+                        name
+                    ) from recovery_error
+                raise
             return {"preview": _plain(preview), "result": _plain(result)}
         if operation == "application-target.test":
             profile = str(
@@ -229,6 +271,17 @@ class ApplicationTargetOperationPort:
             "operation_unavailable",
             f"{operation} is not an Application Configuration Target operation",
         )
+
+
+def _application_target_recovery_required(name: str) -> ApplicationError:
+    return ApplicationError(
+        "application_target_recovery_required",
+        f"Application Configuration Target {name!r} requires manual recovery",
+        next_actions=(
+            f"mastic application-target configure {name}",
+            f"mastic application-target remove {name}",
+        ),
+    )
 
 
 def _application_target_settings(

@@ -69,6 +69,9 @@ class FakeSupervisor:
 class FakeApplicationTargetAdapter:
     def __init__(self) -> None:
         self.calls = []
+        self.apply_error = None
+        self.apply_error_on_call = None
+        self.restore_error = None
 
     def preview(self, configuration):
         self.calls.append(("preview", configuration.service_name))
@@ -76,11 +79,22 @@ class FakeApplicationTargetAdapter:
 
     def apply(self, configuration, *, takeover=False):
         self.calls.append(("apply", configuration.service_name, takeover))
+        apply_count = sum(call[0] == "apply" for call in self.calls)
+        if self.apply_error is not None and self.apply_error_on_call in {
+            None,
+            apply_count,
+        }:
+            raise self.apply_error
         return {"changed": True}
 
     def remove(self):
         self.calls.append(("remove",))
         return {"changed": True}
+
+    def restore(self):
+        self.calls.append(("restore",))
+        if self.restore_error is not None:
+            raise self.restore_error
 
     def test(self, configuration, request, *, profile):
         self.calls.append(("test", profile))
@@ -373,6 +387,273 @@ class OperationPortTests(unittest.TestCase):
         self.assertTrue(result["desired_state_retained"])
         self.assertEqual(result["skipped_paths"], [["model"]])
         self.assertEqual(recorded, [])
+
+    def test_configure_restores_external_state_when_desired_state_record_fails(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+
+        def record(_name, _value):
+            raise RuntimeError("desired state write failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity="coding",
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            record=record,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "desired state write failed"):
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "coding"},
+            )
+
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["preview", "apply", "restore"]
+        )
+
+    def test_reconfigure_reapplies_previous_desired_state_when_record_fails(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        stored = ApplicationTargetSettings(
+            name="codex",
+            kind="codex",
+            service="old-coding",
+            profile=None,
+            context_window=32768,
+            provider="mlx-local",
+            max_concurrent=None,
+            sampling={},
+        )
+
+        def configuration(name, parameters, settings):
+            service = str(parameters.get("service") or settings.service)
+            return ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=service,
+            )
+
+        def record(_name, _value):
+            raise RuntimeError("desired state write failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            configuration,
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: stored,
+            record=record,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "desired state write failed"):
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "new-coding"},
+            )
+
+        self.assertEqual(
+            adapter.calls,
+            [
+                ("preview", "new-coding"),
+                ("apply", "new-coding", False),
+                ("apply", "old-coding", False),
+            ],
+        )
+
+    def test_reconfigure_reports_recovery_when_previous_state_reapply_fails(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.apply_error = OSError("reapply failed")
+        adapter.apply_error_on_call = 2
+        stored = ApplicationTargetSettings(
+            name="codex",
+            kind="codex",
+            service="old-coding",
+            profile=None,
+            context_window=32768,
+            provider="mlx-local",
+            max_concurrent=None,
+            sampling={},
+        )
+
+        def configuration(name, parameters, settings):
+            service = str(parameters.get("service") or settings.service)
+            return ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=service,
+            )
+
+        def record(_name, _value):
+            raise RuntimeError("desired state write failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            configuration,
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: stored,
+            record=record,
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "new-coding"},
+            )
+
+        self.assertEqual(raised.exception.code, "application_target_recovery_required")
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["preview", "apply", "apply"]
+        )
+
+    def test_remove_reapplies_external_state_when_desired_state_delete_fails(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        stored = ApplicationTargetSettings(
+            name="codex",
+            kind="codex",
+            service="coding",
+            profile=None,
+            context_window=32768,
+            provider="mlx-local",
+            max_concurrent=None,
+            sampling={},
+        )
+
+        def record(_name, _value):
+            raise RuntimeError("desired state delete failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                settings.service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=settings.service,
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: stored,
+            record=record,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "desired state delete failed"):
+            port.execute("application-target.remove", {"application_target": "codex"})
+
+        self.assertEqual([call[0] for call in adapter.calls], ["remove", "apply"])
+
+    def test_remove_delegates_manifest_backed_cleanup_without_desired_state(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        recorded = []
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1", "coding"
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: None,
+            record=lambda name, value: recorded.append((name, value)),
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute("application-target.test", {"application_target": "codex"})
+        result = port.execute(
+            "application-target.remove", {"application_target": "codex"}
+        )
+
+        self.assertEqual(raised.exception.code, "resource_not_found")
+        self.assertTrue(result["changed"])
+        self.assertEqual(adapter.calls, [("remove",)])
+        self.assertEqual(recorded, [])
+
+    def test_configure_reports_manifest_backed_recovery_when_restore_fails(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.restore_error = OSError("restore failed")
+
+        def record(_name, _value):
+            raise RuntimeError("desired state write failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity="coding",
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            record=record,
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "coding"},
+            )
+
+        self.assertEqual(raised.exception.code, "application_target_recovery_required")
+        self.assertIn(
+            "mastic application-target configure codex", raised.exception.next_actions
+        )
+        self.assertIn(
+            "mastic application-target remove codex", raised.exception.next_actions
+        )
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["preview", "apply", "restore"]
+        )
+
+    def test_remove_reports_recovery_when_inverse_reapply_fails(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.apply_error = OSError("reapply failed")
+        stored = ApplicationTargetSettings(
+            name="codex",
+            kind="codex",
+            service="coding",
+            profile=None,
+            context_window=32768,
+            provider="mlx-local",
+            max_concurrent=None,
+            sampling={},
+        )
+
+        def record(_name, _value):
+            raise RuntimeError("desired state delete failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                settings.service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=settings.service,
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: stored,
+            record=record,
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute("application-target.remove", {"application_target": "codex"})
+
+        self.assertEqual(raised.exception.code, "application_target_recovery_required")
+        self.assertIn(
+            "mastic application-target configure codex", raised.exception.next_actions
+        )
+        self.assertEqual([call[0] for call in adapter.calls], ["remove", "apply"])
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import tomlkit
 
+import mastic.infrastructure.application_target_integrations as target_integrations
 from mastic.application.config_schema import ApplicationTargetSettings
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
@@ -19,6 +21,7 @@ from mastic.infrastructure.application_target_integrations import (
     LocalApplicationTargetIntegrationFactory,
     SamplingProfile,
 )
+from mastic.infrastructure.operation_ports import ApplicationTargetOperationPort
 
 
 class ClientIntegrationV1Tests(unittest.TestCase):
@@ -814,6 +817,146 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_API_LLM_MODEL=cloud", restored)
             self.assertNotIn("HINDSIGHT_API_LLM_BASE_URL", restored)
 
+    def test_hindsight_apply_restores_all_files_after_a_post_replace_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "profile.env"
+            manifest = root / "owner.json"
+            backup = root / "backup"
+            original = b"HINDSIGHT_API_LLM_MODEL=cloud\n"
+            config.write_bytes(original)
+
+            def replace_then_fail(path: Path, payload: bytes) -> None:
+                path.write_bytes(payload)
+                raise OSError("post-replace failure")
+
+            adapter = HindsightApplicationTargetIntegration(
+                config,
+                manifest,
+                backup,
+                replace=replace_then_fail,
+            )
+
+            with self.assertRaisesRegex(OSError, "post-replace failure"):
+                adapter.apply(self.configuration)
+
+            self.assertEqual(config.read_bytes(), original)
+            self.assertFalse(manifest.exists())
+            self.assertFalse(backup.exists())
+
+    def test_hindsight_remove_restores_all_files_after_a_post_replace_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            HindsightApplicationTargetIntegration(*paths).apply(self.configuration)
+            before = {path: path.read_bytes() for path in paths}
+
+            def replace_then_fail(path: Path, payload: bytes) -> None:
+                path.write_bytes(payload)
+                raise OSError("post-replace failure")
+
+            failing = HindsightApplicationTargetIntegration(
+                *paths,
+                replace=replace_then_fail,
+            )
+
+            with self.assertRaisesRegex(OSError, "post-replace failure"):
+                failing.remove()
+
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_hindsight_restore_restores_all_files_after_a_post_replace_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            HindsightApplicationTargetIntegration(*paths).apply(self.configuration)
+            before = {path: path.read_bytes() for path in paths}
+
+            def replace_then_fail(path: Path, payload: bytes) -> None:
+                path.write_bytes(payload)
+                raise OSError("post-replace failure")
+
+            failing = HindsightApplicationTargetIntegration(
+                *paths,
+                replace=replace_then_fail,
+            )
+
+            with self.assertRaisesRegex(OSError, "post-replace failure"):
+                failing.restore()
+
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_hindsight_remove_restores_all_files_after_manifest_replace_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            adapter = HindsightApplicationTargetIntegration(*paths)
+            adapter.apply(self.configuration)
+            paths[0].write_text(
+                paths[0]
+                .read_text(encoding="utf-8")
+                .replace(
+                    "HINDSIGHT_API_LLM_MODEL=coding",
+                    "HINDSIGHT_API_LLM_MODEL=user-choice",
+                ),
+                encoding="utf-8",
+            )
+            before = {path: path.read_bytes() for path in paths}
+            write_private = target_integrations._write_private
+
+            def write_then_fail(path: Path, payload: bytes) -> None:
+                write_private(path, payload)
+                if path == paths[1]:
+                    raise OSError("manifest replace failure")
+
+            with (
+                patch.object(
+                    target_integrations,
+                    "_write_private",
+                    side_effect=write_then_fail,
+                ),
+                self.assertRaisesRegex(OSError, "manifest replace failure"),
+            ):
+                adapter.remove()
+
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_hindsight_restore_restores_all_files_after_manifest_unlink_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            adapter = HindsightApplicationTargetIntegration(*paths)
+            adapter.apply(self.configuration)
+            before = {path: path.read_bytes() for path in paths}
+            unlink = Path.unlink
+
+            def unlink_then_fail(path: Path, missing_ok: bool = False) -> None:
+                unlink(path, missing_ok=missing_ok)
+                if path == paths[1]:
+                    raise OSError("manifest unlink failure")
+
+            with (
+                patch.object(Path, "unlink", unlink_then_fail),
+                self.assertRaisesRegex(OSError, "manifest unlink failure"),
+            ):
+                adapter.restore()
+
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
     def test_application_target_test_route_is_independent_of_profile_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -914,6 +1057,72 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 stored,
             )
             self.assertEqual(test_adapter.config_path, profiles / "agent-memory.env")
+
+    def test_local_factory_recovers_one_manifest_backed_hindsight_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "profiles"
+            ownership = root / "ownership"
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=profiles,
+                ownership_dir=ownership,
+            )
+            configured = factory(
+                "application-target.configure",
+                "hindsight",
+                {"profile": "agent-memory"},
+                None,
+            )
+            configured.apply(self.configuration)
+            (ownership / "hindsight-malformed.ownership.json").write_text(
+                "not json", encoding="utf-8"
+            )
+
+            recovered = factory("application-target.inspect", "hindsight", {}, None)
+            recorded = []
+            port = ApplicationTargetOperationPort(
+                factory,
+                lambda name, parameters, settings: self.configuration,
+                request=lambda target, endpoint, model, sampling: {},
+                settings=lambda name: None,
+                record=lambda name, value: recorded.append((name, value)),
+            )
+            report = port.execute(
+                "application-target.inspect", {"application_target": "hindsight"}
+            )
+            result = port.execute(
+                "application-target.remove", {"application_target": "hindsight"}
+            )
+
+            self.assertEqual(recovered.config_path, profiles / "agent-memory.env")
+            self.assertEqual(report["state"], "healthy")
+            self.assertTrue(result["changed"])
+            self.assertFalse(configured.manifest_path.exists())
+            self.assertEqual(recorded, [])
+
+    def test_local_factory_refuses_ambiguous_manifest_backed_hindsight_profiles(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=root / "ownership",
+            )
+            for profile in ("agent-memory", "research-memory"):
+                factory(
+                    "application-target.configure",
+                    "hindsight",
+                    {"profile": profile},
+                    None,
+                ).apply(self.configuration)
+
+            with self.assertRaisesRegex(ValueError, "exactly one valid"):
+                factory("application-target.remove", "hindsight", {}, None)
 
     def test_local_factory_rejects_missing_traversal_and_symlink_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

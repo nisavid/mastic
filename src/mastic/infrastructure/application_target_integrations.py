@@ -283,6 +283,11 @@ class LocalApplicationTargetIntegrationFactory:
         _safe_directory(self.hindsight_profiles_dir, "Hindsight profiles directory")
         if operation == "application-target.configure":
             profile = parameters.get("profile")
+        elif settings is None and operation in {
+            "application-target.inspect",
+            "application-target.remove",
+        }:
+            profile = self._owned_hindsight_profile()
         else:
             profile = settings.profile if settings is not None else None
         profile_name = validate_hindsight_profile_name(profile)
@@ -294,6 +299,32 @@ class LocalApplicationTargetIntegrationFactory:
             self.ownership_dir / f"hindsight-{profile_name}.config.backup",
             credential_reader=self._credential_reader,
         )
+
+    def _owned_hindsight_profile(self) -> str:
+        profiles = []
+        prefix = "hindsight-"
+        suffix = ".ownership.json"
+        for manifest_path in self.ownership_dir.glob(f"{prefix}*{suffix}"):
+            profile = manifest_path.name[len(prefix) : -len(suffix)]
+            try:
+                profile = validate_hindsight_profile_name(profile)
+                config_path = self.hindsight_profiles_dir / f"{profile}.env"
+                backup_path = self.ownership_dir / f"hindsight-{profile}.config.backup"
+                manifest = _load_manifest(manifest_path, "hindsight", False)
+                _validate_manifest_paths(manifest, config_path, backup_path)
+            except (
+                ApplicationTargetIntegrationConflict,
+                OSError,
+                UnicodeError,
+                ValueError,
+            ):
+                continue
+            profiles.append(profile)
+        if len(profiles) != 1:
+            raise ValueError(
+                "Hindsight profile recovery requires exactly one valid ownership manifest"
+            )
+        return profiles[0]
 
 
 class CodexApplicationTargetIntegration:
@@ -874,7 +905,11 @@ class HindsightApplicationTargetIntegration:
             "applied_digest": _digest(rendered),
             "fields": owned,
         }
-        support = _support_snapshot(self.manifest_path, self.backup_path)
+        snapshot = _snapshot_files(
+            self.config_path,
+            self.manifest_path,
+            self.backup_path,
+        )
         try:
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
@@ -882,7 +917,7 @@ class HindsightApplicationTargetIntegration:
             if changes:
                 self._replace(self.config_path, rendered)
         except Exception:
-            _restore_support(self.manifest_path, self.backup_path, support)
+            _restore_files(snapshot)
             raise
         return ApplicationTargetApplyResult(
             bool(changes) or ownership_changed,
@@ -895,6 +930,11 @@ class HindsightApplicationTargetIntegration:
         manifest = self._manifest(optional=True)
         if not manifest:
             return ApplicationTargetRemovalResult(False, ())
+        snapshot = _snapshot_files(
+            self.config_path,
+            self.manifest_path,
+            self.backup_path,
+        )
         raw, _ = _read(self.config_path)
         env = _EnvDocument(raw.decode())
         changes: list[SemanticChange] = []
@@ -920,35 +960,52 @@ class HindsightApplicationTargetIntegration:
                 env.delete(path[0])
                 changes.append(_redact_change(SemanticChange(path, current, None)))
         rendered = env.render().encode()
-        if changes:
-            if not manifest["config_existed"] and not rendered.strip() and not retained:
-                self.config_path.unlink(missing_ok=True)
+        try:
+            if changes:
+                if (
+                    not manifest["config_existed"]
+                    and not rendered.strip()
+                    and not retained
+                ):
+                    self.config_path.unlink(missing_ok=True)
+                else:
+                    self._replace(self.config_path, rendered)
+            if retained:
+                manifest["fields"] = retained
+                _write_private(self.manifest_path, _json_bytes(manifest))
             else:
-                self._replace(self.config_path, rendered)
-        if retained:
-            manifest["fields"] = retained
-            _write_private(self.manifest_path, _json_bytes(manifest))
-        else:
-            self.manifest_path.unlink(missing_ok=True)
-            self.backup_path.unlink(missing_ok=True)
+                self.manifest_path.unlink(missing_ok=True)
+                self.backup_path.unlink(missing_ok=True)
+        except Exception:
+            _restore_files(snapshot)
+            raise
         return ApplicationTargetRemovalResult(
             bool(changes), tuple(changes), tuple(skipped)
         )
 
     def restore(self) -> None:
         manifest = self._manifest()
+        snapshot = _snapshot_files(
+            self.config_path,
+            self.manifest_path,
+            self.backup_path,
+        )
         current, _ = _read(self.config_path)
         if _digest(current) != manifest["applied_digest"]:
             raise ApplicationTargetIntegrationConflict(
                 "Hindsight config changed after mastic applied the integration"
             )
         backup, _ = _read(self.backup_path)
-        if manifest["config_existed"]:
-            self._replace(self.config_path, backup)
-        else:
-            self.config_path.unlink(missing_ok=True)
-        self.manifest_path.unlink(missing_ok=True)
-        self.backup_path.unlink(missing_ok=True)
+        try:
+            if manifest["config_existed"]:
+                self._replace(self.config_path, backup)
+            else:
+                self.config_path.unlink(missing_ok=True)
+            self.manifest_path.unlink(missing_ok=True)
+            self.backup_path.unlink(missing_ok=True)
+        except Exception:
+            _restore_files(snapshot)
+            raise
 
     def test(
         self,
