@@ -15,7 +15,7 @@ complete arguments and options of one operation.
 
 | Command | Behavior |
 | --- | --- |
-| `mastic setup` | Plans and creates a complete local inference service. |
+| `mastic setup` | Previews and creates a complete local inference service. |
 | `mastic remove` | Previews and removes MASTIC-owned services, state, and integrations. |
 | `mastic status` | Reports the whole local system without starting it. |
 | `mastic check` | Evaluates health policy across the Supervisor, Gateway, and services. |

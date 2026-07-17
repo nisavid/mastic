@@ -161,8 +161,8 @@ Model inspection and guided setup combine exact model-weight evidence,
 architecture-aware KV and runtime-state projections, requested context and
 concurrency, current machine memory, and a system reserve. The resulting fit is
 likely, borderline, no-fit, or unknown and includes its assumptions. The setup
-plan blocks a known no-fit selection and makes uncertain evidence visible before
-confirmation. Per-service admission is bounded and returns a stable retryable
+preview blocks a known no-fit selection and makes uncertain evidence visible
+before confirmation. Per-service admission is bounded and returns a stable retryable
 response at the concurrency limit.
 
 Critical memory pressure immediately blocks new starts and sheds new Gateway
