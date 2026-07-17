@@ -48,10 +48,9 @@ human prose.
 
 ## Mutation behavior
 
-Mutating commands preview their complete resolved plan before confirmation.
-Interactive callers confirm that plan at the prompt. Automation supplies
-`--yes` only after providing all required values and reviewing the same plan
-shape.
+Mutating commands show their resolved preview before confirmation. Interactive
+callers confirm that preview at the prompt. Automation supplies `--yes` only
+after providing all required values and reviewing the same preview shape.
 
 Read-only commands never start `masticd`. A mutation may start it when the
 operation requires the Supervisor and reports that action.
