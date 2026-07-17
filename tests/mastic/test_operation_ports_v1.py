@@ -16,6 +16,7 @@ from mastic.infrastructure.operation_ports import (
 )
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
+    ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
     SamplingProfile,
 )
@@ -656,6 +657,36 @@ class OperationPortTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "application_target_recovery_required")
         self.assertNotIn(("rollback",), adapter.calls)
+
+    def test_ownership_recovery_is_typed_and_does_not_expose_evidence(self) -> None:
+        secret = "secret-payload-at-/tmp/untrusted-owner.json"
+
+        def blocked_adapter(operation, name, parameters, settings):
+            raise ApplicationTargetOwnershipRecoveryRequired(secret)
+
+        port = ApplicationTargetOperationPort(
+            blocked_adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1", "coding"
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.remove", {"application_target": "hindsight"}
+            )
+
+        self.assertEqual(raised.exception.code, "application_target_recovery_required")
+        self.assertEqual(
+            raised.exception.next_actions,
+            (
+                "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
+                "mastic application-target inspect hindsight",
+            ),
+        )
+        self.assertNotIn(secret, repr(raised.exception))
+        self.assertNotIn("configure", repr(raised.exception.next_actions))
 
     def test_configure_reports_recovery_without_rollback_when_reload_fails(
         self,

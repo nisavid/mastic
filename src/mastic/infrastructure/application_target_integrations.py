@@ -31,6 +31,13 @@ _HINDSIGHT_API_KEY = "HINDSIGHT_API_LLM_API_KEY"
 _REDACTED = "<redacted>"
 
 
+def _ownership_recovery_next_actions(integration: str) -> list[str]:
+    return [
+        "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
+        f"mastic application-target inspect {integration}",
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class SamplingProfile:
     temperature: float | None = None
@@ -234,6 +241,10 @@ class ApplicationTargetIntegrationConflict(RuntimeError):
     """A managed field or snapshot changed outside mastic."""
 
 
+class ApplicationTargetOwnershipRecoveryRequired(RuntimeError):
+    """On-disk ownership evidence must be resolved before mutation."""
+
+
 class OwnershipDiscoveryPolicy(Enum):
     """How ownership discovery handles recognizable invalid manifests."""
 
@@ -248,7 +259,6 @@ class ApplicationTargetOwnership:
     config_path: Path
     manifest_path: Path
     backup_path: Path
-    valid: bool
 
 
 class ApplicationTargetOwnershipDiscovery:
@@ -290,13 +300,14 @@ class ApplicationTargetOwnershipDiscovery:
             try:
                 recognized = self._recognize(manifest_path)
             except ValueError as error:
-                raise ValueError("invalid Hindsight ownership manifest name") from error
+                raise ApplicationTargetOwnershipRecoveryRequired(
+                    "invalid Hindsight ownership manifest name"
+                ) from error
             if recognized is None:
                 continue
             owned_integration, profile, config_path, backup_path = recognized
             if integration is not None and owned_integration != integration:
                 continue
-            valid = True
             try:
                 manifest = _load_manifest(manifest_path, owned_integration, False)
                 _validate_manifest_paths(manifest, config_path, backup_path)
@@ -306,9 +317,8 @@ class ApplicationTargetOwnershipDiscovery:
                 UnicodeError,
                 ValueError,
             ) as error:
-                valid = False
                 if policy is OwnershipDiscoveryPolicy.STRICT:
-                    raise ValueError(
+                    raise ApplicationTargetOwnershipRecoveryRequired(
                         f"invalid {owned_integration} ownership manifest"
                     ) from error
             ownership.append(
@@ -318,12 +328,11 @@ class ApplicationTargetOwnershipDiscovery:
                     config_path,
                     manifest_path,
                     backup_path,
-                    valid,
                 )
             )
         hindsight = [item for item in ownership if item.integration == "hindsight"]
         if len(hindsight) > 1:
-            raise ValueError(
+            raise ApplicationTargetOwnershipRecoveryRequired(
                 "Hindsight profile recovery requires exactly one recognizable ownership manifest"
             )
         return tuple(ownership)
@@ -342,7 +351,7 @@ class ApplicationTargetOwnershipDiscovery:
             else None
         )
         if profile is not None and hindsight[0].profile != profile:
-            raise ValueError(
+            raise ApplicationTargetOwnershipRecoveryRequired(
                 "Desired Hindsight profile does not match the owned profile"
             )
         return hindsight[0]
@@ -752,7 +761,8 @@ class CodexApplicationTargetIntegration:
                 "state": "malformed",
                 "detail": "Codex ownership manifest is malformed.",
                 "catalog_path": str(self.catalog_path),
-                "next_actions": ["mastic application-target configure codex"],
+                "ownership_manifest_path": str(self.manifest_path),
+                "next_actions": _ownership_recovery_next_actions("codex"),
             }
         if not manifest:
             return {
@@ -1240,9 +1250,18 @@ class HindsightApplicationTargetIntegration:
             "state": state,
             "detail": detail,
             "config_path": str(self.config_path),
-            "next_actions": []
-            if state == "healthy"
-            else ["mastic application-target configure hindsight --help"],
+            **(
+                {"ownership_manifest_path": str(self.manifest_path)}
+                if state == "malformed"
+                else {}
+            ),
+            "next_actions": (
+                []
+                if state == "healthy"
+                else _ownership_recovery_next_actions("hindsight")
+                if state == "malformed"
+                else ["mastic application-target configure hindsight --help"]
+            ),
         }
 
     def test(

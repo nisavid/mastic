@@ -12,9 +12,11 @@ import tomlkit
 
 import mastic.infrastructure.application_target_integrations as target_integrations
 from mastic.application.config_schema import ApplicationTargetSettings
+from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
     ApplicationTargetIntegrationConflict,
+    ApplicationTargetOwnershipRecoveryRequired,
     CodexModelMetadata,
     CodexApplicationTargetIntegration,
     HindsightApplicationTargetIntegration,
@@ -313,7 +315,10 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     self.assertNotIn(str(root / "other.toml"), repr(report))
                     self.assertEqual(
                         report["next_actions"],
-                        ["mastic application-target configure codex"],
+                        [
+                            "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
+                            "mastic application-target inspect codex",
+                        ],
                     )
 
     def test_legacy_codex_migration_restores_preexisting_catalog(self) -> None:
@@ -1395,7 +1400,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 sampling={},
             )
 
-            with self.assertRaisesRegex(ValueError, "does not match"):
+            with self.assertRaisesRegex(
+                ApplicationTargetOwnershipRecoveryRequired, "does not match"
+            ):
                 factory("application-target.inspect", "hindsight", {}, desired)
 
     def test_local_factory_inspects_one_malformed_orphan_hindsight_manifest(
@@ -1422,6 +1429,78 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(report["state"], "malformed")
             self.assertNotIn("not json", repr(report))
 
+    def test_malformed_inspection_recovery_reaches_unmanaged_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "profiles"
+            ownership = root / "ownership"
+            ownership.mkdir()
+            manifest = ownership / "hindsight-agent-memory.ownership.json"
+            secret = "secret-payload-at-/tmp/untrusted-profile.env"
+            manifest.write_text(secret, encoding="utf-8")
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=profiles,
+                ownership_dir=ownership,
+            )
+            stored = ApplicationTargetSettings(
+                name="hindsight",
+                kind="hindsight",
+                service="memory",
+                profile="agent-memory",
+                context_window=32768,
+                provider="openai",
+                max_concurrent=1,
+                sampling={},
+            )
+            port = ApplicationTargetOperationPort(
+                factory,
+                lambda name, parameters, settings: self.configuration,
+                request=lambda target, endpoint, model, sampling: {},
+                settings=lambda name: stored,
+            )
+
+            malformed = port.execute(
+                "application-target.inspect", {"application_target": "hindsight"}
+            )
+
+            self.assertEqual(malformed["state"], "malformed")
+            self.assertEqual(
+                malformed["next_actions"],
+                [
+                    "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
+                    "mastic application-target inspect hindsight",
+                ],
+            )
+            self.assertNotIn(secret, repr(malformed))
+            self.assertNotIn("configure", repr(malformed["next_actions"]))
+
+            with self.assertRaises(ApplicationError) as blocked:
+                port.execute(
+                    "application-target.configure",
+                    {
+                        "application_target": "hindsight",
+                        "profile": "agent-memory",
+                    },
+                )
+            self.assertEqual(
+                blocked.exception.code, "application_target_recovery_required"
+            )
+            self.assertNotIn(secret, repr(blocked.exception))
+
+            self.assertEqual(
+                malformed["ownership_manifest_path"],
+                str(manifest),
+            )
+            Path(str(malformed["ownership_manifest_path"])).rename(
+                root / "quarantined-ownership-manifest"
+            )
+            recovered = port.execute(
+                "application-target.inspect", {"application_target": "hindsight"}
+            )
+
+            self.assertEqual(recovered["state"], "unmanaged")
+
     def test_local_factory_refuses_to_remove_malformed_orphan_hindsight_manifest(
         self,
     ) -> None:
@@ -1438,7 +1517,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 ownership_dir=ownership,
             )
 
-            with self.assertRaisesRegex(ValueError, "invalid hindsight"):
+            with self.assertRaisesRegex(
+                ApplicationTargetOwnershipRecoveryRequired, "invalid hindsight"
+            ):
                 factory("application-target.remove", "hindsight", {}, None)
 
     def test_hindsight_factory_discovery_ignores_codex_ownership(self) -> None:
@@ -1490,7 +1571,10 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8"
             )
 
-            with self.assertRaisesRegex(ValueError, "exactly one recognizable"):
+            with self.assertRaisesRegex(
+                ApplicationTargetOwnershipRecoveryRequired,
+                "exactly one recognizable",
+            ):
                 factory("application-target.remove", "hindsight", {}, None)
 
     def test_local_factory_rejects_missing_traversal_and_symlink_profiles(self) -> None:
