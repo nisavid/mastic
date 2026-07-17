@@ -33,7 +33,7 @@ reactivate `masticd`.
 After configuring Codex, run:
 
 ```sh
-mastic client inspect codex
+mastic application-target inspect codex
 codex debug models
 ```
 
@@ -46,7 +46,7 @@ the acceptance surface.
 After configuring Hindsight, inspect the selected profile:
 
 ```sh
-mastic client inspect hindsight
+mastic application-target inspect hindsight
 ```
 
 Confirm that it reports the intended MASTIC route and owned settings without
@@ -57,8 +57,8 @@ claiming unrelated profile fields.
 Run the target-specific contract checks:
 
 ```sh
-mastic client test codex --profile coding
-mastic client test hindsight --profile retain
+mastic application-target test codex --profile coding
+mastic application-target test hindsight --profile retain
 ```
 
 These checks exercise the managed Codex Responses and Hindsight Chat
@@ -82,7 +82,7 @@ Deployment Readiness also requires a bounded request from both Codex and a
 disposable Hindsight instance, using the configuration each application will
 actually consume. This development milestone does not yet provide those safe,
 repeatable procedures. Do not promote Readiness from `Unverified` to `Ready`
-based only on `mastic client test` or a direct request to the private runtime
+based only on `mastic application-target test` or a direct request to the private runtime
 port. [Issue #20](https://github.com/nisavid/mastic/issues/20) tracks the full
 clean-host gate; [issue #4](https://github.com/nisavid/mastic/issues/4) tracks
 the remaining Codex conformance decision.

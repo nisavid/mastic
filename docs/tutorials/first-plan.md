@@ -1,9 +1,9 @@
 # Plan your first local inference service
 
 In this tutorial, you will install MASTIC from source, inspect its initial
-state, discover the built-in runtimes, and review a host-tailored Plan. You
-will stop before applying the Plan, so no inference service or Application
-Configuration Target is created.
+state, discover the built-in runtimes, and review a host-tailored setup
+preview. You will stop before applying the previewed operations, so no
+inference service or Application Configuration Target is created.
 
 ## Before you begin
 
@@ -71,17 +71,17 @@ mastic setup --profile recommended
 
 MASTIC inspects the host and presents the selected runtime, exact model
 revision, service and route names, capacity, Application Configuration Targets,
-owned paths, and planned mutations. Notice that the Plan keeps desired
+host preflight, and planned mutations. Notice that the preview keeps desired
 configuration, observed state, validation evidence, and readiness separate.
 
 When MASTIC asks for confirmation, answer `n`. The command exits without
-applying the Plan, downloading a runtime or model, starting the Supervisor, or
-changing Codex or Hindsight.
+applying the previewed operations, downloading a runtime or model, starting the
+Supervisor, or changing Codex or Hindsight.
 
 You have now completed the planning path. When you are ready to create the
-stack, rerun `mastic setup`, review the current Plan again, and confirm it.
+stack, rerun `mastic setup`, review the current preview again, and confirm it.
 Material host evidence can change, so an earlier preview is not permission to
-apply a later Plan unseen.
+apply later operations unseen.
 
 For day-to-day inspection after setup, continue with
 [How to inspect and diagnose a local stack](../how-to/inspect-and-diagnose.md).

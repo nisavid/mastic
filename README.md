@@ -12,9 +12,9 @@ MASTIC stands for **Modular, Adaptive, System-Tailored Inference Connector**.
 
 ## What MASTIC gives you
 
-- **A Plan before a mutation.** Review the exact runtime, model, service,
-  gateway, Application Configuration Targets, ownership, and recovery steps
-  before anything changes.
+- **A setup preview before a mutation.** Review the exact runtime, model,
+  service, gateway, Application Configuration Targets, host preflight, and
+  ordered operations before anything changes.
 - **Exact local components.** Runtime installations and model revisions are
   recorded, verified, and kept distinct from shared cache bytes.
 - **One stable gateway.** Named inference services remain behind an
@@ -62,12 +62,12 @@ Open the guided setup:
 mastic setup
 ```
 
-MASTIC inspects the host, builds a complete Plan, and asks for confirmation
-before applying it. Model and runtime downloads can be substantial; review the
-selected revisions, projected resources, Application Configuration Targets,
-and owned paths in that Plan before continuing.
+MASTIC inspects the host, builds an exact setup preview, and asks for
+confirmation before applying it. Model and runtime downloads can be
+substantial; review the selected revisions, projected resources, Application
+Configuration Targets, preflight, and ordered operations before continuing.
 
-To learn the workflow without applying a Plan, follow
+To learn the workflow without applying the previewed operations, follow
 [Plan your first local inference service](docs/tutorials/first-plan.md).
 
 ## Operate an existing stack
