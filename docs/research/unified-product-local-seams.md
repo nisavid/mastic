@@ -1,5 +1,13 @@
 # Historical unification research: local seams
 
+This is a frozen pre-migration research record. It describes `mlxctl` and
+`codex-ns-proxy` at the exact source revisions below, before their selected
+capabilities moved into MASTIC. Names, paths, process boundaries, and open
+decisions in this note are historical evidence, not descriptions of the
+current repository. For current product and architecture contracts, start with
+[`CONTEXT.md`](../../CONTEXT.md), [`PRODUCT.md`](../../PRODUCT.md), and
+[`DESIGN.md`](../../DESIGN.md).
+
 ## Scope and source baseline
 
 This note preserves the pre-unification audit of the two source repositories.
