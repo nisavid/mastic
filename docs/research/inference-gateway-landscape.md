@@ -41,8 +41,9 @@ router mode and vLLM as engine-specific backends, not the universal controller.
 Keep Envoy AI Gateway as a cluster deployment profile; its new standalone CLI
 is promising for development but is explicitly experimental.
 
-Absorb `responses-adapter` into the gateway as a narrowly scoped compatibility
-adapter only after conformance is proven. Its `type: "namespace"` request,
+Absorb the historical `codex-ns-proxy` transform into the gateway as a narrowly
+scoped compatibility adapter only after conformance is proven. Its
+`type: "namespace"` request,
 history, and response round trip is not the same contract as an MCP gateway
 prefixing tool names. Until the selected gateway can host that adapter without
 semantic or credential regressions, retain the existing proxy as a sidecar.

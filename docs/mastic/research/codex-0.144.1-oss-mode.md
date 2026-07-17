@@ -30,9 +30,9 @@ mastic writes `oss_provider = "mlx-local"` alongside the managed model and
 provider. Users can run `codex --oss` to make the open-weight intent explicit
 and show raw reasoning without reselecting the endpoint or model.
 
-This does not replace `responses-adapter` when namespace adaptation is required.
-The proxy's original compatibility job is to flatten Codex namespace tools and
-reconstruct their calls. OSS mode still sends namespace tools because Codex
-0.144.1 exposes no per-custom-provider capability override. The proxy's
-authentication separation and SSE heartbeat behavior are also independent of
-OSS mode.
+This does not replace MASTIC's in-process Responses adapter when namespace
+adaptation is required. The adapter flattens Codex namespace tools and
+reconstructs their calls. OSS mode still sends namespace tools because Codex
+0.144.1 exposes no per-custom-provider capability override. Authentication,
+streaming, and transport limits remain Gateway responsibilities; the adapter
+does not create a separate proxy or heartbeat transport.
