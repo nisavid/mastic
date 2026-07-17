@@ -198,6 +198,52 @@ class ResponseTransformTests(unittest.TestCase):
 
 
 class ContinuationStateTests(unittest.TestCase):
+    def test_byte_budget_evicts_least_recently_used_response_mapping(self) -> None:
+        adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=8)
+        adapter.transform_response({"id": "a"}, {"a": ("n", "a")})
+        adapter.transform_response({"id": "b"}, {"b": ("n", "b")})
+
+        adapter.transform_request({"previous_response_id": "a"})
+        adapter.transform_response({"id": "c"}, {"c": ("n", "c")})
+
+        self.assertEqual(
+            adapter.transform_request({"previous_response_id": "a"})[1],
+            {"a": ("n", "a")},
+        )
+        self.assertEqual(
+            adapter.transform_request({"previous_response_id": "c"})[1],
+            {"c": ("n", "c")},
+        )
+        with self.assertRaisesRegex(TransformationError, "state is unavailable"):
+            adapter.transform_request({"previous_response_id": "b"})
+
+    def test_oversized_mapping_is_not_retained_for_continuation(self) -> None:
+        adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=5)
+
+        adapter.transform_response({"id": "a"}, {"tool": ("ns", "call")})
+
+        with self.assertRaisesRegex(TransformationError, "state is unavailable"):
+            adapter.transform_request({"previous_response_id": "a"})
+
+    def test_oversized_response_id_is_not_retained_for_continuation(self) -> None:
+        adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=8)
+
+        adapter.transform_response({"id": "response-id-too-large"}, {})
+
+        with self.assertRaisesRegex(TransformationError, "state is unavailable"):
+            adapter.transform_request({"previous_response_id": "response-id-too-large"})
+
+    def test_replacing_response_mapping_updates_its_byte_accounting(self) -> None:
+        adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=10)
+        adapter.transform_response({"id": "same"}, {"a": ("n", "a")})
+        replacement = {"bb": ("nn", "bb")}
+
+        adapter.transform_response({"id": "same"}, replacement)
+
+        self.assertEqual(
+            adapter.transform_request({"previous_response_id": "same"})[1], replacement
+        )
+
     def test_previous_response_id_inherits_exact_mapping(self) -> None:
         adapter = CodexNamespaceAdapter()
         first_request, first_mapping = adapter.transform_request(

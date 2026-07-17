@@ -10,6 +10,8 @@ from typing import Any
 
 DELIMITER = "__"
 ReconstructionMap = dict[str, tuple[str, str]]
+_DEFAULT_STATE_CAPACITY = 256
+_DEFAULT_STATE_BYTE_CAPACITY = 256 * 1024
 
 
 class TransformationError(ValueError):
@@ -19,11 +21,20 @@ class TransformationError(ValueError):
 class NamespaceState:
     """Bounded process-local reconstruction state for Responses continuations."""
 
-    def __init__(self, capacity: int = 256) -> None:
+    def __init__(
+        self,
+        capacity: int = _DEFAULT_STATE_CAPACITY,
+        byte_capacity: int = _DEFAULT_STATE_BYTE_CAPACITY,
+    ) -> None:
         if capacity <= 0:
             raise ValueError("namespace state capacity must be positive")
+        if byte_capacity <= 0:
+            raise ValueError("namespace state byte capacity must be positive")
         self._capacity = capacity
+        self._byte_capacity = byte_capacity
         self._maps: OrderedDict[str, ReconstructionMap] = OrderedDict()
+        self._weights: dict[str, int] = {}
+        self._bytes = 0
         self._lock = threading.Lock()
 
     def get(self, response_id: str) -> ReconstructionMap | None:
@@ -37,18 +48,34 @@ class NamespaceState:
     def remember(self, response_id: str, mapping: ReconstructionMap) -> None:
         if not response_id:
             return
+        stored_mapping = dict(mapping)
+        weight = _reconstruction_weight(response_id, stored_mapping)
         with self._lock:
-            self._maps[response_id] = dict(mapping)
+            existing_weight = self._weights.pop(response_id, 0)
+            self._bytes -= existing_weight
+            self._maps.pop(response_id, None)
+
+            if weight > self._byte_capacity:
+                return
+
+            self._maps[response_id] = stored_mapping
+            self._weights[response_id] = weight
+            self._bytes += weight
             self._maps.move_to_end(response_id)
-            while len(self._maps) > self._capacity:
-                self._maps.popitem(last=False)
+            while len(self._maps) > self._capacity or self._bytes > self._byte_capacity:
+                evicted_response_id, _ = self._maps.popitem(last=False)
+                self._bytes -= self._weights.pop(evicted_response_id)
 
 
 class CodexNamespaceAdapter:
     """Adapt Codex namespace tools while the Gateway owns HTTP transport."""
 
-    def __init__(self, capacity: int = 256) -> None:
-        self._state = NamespaceState(capacity)
+    def __init__(
+        self,
+        capacity: int = _DEFAULT_STATE_CAPACITY,
+        byte_capacity: int = _DEFAULT_STATE_BYTE_CAPACITY,
+    ) -> None:
+        self._state = NamespaceState(capacity, byte_capacity)
 
     def transform_request(
         self, data: dict[str, Any]
@@ -188,6 +215,14 @@ def response_ids(data: Any) -> set[str]:
         if isinstance(nested_id, str) and nested_id:
             ids.add(nested_id)
     return ids
+
+
+def _reconstruction_weight(response_id: str, mapping: ReconstructionMap) -> int:
+    return len(response_id.encode("utf-8")) + sum(
+        len(value.encode("utf-8"))
+        for flat_name, (namespace, function_name) in mapping.items()
+        for value in (flat_name, namespace, function_name)
+    )
 
 
 def _register_flat_name(
