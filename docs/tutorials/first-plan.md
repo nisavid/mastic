@@ -1,4 +1,4 @@
-# Plan your first local inference service
+# Preview your first local inference service
 
 In this tutorial, you will install MASTIC from source, inspect its initial
 state, discover the built-in runtimes, and review a host-tailored setup
@@ -15,7 +15,7 @@ Use an Apple-silicon Mac with:
   recommended profile used in this tutorial;
 - `git` and `uv` available in your shell;
 - internet access for live model and runtime evidence, or the required
-  artifacts already cached for offline planning.
+  artifacts already cached for an offline preview.
 
 ## Install MASTIC
 
@@ -61,9 +61,9 @@ The built-in catalogue should include `mlx_lm`, `mlx_vlm`, and `optiq`.
 These are definitions, not proof that a runtime is installed or that a
 particular model fits the Mac.
 
-## Review a recommended plan
+## Review a recommended setup preview
 
-Start the guided planner:
+Start the guided setup:
 
 ```sh
 mastic setup --profile recommended
@@ -78,7 +78,7 @@ When MASTIC asks for confirmation, answer `n`. The command exits without
 applying the previewed operations, downloading a runtime or model, starting the
 Supervisor, or changing Codex or Hindsight.
 
-You have now completed the planning path. When you are ready to create the
+You have now completed the preview path. When you are ready to create the
 stack, rerun `mastic setup`, review the current preview again, and confirm it.
 Material host evidence can change, so an earlier preview is not permission to
 apply later operations unseen.

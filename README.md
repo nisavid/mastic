@@ -2,7 +2,7 @@
 
 A guided local inference stack, tailored to your Apple-silicon Mac.
 
-MASTIC plans, installs, and operates the pieces required to run local MLX
+MASTIC previews, installs, and operates the pieces required to run local MLX
 models without making you coordinate runtimes, model revisions, background
 processes, ports, credentials, and application settings by hand. It gives
 Codex and Hindsight stable authenticated paths through one loopback gateway,
@@ -68,7 +68,7 @@ substantial; review the selected revisions, projected resources, Application
 Configuration Targets, preflight, and ordered operations before continuing.
 
 To learn the workflow without applying the previewed operations, follow
-[Plan your first local inference service](docs/tutorials/first-plan.md).
+[Preview your first local inference service](docs/tutorials/first-plan.md).
 
 ## Operate an existing stack
 
@@ -90,7 +90,7 @@ for a focused recovery workflow.
 
 The [documentation index](docs/README.md) routes by what you need now:
 
-- learn through a guided first plan;
+- learn through a guided first preview;
 - complete operational tasks;
 - look up CLI and deployment contracts;
 - understand MASTIC's architecture and trust boundaries.
