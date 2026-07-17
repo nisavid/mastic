@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.config_schema import (
-    ApplicationTargetSamplingSettings,
     ApplicationTargetSettings,
     validate_hindsight_profile_name,
 )
@@ -351,23 +350,6 @@ def _application_target_settings(
         profile = None
         provider = configuration.codex_provider_id
         max_concurrent = None
-    sampling = {
-        profile_name: ApplicationTargetSamplingSettings(
-            temperature=profile_settings.temperature,
-            top_p=profile_settings.top_p,
-            top_k=profile_settings.top_k,
-            min_p=profile_settings.min_p,
-            presence_penalty=profile_settings.presence_penalty,
-            repetition_penalty=profile_settings.repetition_penalty,
-            max_tokens=profile_settings.max_tokens,
-            enable_thinking=profile_settings.enable_thinking,
-            preserve_thinking=profile_settings.preserve_thinking,
-            upstream_profile=profile_settings.upstream_profile,
-            source_url=profile_settings.source_url,
-            source_revision=profile_settings.source_revision,
-        )
-        for profile_name, profile_settings in configuration.sampling_profiles.items()
-    }
     return ApplicationTargetSettings(
         name=name,
         kind=name,
@@ -376,7 +358,7 @@ def _application_target_settings(
         context_window=configuration.context_window,
         provider=provider,
         max_concurrent=max_concurrent,
-        sampling=sampling,
+        sampling=configuration.sampling_profiles,
     )
 
 

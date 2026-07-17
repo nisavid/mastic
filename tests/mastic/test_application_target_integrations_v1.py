@@ -1501,6 +1501,57 @@ class ClientIntegrationV1Tests(unittest.TestCase):
 
             self.assertEqual(recovered["state"], "unmanaged")
 
+    def test_codex_mutations_fail_with_typed_recovery_for_malformed_manifest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ownership = root / "ownership"
+            ownership.mkdir()
+            manifest = ownership / "codex.ownership.json"
+            secret = "secret-payload-at-/tmp/untrusted-config.toml"
+            manifest.write_text(secret, encoding="utf-8")
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=ownership,
+            )
+            stored = ApplicationTargetSettings(
+                name="codex",
+                kind="codex",
+                service="coding",
+                profile=None,
+                context_window=32768,
+                provider="mastic",
+                max_concurrent=1,
+                sampling={},
+            )
+            port = ApplicationTargetOperationPort(
+                factory,
+                lambda name, parameters, settings: self.configuration,
+                request=lambda target, endpoint, model, sampling: {},
+                settings=lambda name: stored,
+            )
+
+            report = port.execute(
+                "application-target.inspect", {"application_target": "codex"}
+            )
+            self.assertEqual(report["state"], "malformed")
+            self.assertEqual(report["ownership_manifest_path"], str(manifest))
+
+            for operation in (
+                "application-target.configure",
+                "application-target.remove",
+            ):
+                with self.subTest(operation=operation):
+                    with self.assertRaises(ApplicationError) as blocked:
+                        port.execute(operation, {"application_target": "codex"})
+                    self.assertEqual(
+                        blocked.exception.code,
+                        "application_target_recovery_required",
+                    )
+                    self.assertNotIn(secret, repr(blocked.exception))
+
     def test_local_factory_refuses_to_remove_malformed_orphan_hindsight_manifest(
         self,
     ) -> None:

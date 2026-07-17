@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -20,6 +19,7 @@ from urllib.parse import urlsplit
 import tomlkit
 from tomlkit.toml_document import TOMLDocument
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.application.config_schema import (
     ApplicationTargetSettings,
     validate_hindsight_profile_name,
@@ -36,108 +36,6 @@ def _ownership_recovery_next_actions(integration: str) -> list[str]:
         "move invalid or conflicting ownership manifests out of the mastic application-target ownership directory",
         f"mastic application-target inspect {integration}",
     ]
-
-
-@dataclass(frozen=True, slots=True)
-class SamplingProfile:
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    repetition_penalty: float | None = None
-    max_tokens: int | None = None
-    enable_thinking: bool | None = None
-    preserve_thinking: bool | None = None
-    upstream_profile: str | None = None
-    source_url: str | None = None
-    source_revision: str | None = None
-
-    def __post_init__(self) -> None:
-        numeric_values = (
-            self.temperature,
-            self.top_p,
-            self.min_p,
-            self.presence_penalty,
-            self.repetition_penalty,
-        )
-        if any(
-            value is not None and not math.isfinite(value) for value in numeric_values
-        ):
-            raise ValueError("sampling values must be finite")
-        if self.temperature is not None and self.temperature < 0:
-            raise ValueError("temperature must be nonnegative")
-        if self.top_p is not None and not 0 < self.top_p <= 1:
-            raise ValueError("top_p must be greater than zero and at most one")
-        if self.top_k is not None and self.top_k < 0:
-            raise ValueError("top_k must be nonnegative")
-        if self.min_p is not None and not 0 <= self.min_p <= 1:
-            raise ValueError("min_p must be between zero and one")
-        if self.presence_penalty is not None and not -2 <= self.presence_penalty <= 2:
-            raise ValueError("presence_penalty must be between -2 and 2")
-        if self.repetition_penalty is not None and self.repetition_penalty <= 0:
-            raise ValueError("repetition_penalty must be positive")
-        if self.max_tokens is not None and self.max_tokens <= 0:
-            raise ValueError("max_tokens must be positive")
-        if self.enable_thinking is not None and type(self.enable_thinking) is not bool:
-            raise ValueError("enable_thinking must be boolean")
-        if (
-            self.preserve_thinking is not None
-            and type(self.preserve_thinking) is not bool
-        ):
-            raise ValueError("preserve_thinking must be boolean")
-        provenance = (self.upstream_profile, self.source_url, self.source_revision)
-        if any(value is not None for value in provenance) and not all(
-            value is not None for value in provenance
-        ):
-            raise ValueError("profile provenance must be complete")
-        if self.upstream_profile is not None and not re.fullmatch(
-            r"[a-z0-9][a-z0-9-]{0,63}", self.upstream_profile
-        ):
-            raise ValueError("upstream_profile is invalid")
-        if self.source_url is not None:
-            source = urlsplit(self.source_url)
-            if (
-                source.scheme != "https"
-                or not source.hostname
-                or source.username is not None
-                or source.password is not None
-            ):
-                raise ValueError("source_url must be HTTPS")
-        if self.source_revision is not None and not re.fullmatch(
-            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.source_revision
-        ):
-            raise ValueError("source_revision must be an exact commit SHA")
-
-    def values(self) -> Mapping[str, object]:
-        values: dict[str, object] = {}
-        if self.temperature is not None:
-            values["temperature"] = self.temperature
-        if self.top_p is not None:
-            values["top_p"] = self.top_p
-        if self.top_k is not None:
-            values["top_k"] = self.top_k
-        if self.min_p is not None:
-            values["min_p"] = self.min_p
-        if self.presence_penalty is not None:
-            values["presence_penalty"] = self.presence_penalty
-        if self.repetition_penalty is not None:
-            values["repetition_penalty"] = self.repetition_penalty
-        if self.max_tokens is not None:
-            values["max_tokens"] = self.max_tokens
-        if self.enable_thinking is not None:
-            values["enable_thinking"] = self.enable_thinking
-        if self.preserve_thinking is not None:
-            values["preserve_thinking"] = self.preserve_thinking
-        return MappingProxyType(values)
-
-    def definition(self) -> Mapping[str, object]:
-        values = dict(self.values())
-        if self.upstream_profile is not None:
-            values["upstream_profile"] = self.upstream_profile
-            values["source_url"] = self.source_url
-            values["source_revision"] = self.source_revision
-        return MappingProxyType(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +317,12 @@ class LocalApplicationTargetIntegrationFactory:
         _safe_directory(self.ownership_dir, "application-target ownership directory")
         if name == "codex":
             _safe_target(self.codex_config_path, "Codex config")
+            policy = (
+                OwnershipDiscoveryPolicy.INSPECT_RECOVERY
+                if operation == "application-target.inspect"
+                else OwnershipDiscoveryPolicy.STRICT
+            )
+            self._ownership.discover(policy, integration="codex")
             return CodexApplicationTargetIntegration(
                 self.codex_config_path,
                 self.ownership_dir / "codex.ownership.json",

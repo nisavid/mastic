@@ -2,6 +2,7 @@ import unittest
 
 import tomlkit
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.application.config_schema import ConfigSchemaError, validate_config
 
 
@@ -111,6 +112,21 @@ class ConfigSchemaV1Tests(unittest.TestCase):
         self.assertEqual(
             config.application_targets["codex"].sampling["coding"].source_revision,
             "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        )
+        self.assertIsInstance(
+            config.application_targets["codex"].sampling["coding"], SamplingProfile
+        )
+        self.assertEqual(
+            config.application_targets["codex"].sampling["coding"].values(),
+            {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0,
+                "enable_thinking": True,
+            },
         )
 
     def test_rejects_unknown_keys_raw_argv_and_environment_escape_hatches(self) -> None:

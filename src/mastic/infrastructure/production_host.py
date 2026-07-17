@@ -17,8 +17,8 @@ import httpx
 import psutil
 import tomlkit
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.application.config_schema import (
-    ApplicationTargetSamplingSettings,
     ApplicationTargetSettings,
     MasticConfig,
     validate_config,
@@ -32,7 +32,6 @@ from mastic.infrastructure.application_target_integrations import (
     CodexModelMetadata,
     LocalApplicationTargetIntegrationFactory,
     OwnershipDiscoveryPolicy,
-    SamplingProfile,
 )
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.gateway_credential import GatewayCredential
@@ -552,37 +551,11 @@ def _removal_recovery_required(target: str) -> ApplicationError:
 
 
 def sampling_profile(value: object) -> SamplingProfile:
-    if isinstance(value, ApplicationTargetSamplingSettings):
-        return SamplingProfile(
-            temperature=value.temperature,
-            top_p=value.top_p,
-            top_k=value.top_k,
-            min_p=value.min_p,
-            presence_penalty=value.presence_penalty,
-            repetition_penalty=value.repetition_penalty,
-            max_tokens=value.max_tokens,
-            enable_thinking=value.enable_thinking,
-            preserve_thinking=value.preserve_thinking,
-            upstream_profile=value.upstream_profile,
-            source_url=value.source_url,
-            source_revision=value.source_revision,
-        )
+    if isinstance(value, SamplingProfile):
+        return value
     if not isinstance(value, Mapping):
         raise ValueError("sampling profile must be an object")
-    return SamplingProfile(
-        temperature=optional_float(value.get("temperature")),
-        top_p=optional_float(value.get("top_p")),
-        top_k=optional_int(value.get("top_k")),
-        min_p=optional_float(value.get("min_p")),
-        presence_penalty=optional_float(value.get("presence_penalty")),
-        repetition_penalty=optional_float(value.get("repetition_penalty")),
-        max_tokens=optional_int(value.get("max_tokens")),
-        enable_thinking=optional_bool(value.get("enable_thinking")),
-        preserve_thinking=optional_bool(value.get("preserve_thinking")),
-        upstream_profile=optional_string(value.get("upstream_profile")),
-        source_url=optional_string(value.get("source_url")),
-        source_revision=optional_string(value.get("source_revision")),
-    )
+    return SamplingProfile.from_mapping(value)
 
 
 _APPLICATION_TARGET_PROFILE_BINDINGS = {
@@ -598,7 +571,7 @@ _APPLICATION_TARGET_PROFILE_BINDINGS = {
 
 def default_sampling(
     repository: str, revision: str, name: str
-) -> Mapping[str, ApplicationTargetSamplingSettings]:
+) -> Mapping[str, SamplingProfile]:
     bindings = _APPLICATION_TARGET_PROFILE_BINDINGS.get(name)
     if bindings is None:
         raise ValueError(f"unsupported Application Configuration Target: {name}")
@@ -609,7 +582,7 @@ def default_sampling(
             profile = catalogue.profile(repository, revision, profile_name)
         except KeyError:
             return {}
-        result[workload] = ApplicationTargetSamplingSettings(
+        result[workload] = SamplingProfile(
             **dict(profile.parameters),
             upstream_profile=profile.name,
             source_url=profile.source_url,
@@ -712,30 +685,6 @@ def optional_int(value: object) -> int | None:
         return None
     if type(value) is not int:
         raise ValueError("value must be an integer")
-    return value
-
-
-def optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        raise ValueError("value must be numeric")
-    return float(value)
-
-
-def optional_bool(value: object) -> bool | None:
-    if value is None:
-        return None
-    if type(value) is not bool:
-        raise ValueError("value must be boolean")
-    return value
-
-
-def optional_string(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("value must be a string")
     return value
 
 
