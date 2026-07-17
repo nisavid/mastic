@@ -754,11 +754,24 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(preview.client_options["hindsight"]["max_concurrent"], 1)
 
     @patch("mastic.infrastructure.production_host.httpx.post")
-    def test_gateway_requests_append_to_openai_v1_base_once(self, post) -> None:
+    def test_gateway_canaries_use_each_application_target_wire_contract(
+        self, post
+    ) -> None:
         post.return_value.is_success = True
-        post.return_value.json.return_value = {
-            "choices": [{"message": {"content": "mastic ready"}}]
-        }
+        post.return_value.json.side_effect = [
+            {"choices": [{"message": {"content": "mastic ready"}}]},
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "mastic target ready"}
+                        ],
+                    }
+                ]
+            },
+            {"choices": [{"message": {"content": "mastic target ready"}}]},
+        ]
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -772,28 +785,45 @@ class ProductionCompositionTests(unittest.TestCase):
                     "request": "Respond with exactly: mastic ready",
                 },
             )
-            client_request(
-                "http://127.0.0.1:8766/v1",
+            codex = client_request(
+                "codex",
+                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1",
                 "coding",
-                {"messages": []},
+                {},
+                credential=credential,
+            )
+            hindsight = client_request(
+                "hindsight",
+                "http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1",
+                "coding",
+                {},
                 credential=credential,
             )
 
         self.assertEqual(result["text"], "mastic ready")
+        self.assertEqual(codex["text"], "mastic target ready")
+        self.assertEqual(hindsight["text"], "mastic target ready")
         self.assertEqual(
             [call.args[0] for call in post.call_args_list],
             [
                 "http://127.0.0.1:8766/v1/chat/completions",
-                "http://127.0.0.1:8766/v1/chat/completions",
+                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1/responses",
+                "http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1/chat/completions",
             ],
         )
         self.assertEqual(
             [call.kwargs["headers"]["authorization"] for call in post.call_args_list],
-            [f"Bearer {token}", f"Bearer {token}"],
+            [f"Bearer {token}", f"Bearer {token}", f"Bearer {token}"],
         )
         self.assertEqual(
-            post.call_args_list[1].kwargs["json"]["messages"][0]["role"], "user"
+            post.call_args_list[1].kwargs["json"]["input"],
+            "Respond with exactly: mastic target ready",
         )
+        self.assertNotIn("messages", post.call_args_list[1].kwargs["json"])
+        self.assertEqual(
+            post.call_args_list[2].kwargs["json"]["messages"][0]["role"], "user"
+        )
+        self.assertNotIn("input", post.call_args_list[2].kwargs["json"])
 
     def test_launch_supply_keeps_config_key_but_uses_exact_revision_identity(
         self,

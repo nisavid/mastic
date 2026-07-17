@@ -466,7 +466,7 @@ class LocalOperationBackend:
                                 "message": str(
                                     integration.get(
                                         "detail",
-                                        "Codex client integration is unhealthy.",
+                                        "Codex Application Configuration Target is unhealthy.",
                                     )
                                 ),
                                 "next_actions": list(

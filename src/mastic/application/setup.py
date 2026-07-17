@@ -402,7 +402,7 @@ class SetupPlanner:
         return tuple(self._capacity_profiles.values())
 
     @property
-    def expert_template(self) -> ExactSetupSelection:
+    def exact_template(self) -> ExactSetupSelection:
         """Return an editable shape, never an implicit machine recommendation."""
 
         return self._profiles[0].selection
@@ -674,7 +674,7 @@ class SetupPlanner:
                 f"{smallest.name!r} requires at least "
                 f"{smallest.minimum_memory_bytes} bytes of memory and "
                 f"{smallest.minimum_disk_bytes} bytes of free disk; "
-                "use expert setup to select a smaller exact model"
+                "use exact setup to select a smaller exact model"
             )
         return eligible[-1]
 
@@ -701,7 +701,7 @@ class SetupPlanner:
             "pinned": selection.pinned,
             "options": selection.service_options,
         }
-        return (
+        specifications = (
             (
                 "preflight",
                 "Validate this Apple-silicon Mac",
@@ -768,6 +768,45 @@ class SetupPlanner:
                 False,
             ),
             ("service.start", "Start the Inference Service", common, False),
+        )
+        canaries: list[tuple[str, str, Mapping[str, object], bool]] = []
+        if "codex" in selection.clients:
+            canaries.append(
+                (
+                    "client.test.codex",
+                    "Canary the Codex Application Configuration Target",
+                    {
+                        "target": "codex",
+                        "profile": "coding",
+                        "service": selection.service_name,
+                        "route": selection.service_route,
+                        "endpoint": selection.gateway_endpoint,
+                        "request": "Respond with exactly: mastic target ready",
+                    },
+                    False,
+                )
+            )
+        if "hindsight" in selection.clients:
+            hindsight_options = selection.client_options["hindsight"]
+            canaries.append(
+                (
+                    "client.test.hindsight",
+                    "Canary the Hindsight Application Configuration Target",
+                    {
+                        "target": "hindsight",
+                        "configuration_profile": hindsight_options["profile"],
+                        "profile": "retain",
+                        "service": selection.service_name,
+                        "route": selection.service_route,
+                        "endpoint": selection.gateway_endpoint,
+                        "request": "Respond with exactly: mastic target ready",
+                    },
+                    False,
+                )
+            )
+        if canaries:
+            return specifications + tuple(canaries)
+        return specifications + (
             (
                 "verify.request",
                 "Send the first real inference request through the Gateway",
