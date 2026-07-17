@@ -10,6 +10,14 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 
+_REQUIRED_SAMPLING_PROFILES = MappingProxyType(
+    {
+        "codex": frozenset({"coding"}),
+        "hindsight": frozenset({"verification", "retain", "reflect", "consolidation"}),
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class SamplingProfile:
     """One validated sampling profile shared by desired state and integrations."""
@@ -125,3 +133,32 @@ class SamplingProfile:
                 source_revision=self.source_revision,
             )
         return MappingProxyType(values)
+
+
+def validate_application_target_sampling_profiles(
+    application_target: str,
+    profiles: Mapping[str, SamplingProfile],
+) -> None:
+    """Validate the exact sampling-profile contract for one managed target."""
+    try:
+        required = _REQUIRED_SAMPLING_PROFILES[application_target]
+    except KeyError as error:
+        raise ValueError(
+            f"unsupported Application Configuration Target: {application_target}"
+        ) from error
+    if set(profiles) != required:
+        raise ValueError(
+            f"{application_target} requires sampling profiles: {', '.join(sorted(required))}"
+        )
+    if application_target != "codex":
+        return
+    coding = profiles["coding"]
+    if (
+        coding.min_p not in {None, 0.0}
+        or coding.presence_penalty not in {None, 0.0}
+        or coding.repetition_penalty not in {None, 1.0}
+        or coding.max_tokens is not None
+    ):
+        raise ValueError(
+            "Codex coding profile contains values OptiQ Responses cannot represent"
+        )

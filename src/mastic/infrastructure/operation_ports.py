@@ -8,6 +8,9 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mastic.application.application_targets import (
+    validate_application_target_sampling_profiles,
+)
 from mastic.application.config_schema import (
     ApplicationTargetSettings,
     validate_hindsight_profile_name,
@@ -238,19 +241,18 @@ class ApplicationTargetOperationPort:
             return _plain(inspect())
         assert configuration is not None
         if operation == "application-target.configure":
-            required_profiles = (
-                {"coding"}
-                if name == "codex"
-                else {"verification", "retain", "reflect", "consolidation"}
-            )
-            if set(configuration.sampling_profiles) != required_profiles:
+            try:
+                validate_application_target_sampling_profiles(
+                    name, configuration.sampling_profiles
+                )
+            except ValueError as error:
                 raise ApplicationError(
                     "invalid_parameter",
-                    f"{name} requires sampling profiles: {', '.join(sorted(required_profiles))}",
+                    str(error),
                     next_actions=(
                         f"mastic application-target configure {name} --help",
                     ),
-                )
+                ) from error
             desired_settings = _application_target_settings(
                 name, parameters, configuration, stored
             )

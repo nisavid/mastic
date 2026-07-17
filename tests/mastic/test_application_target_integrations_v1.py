@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import tomlkit
 
-import mastic.infrastructure.application_target_integrations as target_integrations
+import mastic.infrastructure.hindsight_application_target as hindsight_target
 from mastic.application.config_schema import ApplicationTargetSettings
 from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_integrations import (
@@ -28,7 +28,26 @@ from mastic.infrastructure.operation_ports import ApplicationTargetOperationPort
 
 class ClientIntegrationV1Tests(unittest.TestCase):
     def setUp(self) -> None:
-        self.configuration = ApplicationTargetConfiguration(
+        self.codex_configuration = ApplicationTargetConfiguration(
+            gateway_endpoint="http://127.0.0.1:8766/v1",
+            service_name="coding",
+            context_window=32768,
+            sampling_profiles={
+                "coding": SamplingProfile(
+                    temperature=0.6,
+                    top_p=0.95,
+                    top_k=20,
+                    min_p=0.0,
+                    presence_penalty=0.0,
+                    repetition_penalty=1.0,
+                    enable_thinking=True,
+                ),
+            },
+            codex_provider_id="mlx-local",
+            hindsight_provider="openai",
+            max_concurrent=1,
+        )
+        self.hindsight_configuration = ApplicationTargetConfiguration(
             gateway_endpoint="http://127.0.0.1:8766/v1",
             service_name="coding",
             context_window=32768,
@@ -41,15 +60,6 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     presence_penalty=1.5,
                     repetition_penalty=1.0,
                     enable_thinking=False,
-                ),
-                "coding": SamplingProfile(
-                    temperature=0.6,
-                    top_p=0.95,
-                    top_k=20,
-                    min_p=0.0,
-                    presence_penalty=0.0,
-                    repetition_penalty=1.0,
-                    enable_thinking=True,
                 ),
                 "retain": SamplingProfile(
                     temperature=0.7,
@@ -117,7 +127,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             catalog = root / "model-catalog.json"
             catalog_backup = root / "model-catalog.backup"
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=131_072,
                 service_name="qwen36-optiq",
                 codex_model=CodexModelMetadata(
@@ -190,7 +200,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 bundled_catalog=self._bundled_codex_catalog,
                 catalog_validator=lambda _path: None,
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             before = {
                 path: path.read_bytes() if path.exists() else None for path in paths
             }
@@ -209,7 +219,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             catalog = root / "catalog.json"
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=196_608,
                 codex_model=CodexModelMetadata(
                     slug="coding",
@@ -250,7 +260,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 bundled_catalog=self._bundled_codex_catalog,
                 catalog_validator=lambda _path: None,
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
 
             report = adapter.inspect()
 
@@ -263,7 +273,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=131_072,
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
@@ -335,14 +345,14 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 bundled_catalog=self._bundled_codex_catalog,
                 catalog_validator=lambda _path: None,
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             catalog.write_bytes(original)
             document = tomlkit.parse((root / "config.toml").read_text())
             document["model_catalog_json"] = str(catalog)
             (root / "config.toml").write_text(document.as_string())
             adapter.apply(
                 replace(
-                    self.configuration,
+                    self.codex_configuration,
                     context_window=131_072,
                     codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
                 )
@@ -375,7 +385,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 catalog_validator=reject,
             )
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=131_072,
                 codex_model=CodexModelMetadata(
                     slug="coding",
@@ -402,7 +412,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "catalog.backup",
             )
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=131_072,
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
@@ -450,7 +460,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             paths[0].write_text('unrelated = "keep"\n')
             paths[3].write_text('{"models":[{"slug":"user"}]}\n')
             configuration = replace(
-                self.configuration,
+                self.codex_configuration,
                 context_window=131_072,
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
@@ -497,7 +507,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             result = adapter.apply(
                 replace(
-                    self.configuration,
+                    self.codex_configuration,
                     context_window=131_072,
                     codex_model=CodexModelMetadata(
                         slug="qwen36-optiq",
@@ -525,9 +535,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             adapter = CodexApplicationTargetIntegration(config, manifest, backup)
 
-            preview = adapter.preview(self.configuration)
-            applied = adapter.apply(self.configuration)
-            second = adapter.apply(self.configuration)
+            preview = adapter.preview(self.codex_configuration)
+            applied = adapter.apply(self.codex_configuration)
+            second = adapter.apply(self.codex_configuration)
 
             document = tomlkit.parse(config.read_text(encoding="utf-8"))
             self.assertIn(("model",), {change.path for change in preview})
@@ -570,10 +580,10 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "mastic" / "codex-ownership.json",
                 root / "mastic" / "codex-config.backup",
             )
-            legacy = replace(self.configuration, codex_provider_id="mastic-local")
+            legacy = replace(self.codex_configuration, codex_provider_id="mastic-local")
 
             adapter.apply(legacy)
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
 
             document = tomlkit.parse(config.read_text(encoding="utf-8"))
             self.assertEqual(document["model_provider"], "mlx-local")
@@ -590,7 +600,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "codex.toml", root / "codex-owner.json", root / "codex-backup"
             )
             missing_coding = replace(
-                self.configuration,
+                self.codex_configuration,
                 sampling_profiles={
                     "codng": SamplingProfile(temperature=0.6, top_p=0.95)
                 },
@@ -599,7 +609,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 codex.preview(missing_coding)
 
             unsupported = replace(
-                self.configuration,
+                self.codex_configuration,
                 sampling_profiles={
                     "coding": SamplingProfile(
                         temperature=0.6,
@@ -611,6 +621,16 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Responses"):
                 codex.preview(unsupported)
 
+            unexpected = replace(
+                self.codex_configuration,
+                sampling_profiles={
+                    **self.codex_configuration.sampling_profiles,
+                    "surprise": SamplingProfile(temperature=0.5),
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "requires sampling profiles"):
+                codex.preview(unexpected)
+
             hindsight = HindsightApplicationTargetIntegration(
                 root / "hindsight.env",
                 root / "hindsight-owner.json",
@@ -619,7 +639,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires sampling profiles"):
                 hindsight.preview(
                     replace(
-                        self.configuration,
+                        self.hindsight_configuration,
                         sampling_profiles={"retain": SamplingProfile(temperature=0.7)},
                     )
                 )
@@ -652,13 +672,18 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             token = "private-token-value-that-must-never-leak"
             credential.write_text(token + "\n", encoding="ascii")
             credential.chmod(0o600)
-            configuration = replace(self.configuration, credential_path=credential)
+            codex_configuration = replace(
+                self.codex_configuration, credential_path=credential
+            )
+            hindsight_configuration = replace(
+                self.hindsight_configuration, credential_path=credential
+            )
 
             codex_path = root / "codex.toml"
             codex = CodexApplicationTargetIntegration(
                 codex_path, root / "codex-owner.json", root / "codex-backup"
             )
-            codex.apply(configuration)
+            codex.apply(codex_configuration)
             document = tomlkit.parse(codex_path.read_text(encoding="utf-8"))
             auth = document["model_providers"]["mlx-local"]["auth"]
             self.assertEqual(auth["command"], "/bin/cat")
@@ -676,8 +701,8 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "hindsight-owner.json",
                 root / "hindsight-backup",
             )
-            preview = hindsight.preview(configuration)
-            applied = hindsight.apply(configuration)
+            preview = hindsight.preview(hindsight_configuration)
+            applied = hindsight.apply(hindsight_configuration)
 
             rendered = hindsight_path.read_text(encoding="utf-8")
             manifest = hindsight.manifest_path.read_text(encoding="utf-8")
@@ -708,7 +733,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             document = tomlkit.parse(config.read_text(encoding="utf-8"))
             document["model"] = "my-new-choice"
             config.write_text(document.as_string(), encoding="utf-8")
@@ -728,11 +753,11 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             adapter.manifest_path.unlink()
             adapter.backup_path.unlink()
 
-            adopted = adapter.apply(self.configuration, takeover=True)
+            adopted = adapter.apply(self.codex_configuration, takeover=True)
             manifest = json.loads(adapter.manifest_path.read_text(encoding="utf-8"))
 
             self.assertTrue(adopted.changed)
@@ -755,9 +780,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             changed = ApplicationTargetConfiguration(
-                gateway_endpoint=self.configuration.gateway_endpoint,
+                gateway_endpoint=self.codex_configuration.gateway_endpoint,
                 service_name="general",
                 context_window=16384,
                 sampling_profiles={
@@ -778,13 +803,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             configured = config.read_text(encoding="utf-8")
 
             adapter.restore()
             self.assertEqual(config.read_text(encoding="utf-8"), 'model = "before"\n')
 
-            adapter.apply(self.configuration)
+            adapter.apply(self.codex_configuration)
             config.write_text(configured + "# user edit\n", encoding="utf-8")
             with self.assertRaises(ApplicationTargetIntegrationConflict):
                 adapter.restore()
@@ -802,7 +827,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             before = config.read_bytes()
 
             with self.assertRaises(Exception):
-                adapter.apply(self.configuration)
+                adapter.apply(self.codex_configuration)
             self.assertEqual(config.read_bytes(), before)
 
             config.write_text('model = "before"\n', encoding="utf-8")
@@ -814,7 +839,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 config, root / "owner-2.json", root / "backup-2", replace=fail_replace
             )
             with self.assertRaisesRegex(OSError, "simulated"):
-                failing.apply(self.configuration)
+                failing.apply(self.codex_configuration)
             self.assertEqual(config.read_text(encoding="utf-8"), 'model = "before"\n')
             self.assertFalse((root / "owner-2.json").exists())
             self.assertFalse((root / "backup-2").exists())
@@ -833,11 +858,11 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 config, root / "owner.json", root / "backup"
             )
 
-            changes = adapter.preview(self.configuration)
-            applied = adapter.apply(self.configuration)
+            changes = adapter.preview(self.hindsight_configuration)
+            applied = adapter.apply(self.hindsight_configuration)
             calls: list[tuple[str, str, dict[str, object]]] = []
             response = adapter.test(
-                self.configuration,
+                self.hindsight_configuration,
                 lambda endpoint, model, sampling: (
                     calls.append((endpoint, model, dict(sampling))) or {"text": "ready"}
                 ),
@@ -891,7 +916,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
 
             report = adapter.inspect()
 
@@ -906,7 +931,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.config_path.write_text(
                 adapter.config_path.read_text(encoding="utf-8").replace(
                     "HINDSIGHT_API_LLM_MODEL=coding",
@@ -948,7 +973,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.backup_path.unlink()
 
             report = adapter.inspect()
@@ -965,7 +990,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.backup_path.write_text("changed support data\n", encoding="utf-8")
 
             report = adapter.inspect()
@@ -980,7 +1005,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.backup_path.unlink()
             adapter.backup_path.mkdir()
 
@@ -996,7 +1021,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.config_path.unlink()
 
             report = adapter.inspect()
@@ -1030,7 +1055,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.config_path.write_text(
                 "HINDSIGHT_API_LLM_MODEL=must-not-leak\n"
                 "HINDSIGHT_API_LLM_MODEL=duplicate\n",
@@ -1057,7 +1082,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 root / "profile.env", root / "owner.json", root / "backup"
             )
-            adapter.apply(replace(self.configuration, credential_path=credential))
+            adapter.apply(
+                replace(self.hindsight_configuration, credential_path=credential)
+            )
             adapter.config_path.write_text(
                 adapter.config_path.read_text(encoding="utf-8").replace(
                     original, rotated
@@ -1096,7 +1123,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(OSError, "post-replace failure"):
-                adapter.apply(self.configuration)
+                adapter.apply(self.hindsight_configuration)
 
             self.assertEqual(config.read_bytes(), original)
             self.assertFalse(manifest.exists())
@@ -1110,7 +1137,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             paths = (root / "profile.env", root / "owner.json", root / "backup")
             paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
             adapter = HindsightApplicationTargetIntegration(*paths)
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             before = {path: path.read_bytes() for path in paths}
             rollback = adapter.rollback_point()
 
@@ -1126,7 +1153,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             paths = (root / "profile.env", root / "owner.json", root / "backup")
             paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
-            HindsightApplicationTargetIntegration(*paths).apply(self.configuration)
+            HindsightApplicationTargetIntegration(*paths).apply(
+                self.hindsight_configuration
+            )
             before = {path: path.read_bytes() for path in paths}
 
             def replace_then_fail(path: Path, payload: bytes) -> None:
@@ -1150,7 +1179,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             paths = (root / "profile.env", root / "owner.json", root / "backup")
             paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
-            HindsightApplicationTargetIntegration(*paths).apply(self.configuration)
+            HindsightApplicationTargetIntegration(*paths).apply(
+                self.hindsight_configuration
+            )
             before = {path: path.read_bytes() for path in paths}
 
             def replace_then_fail(path: Path, payload: bytes) -> None:
@@ -1175,7 +1206,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             paths = (root / "profile.env", root / "owner.json", root / "backup")
             paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
             adapter = HindsightApplicationTargetIntegration(*paths)
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             paths[0].write_text(
                 paths[0]
                 .read_text(encoding="utf-8")
@@ -1186,7 +1217,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 encoding="utf-8",
             )
             before = {path: path.read_bytes() for path in paths}
-            write_private = target_integrations._write_private
+            write_private = hindsight_target._write_private
 
             def write_then_fail(path: Path, payload: bytes) -> None:
                 write_private(path, payload)
@@ -1195,7 +1226,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
 
             with (
                 patch.object(
-                    target_integrations,
+                    hindsight_target,
                     "_write_private",
                     side_effect=write_then_fail,
                 ),
@@ -1213,7 +1244,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             paths = (root / "profile.env", root / "owner.json", root / "backup")
             paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
             adapter = HindsightApplicationTargetIntegration(*paths)
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             before = {path: path.read_bytes() for path in paths}
             unlink = Path.unlink
 
@@ -1246,14 +1277,14 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             def request(endpoint: str, model: str, sampling: dict[str, object]) -> None:
                 endpoints.append(endpoint)
 
-            codex.test(self.configuration, request, profile="reflect")
-            hindsight.test(self.configuration, request, profile="coding")
+            codex.test(self.codex_configuration, request, profile="coding")
+            hindsight.test(self.hindsight_configuration, request, profile="reflect")
 
             self.assertEqual(
                 endpoints,
                 [
-                    "http://127.0.0.1:8766/application-targets/codex/profiles/reflect/v1",
-                    "http://127.0.0.1:8766/application-targets/hindsight/profiles/coding/v1",
+                    "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1",
+                    "http://127.0.0.1:8766/application-targets/hindsight/profiles/reflect/v1",
                 ],
             )
 
@@ -1264,11 +1295,11 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             adapter = HindsightApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
-            adapter.apply(self.configuration)
+            adapter.apply(self.hindsight_configuration)
             adapter.manifest_path.unlink()
             adapter.backup_path.unlink()
 
-            adopted = adapter.apply(self.configuration, takeover=True)
+            adopted = adapter.apply(self.hindsight_configuration, takeover=True)
 
             self.assertTrue(adopted.changed)
             self.assertFalse(adopted.changes)
@@ -1349,13 +1380,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 {"profile": "agent-memory"},
                 None,
             )
-            configured.apply(self.configuration)
+            configured.apply(self.hindsight_configuration)
 
             recovered = factory("application-target.inspect", "hindsight", {}, None)
             recorded = []
             port = ApplicationTargetOperationPort(
                 factory,
-                lambda name, parameters, settings: self.configuration,
+                lambda name, parameters, settings: self.hindsight_configuration,
                 request=lambda target, endpoint, model, sampling: {},
                 settings=lambda name: None,
                 record=lambda name, value: recorded.append((name, value)),
@@ -1388,7 +1419,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 "hindsight",
                 {"profile": "owned-profile"},
                 None,
-            ).apply(self.configuration)
+            ).apply(self.hindsight_configuration)
             desired = ApplicationTargetSettings(
                 name="hindsight",
                 kind="hindsight",
@@ -1455,7 +1486,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             port = ApplicationTargetOperationPort(
                 factory,
-                lambda name, parameters, settings: self.configuration,
+                lambda name, parameters, settings: self.hindsight_configuration,
                 request=lambda target, endpoint, model, sampling: {},
                 settings=lambda name: stored,
             )
@@ -1528,7 +1559,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             port = ApplicationTargetOperationPort(
                 factory,
-                lambda name, parameters, settings: self.configuration,
+                lambda name, parameters, settings: self.codex_configuration,
                 request=lambda target, endpoint, model, sampling: {},
                 settings=lambda name: stored,
             )
@@ -1637,7 +1668,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 {"profile": "agent-memory"},
                 None,
             )
-            configured.apply(self.configuration)
+            configured.apply(self.hindsight_configuration)
             manifest = json.loads(configured.manifest_path.read_text(encoding="utf-8"))
             manifest["config_path"] = str(root / "profiles/research-memory.env")
             manifest["backup_path"] = str(
