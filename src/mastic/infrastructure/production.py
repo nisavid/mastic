@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.config_schema import (
-    ClientSamplingSettings,
+    ApplicationTargetSamplingSettings,
     MasticConfig,
     validate_config,
 )
@@ -58,7 +58,7 @@ from mastic.infrastructure.production_host import (
     OwnedStateRemover,
     ProductionLaunchdAdapter,
     SystemSetupPreflight,
-    client_port,
+    application_target_port,
     configured_model_installations,
     default_sampling,
     plain,
@@ -440,7 +440,9 @@ def compose_local(
             paths.log_dir,
         ),
     )
-    client = client_port(resolved_home, paths, config_store, credential=credential)
+    application_targets = application_target_port(
+        resolved_home, paths, config_store, credential=credential
+    )
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
     setup = SetupOperationPort(
@@ -449,7 +451,7 @@ def compose_local(
         runtime=activating_remote,
         model=activating_remote,
         config=config_owner,
-        clients=client,
+        application_targets=application_targets,
         supervisor=setup_supervisor,
         verifier=GatewayVerificationPort(credential),
         evidence=OperationalSetupEvidenceStore(state_store),
@@ -466,7 +468,7 @@ def compose_local(
             remote, launchd, paths.control_socket, state_store, config_store
         ),
         setup=setup,
-        clients=client,
+        application_targets=application_targets,
         config_store=config_store,
         state_store=state_store,
         model_intelligence=intelligence,
@@ -497,7 +499,7 @@ def compose_local(
 def _sampling_matches_service_model(
     config: MasticConfig,
     service,
-    sampling: ClientSamplingSettings,
+    sampling: ApplicationTargetSamplingSettings,
     catalogue: ModelProfileCatalogue | None = None,
 ) -> bool:
     """Fail closed unless stored provenance matches the service's exact model."""
@@ -595,21 +597,21 @@ def compose_daemon(
     configured = load_config()
     model_profiles = ModelProfileCatalogue.load_builtin()
 
-    def request_profile(client_name: str, profile_name: str):
+    def request_profile(application_target_name: str, profile_name: str):
         config = load_config()
-        client = config.clients.get(client_name)
-        if client is None:
+        application_target = config.application_targets.get(application_target_name)
+        if application_target is None:
             return None
-        sampling = client.sampling.get(profile_name)
+        sampling = application_target.sampling.get(profile_name)
         if sampling is None:
             return None
-        service = config.services.get(client.service)
+        service = config.services.get(application_target.service)
         if service is None:
             service = next(
                 (
                     item
                     for item in config.services.values()
-                    if str(item.route) == client.service
+                    if str(item.route) == application_target.service
                 ),
                 None,
             )
@@ -697,8 +699,8 @@ def _setup_planner() -> SetupPlanner:
             "mtp": True,
         },
         gateway_endpoint="http://127.0.0.1:8766/v1",
-        clients=("codex", "hindsight"),
-        client_options={
+        application_targets=("codex", "hindsight"),
+        application_target_options={
             "codex": {
                 "sampling_profiles": {
                     name: dict(sampling_profile(settings).definition())

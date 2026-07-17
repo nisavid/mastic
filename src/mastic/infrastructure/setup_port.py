@@ -3,7 +3,7 @@
 The port keeps planning side-effect free and crosses owner boundaries only
 after the exact rendered plan has been confirmed.  Its collaborators are
 operation ports so composition can bind real runtime, model, desired-state,
-client, Supervisor, and Gateway implementations without hiding work here.
+Application Configuration Target, Supervisor, and Gateway implementations without hiding work here.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class SetupOperationPort:
         runtime: OperationOwner,
         model: OperationOwner,
         config: OperationOwner,
-        clients: OperationOwner,
+        application_targets: OperationOwner,
         supervisor: OperationOwner,
         verifier: OperationOwner,
         evidence: EvidenceStore,
@@ -111,7 +111,7 @@ class SetupOperationPort:
         self._runtime = runtime
         self._model = model
         self._config = config
-        self._clients = clients
+        self._application_targets = application_targets
         self._supervisor = supervisor
         self._verifier = verifier
         self._evidence = evidence
@@ -182,7 +182,7 @@ class SetupOperationPort:
             "completion": "complete" if execution.complete else "partial",
             "readiness": "unverified",
             "application_target_readiness": {
-                target: "unverified" for target in plan.selection.clients
+                target: "unverified" for target in plan.selection.application_targets
             },
             "results": _plain(results),
             "evidence": [_plain(item) for item in execution.evidence],
@@ -293,7 +293,7 @@ class SetupOperationPort:
                         "prompt_cache_bytes"
                     ),
                     "description": preview.capacity_description,
-                    "note": "Concurrency is the maximum number of simultaneous inference requests; idle clients use no slot and excess requests queue. With OptiQ 0.3.3, 4-7 requests retain one simultaneous prefill; 8 permits two prefills and is riskier on 48 GiB Macs.",
+                    "note": "Concurrency is the maximum number of simultaneous inference requests; idle Application Configuration Targets use no slot and excess requests queue. With OptiQ 0.3.3, 4-7 requests retain one simultaneous prefill; 8 permits two prefills and is riskier on 48 GiB Macs.",
                 }
                 if preview.capacity_profile is not None
                 else None
@@ -314,8 +314,10 @@ class SetupOperationPort:
                 "pinned": preview.pinned,
                 "service_options": _plain(preview.service_options),
                 "gateway_endpoint": preview.gateway_endpoint,
-                "clients": list(preview.clients),
-                "client_options": _plain(preview.client_options),
+                "application_targets": list(preview.application_targets),
+                "application_target_options": _plain(
+                    preview.application_target_options
+                ),
                 "sampling_profiles": _plain(preview.sampling_profiles),
                 "context_window": preview.context_window,
             },
@@ -402,15 +404,17 @@ class SetupOperationPort:
                     "confirmed": True,
                 },
             )
-        if step.id == "client.configure":
+        if step.id == "application-target.configure":
             configured = {}
-            for client in selection.clients:
-                options = _plain(selection.client_options.get(client, {}))
+            for application_target in selection.application_targets:
+                options = _plain(
+                    selection.application_target_options.get(application_target, {})
+                )
                 assert isinstance(options, Mapping)
-                configured[client] = self._clients.execute(
-                    "client.configure",
+                configured[application_target] = self._application_targets.execute(
+                    "application-target.configure",
                     {
-                        "client": client,
+                        "application_target": application_target,
                         # Desired state refers to the internal service identity;
                         # the application target owner resolves its public Gateway route.
                         "service": selection.service_name,
@@ -428,10 +432,10 @@ class SetupOperationPort:
             )
         if step.id in {"gateway.contract.codex", "gateway.contract.hindsight"}:
             target = str(step.inputs["target"])
-            result = self._clients.execute(
-                "client.test",
+            result = self._application_targets.execute(
+                "application-target.test",
                 {
-                    "resource": target,
+                    "application_target": target,
                     "profile": str(step.inputs["profile"]),
                 },
             )
@@ -489,11 +493,14 @@ class SetupOperationPort:
             return self._supervisor.execute(
                 "supervisor.unregister", {"confirmed": True}
             )
-        if step.id == "client.remove":
+        if step.id == "application-target.remove":
             results = {}
-            for client in _strings(step.inputs.get("clients", ())):
-                results[client] = self._clients.execute(
-                    "client.remove", {"resource": client, "confirmed": True}
+            for application_target in _strings(
+                step.inputs.get("application_targets", ())
+            ):
+                results[application_target] = self._application_targets.execute(
+                    "application-target.remove",
+                    {"application_target": application_target, "confirmed": True},
                 )
             return results
         if step.id == "state.remove":
@@ -553,8 +560,8 @@ def _selection(
                 "pinned",
                 "service_options",
                 "gateway_endpoint",
-                "clients",
-                "client_options",
+                "application_targets",
+                "application_target_options",
                 "sampling_profiles",
                 "context_window",
             }
@@ -581,17 +588,23 @@ def _selection(
         if "trust_grants" in overrides
         else baseline.trust_grants
     )
-    clients = (
-        _strings(overrides["clients"]) if "clients" in overrides else baseline.clients
+    application_targets = (
+        _strings(overrides["application_targets"])
+        if "application_targets" in overrides
+        else baseline.application_targets
     )
     sampling = overrides.get("sampling_profiles", baseline.sampling_profiles)
     if not isinstance(sampling, Mapping):
         raise ApplicationError("invalid_setup", "sampling_profiles must be an object")
-    client_options = overrides.get("client_options", baseline.client_options)
-    if not isinstance(client_options, Mapping) or not all(
-        isinstance(value, Mapping) for value in client_options.values()
+    application_target_options = overrides.get(
+        "application_target_options", baseline.application_target_options
+    )
+    if not isinstance(application_target_options, Mapping) or not all(
+        isinstance(value, Mapping) for value in application_target_options.values()
     ):
-        raise ApplicationError("invalid_setup", "client_options must be an object")
+        raise ApplicationError(
+            "invalid_setup", "application_target_options must be an object"
+        )
     service_options = overrides.get("service_options", baseline.service_options)
     if not isinstance(service_options, Mapping):
         raise ApplicationError("invalid_setup", "service_options must be an object")
@@ -629,8 +642,8 @@ def _selection(
         gateway_endpoint=str(
             overrides.get("gateway_endpoint", baseline.gateway_endpoint)
         ),
-        clients=clients,
-        client_options=client_options,  # type: ignore[arg-type]
+        application_targets=application_targets,
+        application_target_options=application_target_options,  # type: ignore[arg-type]
         sampling_profiles=sampling,  # type: ignore[arg-type]
         context_window=_optional_int(
             overrides.get("context_window", baseline.context_window)
@@ -655,8 +668,8 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
             "pinned",
             "service_options",
             "gateway_endpoint",
-            "clients",
-            "client_options",
+            "application_targets",
+            "application_target_options",
             "sampling_profiles",
             "context_window",
         }
@@ -780,8 +793,8 @@ def _selection_value(selection: ExactSetupSelection) -> Mapping[str, object]:
         "pinned": selection.pinned,
         "service_options": selection.service_options,
         "gateway_endpoint": selection.gateway_endpoint,
-        "clients": selection.clients,
-        "client_options": selection.client_options,
+        "application_targets": selection.application_targets,
+        "application_target_options": selection.application_target_options,
         "sampling_profiles": selection.sampling_profiles,
         "context_window": selection.context_window,
     }

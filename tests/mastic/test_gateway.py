@@ -546,12 +546,14 @@ class GatewayTests(unittest.TestCase):
         app = create_gateway(
             resolver,
             client_factory=lambda: upstream,
-            profile_resolver=lambda client, name: profiles.get((client, name)),
+            profile_resolver=lambda application_target, name: profiles.get(
+                (application_target, name)
+            ),
         )
 
         with TestClient(app) as client:
             chat = client.post(
-                "/clients/hindsight/profiles/retain/v1/chat/completions",
+                "/application-targets/hindsight/profiles/retain/v1/chat/completions",
                 json={
                     "model": "coding",
                     "messages": [{"role": "user", "content": "remember this"}],
@@ -560,17 +562,22 @@ class GatewayTests(unittest.TestCase):
                 },
             )
             responses = client.post(
-                "/clients/codex/profiles/coding/v1/responses",
+                "/application-targets/codex/profiles/coding/v1/responses",
                 json={"model": "coding", "input": "fix this", "temperature": 0.0},
             )
             missing = client.post(
-                "/clients/codex/profiles/missing/v1/responses",
+                "/application-targets/codex/profiles/missing/v1/responses",
+                json={"model": "coding", "input": "fix this"},
+            )
+            legacy = client.post(
+                "/clients/codex/profiles/coding/v1/responses",
                 json={"model": "coding", "input": "fix this"},
             )
 
         self.assertEqual((chat.status_code, responses.status_code), (200, 200))
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.json()["error"]["code"], "profile_not_found")
+        self.assertEqual(legacy.status_code, 404)
         chat_body = json.loads(upstream.requests[0].content)
         self.assertEqual(
             {

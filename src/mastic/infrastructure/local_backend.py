@@ -88,8 +88,8 @@ _LOCAL_MUTATIONS = frozenset(
         "model.trust",
         "service.create",
         "service.edit",
-        "client.configure",
-        "client.remove",
+        "application-target.configure",
+        "application-target.remove",
         "config.import",
         "config.restore",
     }
@@ -112,7 +112,7 @@ class LocalOperationBackend:
         logs: LogReader,
         metrics: MetricsSource,
         setup: OperationPort,
-        clients: OperationPort,
+        application_targets: OperationPort,
         config_path: str | Path,
         gateway_credential_path: str | Path | None = None,
         model_intelligence=None,
@@ -127,7 +127,7 @@ class LocalOperationBackend:
         self._logs = logs
         self._metrics = metrics
         self._setup = setup
-        self._clients = clients
+        self._application_targets = application_targets
         self._config_path = Path(config_path)
         self._gateway_credential_path = (
             Path(gateway_credential_path)
@@ -338,8 +338,14 @@ class LocalOperationBackend:
                 {str(item["id"]) for item in self._state_store.operations()},
                 "Operation",
             )
-        elif name in {"client.inspect", "client.test", "client.remove"}:
-            _resource(request, config.clients, "Application Configuration Target")
+        elif name in {
+            "application-target.inspect",
+            "application-target.test",
+            "application-target.remove",
+        }:
+            _resource(
+                request, config.application_targets, "Application Configuration Target"
+            )
 
     def _query(self, request: OperationRequest) -> Mapping[str, object]:
         name = request.name
@@ -367,8 +373,8 @@ class LocalOperationBackend:
             return self._service_query(request, config)
         if name.startswith("operation."):
             return self._operation_query(request)
-        if name.startswith("client."):
-            return self._client_query(request, config)
+        if name.startswith("application-target."):
+            return self._application_target_query(request, config)
         if name.startswith("config."):
             return self._config_query(request)
         raise ApplicationError("operation_unavailable", f"{name} has no local backend")
@@ -424,9 +430,9 @@ class LocalOperationBackend:
             ]
         elif name == "doctor":
             issues = self._diagnostic_issues(config, supervisor, gateway, services)
-            if "codex" in config.clients:
+            if "codex" in config.application_targets:
                 try:
-                    codex = config.clients["codex"]
+                    codex = config.application_targets["codex"]
                     service = config.services.get(codex.service)
                     if service is None:
                         service = next(
@@ -448,11 +454,13 @@ class LocalOperationBackend:
                             {
                                 "code": "codex_context_drift",
                                 "message": "Codex context does not match the selected Inference Service cap.",
-                                "next_actions": ["mastic client configure codex"],
+                                "next_actions": [
+                                    "mastic application-target configure codex"
+                                ],
                             }
                         )
-                    integration = self._clients.execute(
-                        "client.inspect", {"client": "codex"}
+                    integration = self._application_targets.execute(
+                        "application-target.inspect", {"application_target": "codex"}
                     )
                     if integration.get("state") in {
                         "missing",
@@ -472,7 +480,7 @@ class LocalOperationBackend:
                                 "next_actions": list(
                                     integration.get(
                                         "next_actions",
-                                        ["mastic client configure codex"],
+                                        ["mastic application-target configure codex"],
                                     )
                                 ),
                             }
@@ -482,7 +490,7 @@ class LocalOperationBackend:
                         {
                             "code": "codex_catalog_unknown",
                             "message": f"Codex integration inspection failed: {error}",
-                            "next_actions": ["mastic client inspect codex"],
+                            "next_actions": ["mastic application-target inspect codex"],
                         }
                     )
             details["issues"] = issues
@@ -563,7 +571,7 @@ class LocalOperationBackend:
                 {
                     "scheme": "Bearer",
                     "path": str(self._gateway_credential_path),
-                    "instructions": "Configure Application Configuration Targets with mastic client configure; do not copy the token into desired state.",
+                    "instructions": "Configure Application Configuration Targets with mastic application-target configure; do not copy the token into desired state.",
                 }
                 if self._gateway_credential_path is not None
                 else None
@@ -882,45 +890,48 @@ class LocalOperationBackend:
             next_actions=[],
         )
 
-    def _client_query(
+    def _application_target_query(
         self, request: OperationRequest, config: MasticConfig
     ) -> Mapping[str, object]:
-        if request.name == "client.list":
+        if request.name == "application-target.list":
             return _result(
                 request.name,
-                items=[_plain(item) for _, item in sorted(config.clients.items())],
+                items=[
+                    _plain(item)
+                    for _, item in sorted(config.application_targets.items())
+                ],
                 evidence=["desired-state"],
                 next_actions=[],
             )
         resource = _resource(
-            request, config.clients, "Application Configuration Target"
+            request, config.application_targets, "Application Configuration Target"
         )
-        if request.name == "client.test":
-            value = self._clients.execute(
-                request.name, {**request.parameters, "resource": resource}
+        if request.name == "application-target.test":
+            value = self._application_targets.execute(
+                request.name, {**request.parameters, "application_target": resource}
             )
             return _result(
                 request.name,
                 resource=_plain(value),
-                evidence=["client-probe"],
+                evidence=["application-target-probe"],
                 next_actions=[],
             )
-        if request.name == "client.inspect":
-            value = self._clients.execute(
-                request.name, {**request.parameters, "resource": resource}
+        if request.name == "application-target.inspect":
+            value = self._application_targets.execute(
+                request.name, {**request.parameters, "application_target": resource}
             )
             return _result(
                 request.name,
                 resource={
-                    "desired": _plain(config.clients[resource]),
+                    "desired": _plain(config.application_targets[resource]),
                     "integration": _plain(value),
                 },
-                evidence=["desired-state", "managed-client-files"],
+                evidence=["desired-state", "managed-application-target-files"],
                 next_actions=list(value.get("next_actions", [])),
             )
         return _result(
             request.name,
-            resource=_plain(config.clients[resource]),
+            resource=_plain(config.application_targets[resource]),
             evidence=["desired-state"],
             next_actions=[],
         )
@@ -1039,7 +1050,7 @@ class LocalOperationBackend:
         elif name == "service.remove":
             resource = str(parameters.get("resource", ""))
             removed = self._supervisor.execute(
-                "service.remove", {"resource": resource, "confirmed": True}
+                "service.remove", {"application_target": resource, "confirmed": True}
             )
             configured = self._local_mutation(request)
             value = {
@@ -1057,8 +1068,8 @@ class LocalOperationBackend:
             value = self._runtime_supply.execute(name, parameters)
         elif name in _MODEL_LONG_MUTATIONS:
             value = self._execute_model_mutation(name, parameters)
-        elif name in {"client.configure", "client.remove"}:
-            value = self._clients.execute(name, parameters)
+        elif name in {"application-target.configure", "application-target.remove"}:
+            value = self._application_targets.execute(name, parameters)
         elif name in _LOCAL_MUTATIONS:
             value = self._local_mutation(request)
         else:
@@ -1352,7 +1363,11 @@ def _resource(
 ) -> str:
     names = set(available)
     raw = request.parameters.get(
-        "resource", request.parameters.get("name", request.parameters.get("id"))
+        "resource",
+        request.parameters.get(
+            "application_target",
+            request.parameters.get("name", request.parameters.get("id")),
+        ),
     )
     if raw is None:
         if len(names) == 1:

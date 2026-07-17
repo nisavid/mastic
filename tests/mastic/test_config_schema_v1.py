@@ -39,13 +39,13 @@ pinned = true
 kv_config = "kv_config.json"
 mtp = true
 
-[clients.codex]
+[application_targets.codex]
 kind = "codex"
 service = "coding"
 context_window = 32768
 provider = "mlx-local"
 
-[clients.codex.sampling.coding]
+[application_targets.codex.sampling.coding]
 temperature = 0.6
 top_p = 0.95
 top_k = 20
@@ -60,7 +60,15 @@ source_revision = "995ad96eacd98c81ed38be0c5b274b04031597b0"
 
 
 class ConfigSchemaV1Tests(unittest.TestCase):
-    def test_loads_distinct_runtime_model_alias_service_gateway_and_client_state(
+    def test_rejects_legacy_client_configuration_table(self) -> None:
+        legacy = VALID.replace("[application_targets.", "[clients.")
+
+        with self.assertRaisesRegex(
+            ConfigSchemaError, "unknown (?:fields|keys): clients"
+        ):
+            validate_config(tomlkit.parse(legacy))
+
+    def test_loads_distinct_runtime_model_alias_service_gateway_and_application_target_state(
         self,
     ) -> None:
         config = validate_config(tomlkit.parse(VALID))
@@ -74,25 +82,34 @@ class ConfigSchemaV1Tests(unittest.TestCase):
         self.assertEqual(config.aliases["qwen-optiq"].installation_name, "qwen-exact")
         self.assertTrue(config.services["coding"].pinned)
         self.assertEqual(config.services["coding"].route, "coding")
-        self.assertEqual(config.clients["codex"].service, "coding")
-        self.assertEqual(config.clients["codex"].context_window, 32768)
-        self.assertEqual(config.clients["codex"].provider, "mlx-local")
-        self.assertEqual(config.clients["codex"].sampling["coding"].top_p, 0.95)
-        self.assertEqual(config.clients["codex"].sampling["coding"].top_k, 20)
-        self.assertEqual(config.clients["codex"].sampling["coding"].min_p, 0.0)
+        self.assertEqual(config.application_targets["codex"].service, "coding")
+        self.assertEqual(config.application_targets["codex"].context_window, 32768)
+        self.assertEqual(config.application_targets["codex"].provider, "mlx-local")
         self.assertEqual(
-            config.clients["codex"].sampling["coding"].presence_penalty, 0.0
+            config.application_targets["codex"].sampling["coding"].top_p, 0.95
         )
         self.assertEqual(
-            config.clients["codex"].sampling["coding"].repetition_penalty, 1.0
+            config.application_targets["codex"].sampling["coding"].top_k, 20
         )
-        self.assertTrue(config.clients["codex"].sampling["coding"].enable_thinking)
         self.assertEqual(
-            config.clients["codex"].sampling["coding"].upstream_profile,
+            config.application_targets["codex"].sampling["coding"].min_p, 0.0
+        )
+        self.assertEqual(
+            config.application_targets["codex"].sampling["coding"].presence_penalty, 0.0
+        )
+        self.assertEqual(
+            config.application_targets["codex"].sampling["coding"].repetition_penalty,
+            1.0,
+        )
+        self.assertTrue(
+            config.application_targets["codex"].sampling["coding"].enable_thinking
+        )
+        self.assertEqual(
+            config.application_targets["codex"].sampling["coding"].upstream_profile,
             "precise-coding-thinking",
         )
         self.assertEqual(
-            config.clients["codex"].sampling["coding"].source_revision,
+            config.application_targets["codex"].sampling["coding"].source_revision,
             "995ad96eacd98c81ed38be0c5b274b04031597b0",
         )
 
@@ -154,7 +171,9 @@ route = "coding"
                 tomlkit.parse(adopted.replace("/Volumes/models/qwen", "qwen"))
             )
 
-    def test_rejects_unsupported_client_kind_and_invalid_sampling(self) -> None:
+    def test_rejects_unsupported_application_target_kind_and_invalid_sampling(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(
             ConfigSchemaError, "unsupported Application Configuration Target kind"
         ):
@@ -197,32 +216,40 @@ route = "coding"
     def test_hindsight_profile_and_sampling_are_explicit_desired_state(self) -> None:
         source = (
             VALID.replace(
-                "[clients.codex]",
-                "[clients.hindsight]",
+                "[application_targets.codex]",
+                "[application_targets.hindsight]",
             )
             .replace(
                 'kind = "codex"',
                 'kind = "hindsight"\nprofile = "agent-memory"\nmax_concurrent = 1',
             )
             .replace(
-                "[clients.codex.sampling.coding]",
-                "[clients.hindsight.sampling.verification]",
+                "[application_targets.codex.sampling.coding]",
+                "[application_targets.hindsight.sampling.verification]",
             )
         )
 
-        profile_body = VALID.split("[clients.codex.sampling.coding]\n", 1)[1]
-        source += "\n[clients.hindsight.sampling.retain]\n" + profile_body
-        source += "\n[clients.hindsight.sampling.reflect]\n" + profile_body
-        source += "\n[clients.hindsight.sampling.consolidation]\n" + profile_body
+        profile_body = VALID.split("[application_targets.codex.sampling.coding]\n", 1)[
+            1
+        ]
+        source += "\n[application_targets.hindsight.sampling.retain]\n" + profile_body
+        source += "\n[application_targets.hindsight.sampling.reflect]\n" + profile_body
+        source += (
+            "\n[application_targets.hindsight.sampling.consolidation]\n" + profile_body
+        )
 
-        client = validate_config(tomlkit.parse(source)).clients["hindsight"]
+        application_target = validate_config(tomlkit.parse(source)).application_targets[
+            "hindsight"
+        ]
 
-        self.assertEqual(client.profile, "agent-memory")
-        self.assertEqual(client.sampling["retain"].temperature, 0.6)
-        self.assertEqual(client.max_concurrent, 1)
+        self.assertEqual(application_target.profile, "agent-memory")
+        self.assertEqual(application_target.sampling["retain"].temperature, 0.6)
+        self.assertEqual(application_target.max_concurrent, 1)
 
     def test_rejects_unsafe_hindsight_profile_and_ambiguous_flat_sampling(self) -> None:
-        hindsight = VALID.replace("[clients.codex]", "[clients.hindsight]").replace(
+        hindsight = VALID.replace(
+            "[application_targets.codex]", "[application_targets.hindsight]"
+        ).replace(
             'kind = "codex"',
             'kind = "hindsight"\nprofile = "../default"\nmax_concurrent = 1',
         )
@@ -230,7 +257,8 @@ route = "coding"
             validate_config(tomlkit.parse(hindsight))
 
         flat = VALID.replace(
-            "[clients.codex.sampling.coding]", "[clients.codex.sampling]"
+            "[application_targets.codex.sampling.coding]",
+            "[application_targets.codex.sampling]",
         )
         with self.assertRaisesRegex(ConfigSchemaError, "sampling profile"):
             validate_config(tomlkit.parse(flat))
@@ -239,7 +267,7 @@ route = "coding"
         self,
     ) -> None:
         partial_hindsight = VALID.replace(
-            "[clients.codex]", "[clients.hindsight]"
+            "[application_targets.codex]", "[application_targets.hindsight]"
         ).replace(
             'kind = "codex"',
             'kind = "hindsight"\nprofile = "default"\nmax_concurrent = 1',

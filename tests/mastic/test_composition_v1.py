@@ -51,7 +51,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=port,
                 setup=port,
-                clients=port,
+                application_targets=port,
             )
 
             status = composition.dispatcher.execute(OperationRequest("status"))
@@ -82,7 +82,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=_Port(),
                 setup=_Port(),
-                clients=_Port(),
+                application_targets=_Port(),
             )
 
             preview = composition.dispatcher.preview(

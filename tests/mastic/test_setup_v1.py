@@ -29,8 +29,8 @@ def _selection(*, service: str, revision: str) -> ExactSetupSelection:
         trust_grants=(),
         service_name=service,
         gateway_endpoint="http://127.0.0.1:8766/v1",
-        clients=("codex", "hindsight"),
-        client_options={"hindsight": {"profile": "default"}},
+        application_targets=("codex", "hindsight"),
+        application_target_options={"hindsight": {"profile": "default"}},
         sampling_profiles={
             "coding": {"temperature": 0.0, "top_p": 0.95},
             "memory-reflect": {"temperature": 0.9, "top_p": 0.95},
@@ -51,7 +51,9 @@ class SetupV1Tests(unittest.TestCase):
         )
         self.planner = SetupPlanner((self.compact, self.workstation))
 
-    def test_capacity_profile_coherently_caps_service_and_clients(self) -> None:
+    def test_capacity_profile_coherently_caps_service_and_application_targets(
+        self,
+    ) -> None:
         planner = SetupPlanner(
             (self.compact,),
             capacity_profiles=(
@@ -93,7 +95,9 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(native.context_window, 262_144)
         self.assertEqual(native.service_options["max_concurrent"], 3)
 
-    def test_selected_client_context_cannot_exceed_service_capacity(self) -> None:
+    def test_selected_application_target_context_cannot_exceed_service_capacity(
+        self,
+    ) -> None:
         invalid = _selection(service="coding", revision="3" * 40)
         invalid = replace(
             invalid,
@@ -169,8 +173,10 @@ class SetupV1Tests(unittest.TestCase):
         self.assertFalse(preview.pinned)
         self.assertEqual(preview.service_options["kv_config"], "kv_config.json")
         self.assertEqual(preview.gateway_endpoint, "http://127.0.0.1:8766/v1")
-        self.assertEqual(preview.clients, ("codex", "hindsight"))
-        self.assertEqual(preview.client_options["hindsight"]["profile"], "default")
+        self.assertEqual(preview.application_targets, ("codex", "hindsight"))
+        self.assertEqual(
+            preview.application_target_options["hindsight"]["profile"], "default"
+        )
         self.assertEqual(preview.sampling_profiles["coding"]["temperature"], 0.0)
 
     def test_guided_setup_never_falls_back_to_an_oversized_profile(self) -> None:
@@ -194,8 +200,8 @@ class SetupV1Tests(unittest.TestCase):
     def test_selected_codex_target_has_its_own_resumable_canary_step(self) -> None:
         exact = replace(
             self.workstation.selection,
-            clients=("codex",),
-            client_options={},
+            application_targets=("codex",),
+            application_target_options={},
         )
 
         plan = self.planner.plan(
@@ -220,8 +226,8 @@ class SetupV1Tests(unittest.TestCase):
     def test_selected_hindsight_target_has_its_own_resumable_canary_step(self) -> None:
         exact = replace(
             self.workstation.selection,
-            clients=("hindsight",),
-            client_options={"hindsight": {"profile": "project-memory"}},
+            application_targets=("hindsight",),
+            application_target_options={"hindsight": {"profile": "project-memory"}},
         )
 
         plan = self.planner.plan(
@@ -318,7 +324,9 @@ class SetupV1Tests(unittest.TestCase):
             ValueError,
             "unsupported Application Configuration Targets in setup: other",
         ):
-            replace(self.workstation.selection, clients=("other",)).validate_exact()
+            replace(
+                self.workstation.selection, application_targets=("other",)
+            ).validate_exact()
 
     def test_exact_noninteractive_setup_requires_explicit_trust_and_confirmation(
         self,
@@ -474,7 +482,7 @@ class SetupV1Tests(unittest.TestCase):
         inventory = RemovalInventory(
             running_services=("coding",),
             registered=True,
-            client_integrations=("codex", "hindsight"),
+            application_target_integrations=("codex", "hindsight"),
             product_owned_paths=("~/.config/mastic", "~/.local/state/mastic"),
             product_owned_bytes=2 * GIB,
             shared_cache_paths=("~/.cache/huggingface/hub/models--example",),
@@ -491,7 +499,7 @@ class SetupV1Tests(unittest.TestCase):
                 "service.drain",
                 "service.stop",
                 "supervisor.unregister",
-                "client.remove",
+                "application-target.remove",
                 "state.remove",
             ),
         )

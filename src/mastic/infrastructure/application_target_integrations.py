@@ -20,7 +20,7 @@ import tomlkit
 from tomlkit.toml_document import TOMLDocument
 
 from mastic.application.config_schema import (
-    ClientSettings,
+    ApplicationTargetSettings,
     validate_hindsight_profile_name,
 )
 from mastic.infrastructure.gateway_credential import read_gateway_token
@@ -146,7 +146,7 @@ class CodexModelMetadata:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientConfiguration:
+class ApplicationTargetConfiguration:
     gateway_endpoint: str
     service_name: str
     context_window: int | None = None
@@ -215,7 +215,7 @@ class SemanticChange:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientApplyResult:
+class ApplicationTargetApplyResult:
     changed: bool
     changes: tuple[SemanticChange, ...]
     backup_path: Path
@@ -223,13 +223,13 @@ class ClientApplyResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientRemovalResult:
+class ApplicationTargetRemovalResult:
     changed: bool
     changes: tuple[SemanticChange, ...]
     skipped_paths: tuple[tuple[str, ...], ...] = ()
 
 
-class ClientIntegrationConflict(RuntimeError):
+class ApplicationTargetIntegrationConflict(RuntimeError):
     """A managed field or snapshot changed outside mastic."""
 
 
@@ -238,7 +238,7 @@ TestResult = TypeVar("TestResult")
 TestRequest = Callable[[str, str, Mapping[str, object]], TestResult]
 
 
-class LocalClientIntegrationFactory:
+class LocalApplicationTargetIntegrationFactory:
     """Select one precise Application Configuration Target from intent and state."""
 
     def __init__(
@@ -266,12 +266,12 @@ class LocalClientIntegrationFactory:
         operation: str,
         name: str,
         parameters: Mapping[str, object],
-        settings: ClientSettings | None,
-    ) -> CodexClientIntegration | HindsightClientIntegration:
+        settings: ApplicationTargetSettings | None,
+    ) -> CodexApplicationTargetIntegration | HindsightApplicationTargetIntegration:
         _safe_directory(self.ownership_dir, "application-target ownership directory")
         if name == "codex":
             _safe_target(self.codex_config_path, "Codex config")
-            return CodexClientIntegration(
+            return CodexApplicationTargetIntegration(
                 self.codex_config_path,
                 self.ownership_dir / "codex.ownership.json",
                 self.ownership_dir / "codex.config.backup",
@@ -281,14 +281,14 @@ class LocalClientIntegrationFactory:
         if name != "hindsight":
             raise ValueError(f"unsupported Application Configuration Target: {name}")
         _safe_directory(self.hindsight_profiles_dir, "Hindsight profiles directory")
-        if operation == "client.configure":
+        if operation == "application-target.configure":
             profile = parameters.get("profile")
         else:
             profile = settings.profile if settings is not None else None
         profile_name = validate_hindsight_profile_name(profile)
         config_path = self.hindsight_profiles_dir / f"{profile_name}.env"
         _safe_target(config_path, "Hindsight profile")
-        return HindsightClientIntegration(
+        return HindsightApplicationTargetIntegration(
             config_path,
             self.ownership_dir / f"hindsight-{profile_name}.ownership.json",
             self.ownership_dir / f"hindsight-{profile_name}.config.backup",
@@ -296,7 +296,7 @@ class LocalClientIntegrationFactory:
         )
 
 
-class CodexClientIntegration:
+class CodexApplicationTargetIntegration:
     """Manage only the Codex TOML fields recorded in an ownership manifest."""
 
     def __init__(
@@ -325,13 +325,15 @@ class CodexClientIntegration:
         self._bundled_catalog = bundled_catalog or _default_bundled_codex_catalog
         self._catalog_validator = catalog_validator or _validate_codex_catalog
 
-    def preview(self, configuration: ClientConfiguration) -> tuple[SemanticChange, ...]:
+    def preview(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> tuple[SemanticChange, ...]:
         document = _load_toml(self.config_path)
         return tuple(_toml_changes(document, self._desired(configuration)))
 
     def apply(
-        self, configuration: ClientConfiguration, *, takeover: bool = False
-    ) -> ClientApplyResult:
+        self, configuration: ApplicationTargetConfiguration, *, takeover: bool = False
+    ) -> ApplicationTargetApplyResult:
         raw, existed = _read(self.config_path)
         document = _parse_toml(raw)
         desired = self._desired(configuration)
@@ -399,7 +401,9 @@ class CodexClientIntegration:
             and not catalog_changed
             and not catalog_ownership_new
         ):
-            return ClientApplyResult(False, (), self.backup_path, self.manifest_path)
+            return ApplicationTargetApplyResult(
+                False, (), self.backup_path, self.manifest_path
+            )
 
         rendered = document.as_string().encode()
         manifest = {
@@ -466,17 +470,17 @@ class CodexClientIntegration:
             if catalog_ownership_new:
                 self.catalog_backup_path.unlink(missing_ok=True)
             raise
-        return ClientApplyResult(
+        return ApplicationTargetApplyResult(
             bool(changes) or ownership_changed or catalog_changed,
             tuple(changes),
             self.backup_path,
             self.manifest_path,
         )
 
-    def remove(self) -> ClientRemovalResult:
+    def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
         if not manifest:
-            return ClientRemovalResult(False, ())
+            return ApplicationTargetRemovalResult(False, ())
         snapshot = _snapshot_files(
             self.config_path,
             self.catalog_path,
@@ -522,7 +526,7 @@ class CodexClientIntegration:
         except Exception:
             _restore_files(snapshot)
             raise
-        return ClientRemovalResult(
+        return ApplicationTargetRemovalResult(
             bool(changes) or catalog_changed, tuple(changes), tuple(skipped)
         )
 
@@ -537,7 +541,7 @@ class CodexClientIntegration:
         )
         current, _ = _read(self.config_path)
         if _digest(current) != manifest["applied_digest"]:
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 "Codex config changed after mastic applied the integration"
             )
         backup, _ = _read(self.backup_path)
@@ -545,7 +549,7 @@ class CodexClientIntegration:
         if isinstance(catalog, dict):
             current_catalog, _ = _read(self.catalog_path)
             if _digest(current_catalog) != catalog.get("applied_digest"):
-                raise ClientIntegrationConflict(
+                raise ApplicationTargetIntegrationConflict(
                     "Codex model catalog changed after mastic applied the integration"
                 )
         try:
@@ -571,14 +575,14 @@ class CodexClientIntegration:
         if not manifest:
             return {
                 "state": "unmanaged",
-                "next_actions": ["mastic client configure codex"],
+                "next_actions": ["mastic application-target configure codex"],
             }
         catalog = manifest.get("catalog")
         if not isinstance(catalog, dict):
             return {
                 "state": "missing",
                 "detail": "Codex ownership predates the required custom model catalog.",
-                "next_actions": ["mastic client configure codex"],
+                "next_actions": ["mastic application-target configure codex"],
             }
         config_document = _load_toml(self.config_path)
         for item in manifest.get("fields", []):
@@ -589,7 +593,7 @@ class CodexClientIntegration:
                     "state": "drifted",
                     "detail": f"Codex setting {'.'.join(path)} differs from mastic ownership.",
                     "catalog_path": str(self.catalog_path),
-                    "next_actions": ["mastic client configure codex"],
+                    "next_actions": ["mastic application-target configure codex"],
                 }
         raw, exists = _read(self.catalog_path)
         state = "healthy"
@@ -618,7 +622,7 @@ class CodexClientIntegration:
             except (ValueError, TypeError, StopIteration, AttributeError):
                 state, detail = "malformed", "Codex custom model catalog is malformed."
             except (
-                ClientIntegrationConflict,
+                ApplicationTargetIntegrationConflict,
                 OSError,
                 subprocess.SubprocessError,
             ) as error:
@@ -629,12 +633,12 @@ class CodexClientIntegration:
             "catalog_path": str(self.catalog_path),
             "next_actions": []
             if state == "healthy"
-            else ["mastic client configure codex"],
+            else ["mastic application-target configure codex"],
         }
 
     def test(
         self,
-        configuration: ClientConfiguration,
+        configuration: ApplicationTargetConfiguration,
         request: TestRequest[TestResult],
         *,
         profile: str = "coding",
@@ -662,14 +666,16 @@ class CodexClientIntegration:
             self.catalog_backup_path.unlink(missing_ok=True)
 
     def _desired(
-        self, configuration: ClientConfiguration
+        self, configuration: ApplicationTargetConfiguration
     ) -> Mapping[tuple[str, ...], object]:
         fields = dict(_codex_fields(configuration))
         if configuration.codex_model is not None:
             fields[("model_catalog_json",)] = str(self.catalog_path)
         return MappingProxyType(fields)
 
-    def _render_catalog(self, configuration: ClientConfiguration) -> bytes | None:
+    def _render_catalog(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> bytes | None:
         metadata = configuration.codex_model
         if metadata is None:
             return None
@@ -678,7 +684,9 @@ class CodexClientIntegration:
         bundled = self._bundled_catalog()
         models = bundled.get("models")
         if not isinstance(models, list):
-            raise ClientIntegrationConflict("Codex bundled model catalog is malformed")
+            raise ApplicationTargetIntegrationConflict(
+                "Codex bundled model catalog is malformed"
+            )
         template = next(
             (
                 item
@@ -697,7 +705,7 @@ class CodexClientIntegration:
             ),
         )
         if template is None:
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 "Codex bundled model catalog has no instruction-bearing model"
             )
         model = dict(template)
@@ -743,7 +751,7 @@ class CodexClientIntegration:
         return True, False
 
 
-class HindsightClientIntegration:
+class HindsightApplicationTargetIntegration:
     """Manage a Hindsight profile env file without owning unrelated keys."""
 
     def __init__(
@@ -761,15 +769,17 @@ class HindsightClientIntegration:
         self._replace = replace or _atomic_replace
         self._credential_reader = credential_reader
 
-    def preview(self, configuration: ClientConfiguration) -> tuple[SemanticChange, ...]:
+    def preview(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> tuple[SemanticChange, ...]:
         raw, _ = _read(self.config_path)
         env = _EnvDocument(raw.decode())
         desired = self._desired(configuration)
         return tuple(_redact_change(change) for change in env.changes(desired))
 
     def apply(
-        self, configuration: ClientConfiguration, *, takeover: bool = False
-    ) -> ClientApplyResult:
+        self, configuration: ApplicationTargetConfiguration, *, takeover: bool = False
+    ) -> ApplicationTargetApplyResult:
         raw, existed = _read(self.config_path)
         env = _EnvDocument(raw.decode())
         desired = self._desired(configuration)
@@ -841,7 +851,9 @@ class HindsightClientIntegration:
 
         ownership_changed = bool(owned) and not prior_manifest
         if not changes and not ownership_changed:
-            return ClientApplyResult(False, (), self.backup_path, self.manifest_path)
+            return ApplicationTargetApplyResult(
+                False, (), self.backup_path, self.manifest_path
+            )
 
         rendered = env.render().encode()
         manifest = {
@@ -872,17 +884,17 @@ class HindsightClientIntegration:
         except Exception:
             _restore_support(self.manifest_path, self.backup_path, support)
             raise
-        return ClientApplyResult(
+        return ApplicationTargetApplyResult(
             bool(changes) or ownership_changed,
             tuple(changes),
             self.backup_path,
             self.manifest_path,
         )
 
-    def remove(self) -> ClientRemovalResult:
+    def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
         if not manifest:
-            return ClientRemovalResult(False, ())
+            return ApplicationTargetRemovalResult(False, ())
         raw, _ = _read(self.config_path)
         env = _EnvDocument(raw.decode())
         changes: list[SemanticChange] = []
@@ -919,13 +931,15 @@ class HindsightClientIntegration:
         else:
             self.manifest_path.unlink(missing_ok=True)
             self.backup_path.unlink(missing_ok=True)
-        return ClientRemovalResult(bool(changes), tuple(changes), tuple(skipped))
+        return ApplicationTargetRemovalResult(
+            bool(changes), tuple(changes), tuple(skipped)
+        )
 
     def restore(self) -> None:
         manifest = self._manifest()
         current, _ = _read(self.config_path)
         if _digest(current) != manifest["applied_digest"]:
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 "Hindsight config changed after mastic applied the integration"
             )
         backup, _ = _read(self.backup_path)
@@ -938,7 +952,7 @@ class HindsightClientIntegration:
 
     def test(
         self,
-        configuration: ClientConfiguration,
+        configuration: ApplicationTargetConfiguration,
         request: TestRequest[TestResult],
         *,
         profile: str = "reflect",
@@ -950,7 +964,9 @@ class HindsightClientIntegration:
         _validate_manifest_paths(manifest, self.config_path, self.backup_path)
         return manifest
 
-    def _desired(self, configuration: ClientConfiguration) -> Mapping[str, str]:
+    def _desired(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> Mapping[str, str]:
         token = (
             self._credential_reader(configuration.credential_path)
             if configuration.credential_path is not None
@@ -960,9 +976,9 @@ class HindsightClientIntegration:
 
 
 def _codex_fields(
-    configuration: ClientConfiguration,
+    configuration: ApplicationTargetConfiguration,
 ) -> Mapping[tuple[str, ...], object]:
-    _validate_client_profiles(configuration, "codex")
+    _validate_application_target_profiles(configuration, "codex")
     provider = configuration.codex_provider_id
     fields: dict[tuple[str, ...], object] = {
         ("model",): configuration.service_name,
@@ -995,11 +1011,13 @@ def _default_bundled_codex_catalog() -> Mapping[str, object]:
         )
         value = json.loads(completed.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as error:
-        raise ClientIntegrationConflict(
+        raise ApplicationTargetIntegrationConflict(
             "Codex bundled model catalog is unavailable; install or repair Codex and retry"
         ) from error
     if not isinstance(value, dict):
-        raise ClientIntegrationConflict("Codex bundled model catalog is malformed")
+        raise ApplicationTargetIntegrationConflict(
+            "Codex bundled model catalog is malformed"
+        )
     return value
 
 
@@ -1010,7 +1028,7 @@ def _validate_codex_catalog(path: Path) -> None:
             str(item["slug"]): int(item["context_window"]) for item in source["models"]
         }
     except (OSError, ValueError, KeyError, TypeError) as error:
-        raise ClientIntegrationConflict(
+        raise ApplicationTargetIntegrationConflict(
             "Codex custom model catalog is malformed"
         ) from error
     with tempfile.TemporaryDirectory(prefix="mastic-codex-validate-") as directory:
@@ -1044,19 +1062,19 @@ def _validate_codex_catalog(path: Path) -> None:
                 if isinstance(error, subprocess.CalledProcessError) and error.stderr
                 else str(error)
             )
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 f"installed Codex rejected the custom model catalog: {detail}"
             ) from error
         if actual != expected or "fallback metadata" in completed.stderr.lower():
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 "installed Codex did not resolve the custom model metadata exactly"
             )
 
 
 def _hindsight_fields(
-    configuration: ClientConfiguration, *, token: str | None = None
+    configuration: ApplicationTargetConfiguration, *, token: str | None = None
 ) -> Mapping[str, str]:
-    _validate_client_profiles(configuration, "hindsight")
+    _validate_application_target_profiles(configuration, "hindsight")
     fields = {
         "HINDSIGHT_API_LLM_PROVIDER": configuration.hindsight_provider,
         "HINDSIGHT_API_LLM_BASE_URL": _profile_endpoint(
@@ -1086,28 +1104,30 @@ def _hindsight_fields(
 
 
 def _profile_endpoint(
-    configuration: ClientConfiguration, client: str, profile: str
+    configuration: ApplicationTargetConfiguration, application_target: str, profile: str
 ) -> str:
     if profile not in configuration.sampling_profiles:
         raise ValueError(
-            f"required {client} Application Configuration Target profile is missing: {profile}"
+            f"required {application_target} Application Configuration Target profile is missing: {profile}"
         )
     root = configuration.gateway_endpoint.removesuffix("/").removesuffix("/v1")
-    return f"{root}/clients/{client}/profiles/{profile}/v1"
+    return f"{root}/application-targets/{application_target}/profiles/{profile}/v1"
 
 
-def _validate_client_profiles(configuration: ClientConfiguration, client: str) -> None:
+def _validate_application_target_profiles(
+    configuration: ApplicationTargetConfiguration, application_target: str
+) -> None:
     required = (
         {"coding"}
-        if client == "codex"
+        if application_target == "codex"
         else {"verification", "retain", "reflect", "consolidation"}
     )
     missing = required - set(configuration.sampling_profiles)
     if missing:
         raise ValueError(
-            f"{client} Application Configuration Target requires sampling profiles: {', '.join(sorted(required))}"
+            f"{application_target} Application Configuration Target requires sampling profiles: {', '.join(sorted(required))}"
         )
-    if client == "codex":
+    if application_target == "codex":
         coding = configuration.sampling_profiles["coding"]
         if (
             coding.min_p not in {None, 0.0}
@@ -1137,19 +1157,19 @@ def _redact_change(change: SemanticChange) -> SemanticChange:
 def _backup_env_value(path: Path, key: str) -> tuple[str, str]:
     raw, existed = _read(path)
     if not existed:
-        raise ClientIntegrationConflict(
+        raise ApplicationTargetIntegrationConflict(
             "Application Configuration Target backup is missing"
         )
     present, value, line = _EnvDocument(raw.decode()).lookup(key)
     if not present or value is None or line is None:
-        raise ClientIntegrationConflict(
+        raise ApplicationTargetIntegrationConflict(
             f"Application Configuration Target backup lacks {key}"
         )
     return value, line
 
 
 def _test_request(
-    configuration: ClientConfiguration,
+    configuration: ApplicationTargetConfiguration,
     request: TestRequest[TestResult],
     profile: str,
     *,
@@ -1189,7 +1209,7 @@ def _toml_set(document: TOMLDocument, path: tuple[str, ...], value: object) -> N
             current[key] = tomlkit.table()
         child = current[key]
         if not isinstance(child, Mapping):
-            raise ClientIntegrationConflict(
+            raise ApplicationTargetIntegrationConflict(
                 f"Codex field {'.'.join(path[:-1])} is not a table"
             )
         current = child
@@ -1228,7 +1248,9 @@ class _EnvDocument:
                 continue
             key = match.group("key")
             if key in self._index:
-                raise ClientIntegrationConflict(f"duplicate Hindsight setting: {key}")
+                raise ApplicationTargetIntegrationConflict(
+                    f"duplicate Hindsight setting: {key}"
+                )
             self._index[key] = index
 
     def lookup(self, key: str) -> tuple[bool, str | None, str | None]:
@@ -1299,7 +1321,9 @@ def _load_manifest(path: Path, integration: str, optional: bool) -> dict[str, ob
         or raw.get("integration") != integration
         or not isinstance(raw.get("fields"), list)
     ):
-        raise ClientIntegrationConflict(f"invalid {integration} ownership manifest")
+        raise ApplicationTargetIntegrationConflict(
+            f"invalid {integration} ownership manifest"
+        )
     return raw
 
 
@@ -1311,7 +1335,9 @@ def _validate_manifest_paths(
     if manifest.get("config_path") != str(config_path) or manifest.get(
         "backup_path"
     ) != str(backup_path):
-        raise ClientIntegrationConflict("ownership manifest belongs to other paths")
+        raise ApplicationTargetIntegrationConflict(
+            "ownership manifest belongs to other paths"
+        )
 
 
 def _read(path: Path) -> tuple[bytes, bool]:

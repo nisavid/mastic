@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.config_schema import (
-    ClientSamplingSettings,
-    ClientSettings,
+    ApplicationTargetSamplingSettings,
+    ApplicationTargetSettings,
     validate_hindsight_profile_name,
 )
 from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.control_client import ControlClientError, UnixControlClient
-from mastic.infrastructure.client_integrations import (
-    ClientConfiguration,
+from mastic.infrastructure.application_target_integrations import (
+    ApplicationTargetConfiguration,
 )
 from mastic.infrastructure.supervisor_v1 import Supervisor
 
@@ -28,14 +28,18 @@ class ControlClient(Protocol):
     def cancel(self, operation_id: str): ...
 
 
-class ClientAdapter(Protocol):
-    def preview(self, configuration: ClientConfiguration): ...
+class ApplicationTargetAdapter(Protocol):
+    def preview(self, configuration: ApplicationTargetConfiguration): ...
 
-    def apply(self, configuration: ClientConfiguration, *, takeover: bool = False): ...
+    def apply(
+        self, configuration: ApplicationTargetConfiguration, *, takeover: bool = False
+    ): ...
 
     def remove(self): ...
 
-    def test(self, configuration: ClientConfiguration, request, *, profile: str): ...
+    def test(
+        self, configuration: ApplicationTargetConfiguration, request, *, profile: str
+    ): ...
 
 
 class RemoteOperationPort:
@@ -112,21 +116,23 @@ class SupervisorOperationPort:
         return _plain(value)
 
 
-class ClientOperationPort:
+class ApplicationTargetOperationPort:
     """Operate owned Application Configuration Targets through one contract."""
 
     def __init__(
         self,
         adapter: Callable[
-            [str, str, Mapping[str, object], ClientSettings | None], ClientAdapter
+            [str, str, Mapping[str, object], ApplicationTargetSettings | None],
+            ApplicationTargetAdapter,
         ],
         configuration: Callable[
-            [str, Mapping[str, object], ClientSettings | None], ClientConfiguration
+            [str, Mapping[str, object], ApplicationTargetSettings | None],
+            ApplicationTargetConfiguration,
         ],
         *,
         request: Callable[[str, str, str, Mapping[str, object]], object],
-        settings: Callable[[str], ClientSettings | None] | None = None,
-        record: Callable[[str, ClientSettings | None], object] | None = None,
+        settings: Callable[[str], ApplicationTargetSettings | None] | None = None,
+        record: Callable[[str, ApplicationTargetSettings | None], object] | None = None,
     ) -> None:
         self._adapter = adapter
         self._configuration = configuration
@@ -137,22 +143,22 @@ class ClientOperationPort:
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
-        name = str(parameters.get("client", parameters.get("resource", "")))
+        name = str(parameters.get("application_target", ""))
         stored = self._settings(name)
-        if operation != "client.configure" and stored is None:
+        if operation != "application-target.configure" and stored is None:
             raise ApplicationError(
                 "resource_not_found",
                 f"Application Configuration Target {name!r} is not configured",
-                next_actions=(f"mastic client configure {name}",),
+                next_actions=(f"mastic application-target configure {name}",),
             )
         try:
-            if operation == "client.configure" and name == "hindsight":
+            if operation == "application-target.configure" and name == "hindsight":
                 profile = validate_hindsight_profile_name(parameters.get("profile"))
                 if stored is not None and stored.profile != profile:
                     raise ApplicationError(
                         "integration_conflict",
                         "Remove the owned Hindsight integration before selecting a different profile",
-                        next_actions=("mastic client remove hindsight",),
+                        next_actions=("mastic application-target remove hindsight",),
                     )
             adapter = self._adapter(operation, name, parameters, stored)
         except ApplicationError:
@@ -163,20 +169,20 @@ class ClientOperationPort:
                 str(error),
                 next_actions=(f"mastic {operation.replace('.', ' ')} --help",),
             ) from error
-        if operation == "client.remove":
+        if operation == "application-target.remove":
             result = adapter.remove()
             plain_result = _plain(result)
             if isinstance(plain_result, Mapping) and plain_result.get("skipped_paths"):
                 return {**plain_result, "desired_state_retained": True}
             self._record(name, None)
             return plain_result
-        if operation == "client.inspect":
+        if operation == "application-target.inspect":
             inspect = getattr(adapter, "inspect", None)
             if inspect is None:
                 return {"state": "healthy", "next_actions": []}
             return _plain(inspect())
         configuration = self._configuration(name, parameters, stored)
-        if operation == "client.configure":
+        if operation == "application-target.configure":
             required_profiles = (
                 {"coding"}
                 if name == "codex"
@@ -186,7 +192,9 @@ class ClientOperationPort:
                 raise ApplicationError(
                     "invalid_parameter",
                     f"{name} requires sampling profiles: {', '.join(sorted(required_profiles))}",
-                    next_actions=(f"mastic client configure {name} --help",),
+                    next_actions=(
+                        f"mastic application-target configure {name} --help",
+                    ),
                 )
             preview = adapter.preview(configuration)
             result = adapter.apply(
@@ -194,10 +202,10 @@ class ClientOperationPort:
             )
             self._record(
                 name,
-                _client_settings(name, parameters, configuration, stored),
+                _application_target_settings(name, parameters, configuration, stored),
             )
             return {"preview": _plain(preview), "result": _plain(result)}
-        if operation == "client.test":
+        if operation == "application-target.test":
             profile = str(
                 parameters.get("profile")
                 or ("reflect" if name == "hindsight" else "coding")
@@ -214,7 +222,7 @@ class ClientOperationPort:
                 raise ApplicationError(
                     "invalid_parameter",
                     str(error),
-                    next_actions=(f"mastic client inspect {name}",),
+                    next_actions=(f"mastic application-target inspect {name}",),
                 ) from error
             return {"profile": profile, "response": _plain(response)}
         raise ApplicationError(
@@ -223,12 +231,12 @@ class ClientOperationPort:
         )
 
 
-def _client_settings(
+def _application_target_settings(
     name: str,
     parameters: Mapping[str, object],
-    configuration: ClientConfiguration,
-    stored: ClientSettings | None,
-) -> ClientSettings:
+    configuration: ApplicationTargetConfiguration,
+    stored: ApplicationTargetSettings | None,
+) -> ApplicationTargetSettings:
     service = str(
         configuration.service_identity
         or parameters.get("service")
@@ -248,7 +256,7 @@ def _client_settings(
         provider = configuration.codex_provider_id
         max_concurrent = None
     sampling = {
-        profile_name: ClientSamplingSettings(
+        profile_name: ApplicationTargetSamplingSettings(
             temperature=profile_settings.temperature,
             top_p=profile_settings.top_p,
             top_k=profile_settings.top_k,
@@ -264,7 +272,7 @@ def _client_settings(
         )
         for profile_name, profile_settings in configuration.sampling_profiles.items()
     }
-    return ClientSettings(
+    return ApplicationTargetSettings(
         name=name,
         kind=name,
         service=service,

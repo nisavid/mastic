@@ -75,8 +75,8 @@ def selection(*, revision="2" * 40, trust=()):
             "runtime": {"draft_tokens": 4},
         },
         gateway_endpoint="http://127.0.0.1:8766/v1",
-        clients=("codex", "hindsight"),
-        client_options={"hindsight": {"profile": "default"}},
+        application_targets=("codex", "hindsight"),
+        application_target_options={"hindsight": {"profile": "default"}},
         sampling_profiles={
             "coding": {"temperature": 0.0, "top_p": 0.95},
             "reflect": {"temperature": 0.9, "top_p": 0.95},
@@ -136,9 +136,9 @@ class SetupOperationPortTests(unittest.TestCase):
             }
         )
         self.config = FakeOwner()
-        self.clients = FakeOwner(
+        self.application_targets = FakeOwner(
             {
-                "client.test": lambda parameters: {
+                "application-target.test": lambda parameters: {
                     "profile": parameters["profile"],
                     "response": {"ok": True, "text": "mastic gateway contract ok"},
                 }
@@ -152,7 +152,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.inventory = RemovalInventory(
             running_services=("coding",),
             registered=True,
-            client_integrations=("codex", "hindsight"),
+            application_target_integrations=("codex", "hindsight"),
             product_owned_paths=("~/.config/mastic", "~/.local/state/mastic"),
             product_owned_bytes=2 * GIB,
             shared_cache_paths=("~/.cache/huggingface/hub/models--qwen",),
@@ -176,7 +176,7 @@ class SetupOperationPortTests(unittest.TestCase):
             runtime=self.runtime,
             model=model or self.model,
             config=self.config,
-            clients=self.clients,
+            application_targets=self.application_targets,
             supervisor=self.supervisor,
             verifier=self.verifier,
             evidence=self.evidence,
@@ -194,7 +194,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(preview["selection"]["model_alias"], "qwen-optiq")
         self.assertEqual(preview["selection"]["service_route"], "engineering")
         self.assertEqual(
-            preview["selection"]["client_options"]["hindsight"]["profile"],
+            preview["selection"]["application_target_options"]["hindsight"]["profile"],
             "default",
         )
         self.assertEqual(preview["selection"]["activation"], "supervisor")
@@ -206,7 +206,7 @@ class SetupOperationPortTests(unittest.TestCase):
             self.runtime.calls
             + self.model.calls
             + self.config.calls
-            + self.clients.calls
+            + self.application_targets.calls
             + self.supervisor.calls,
             [],
         )
@@ -280,14 +280,17 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(self.verifier.calls, [])
         self.assertEqual(
-            [call[1]["resource"] for call in self.clients.calls[-2:]],
+            [
+                call[1]["application_target"]
+                for call in self.application_targets.calls[-2:]
+            ],
             ["codex", "hindsight"],
         )
         self.assertEqual(
             {
                 call[1]["service"]
-                for call in self.clients.calls
-                if call[0] == "client.configure"
+                for call in self.application_targets.calls
+                if call[0] == "application-target.configure"
             },
             {"coding"},
         )
@@ -297,14 +300,16 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertIn("response_sha256", verification_evidence)
 
     def test_confirmed_plan_executes_each_selected_target_canary(self) -> None:
-        self.clients.results["client.test"] = lambda parameters: {
-            "profile": parameters["profile"],
-            "response": {
-                "ok": True,
-                "text": "mastic gateway contract ok",
-                "contract": parameters["resource"],
-            },
-        }
+        self.application_targets.results["application-target.test"] = (
+            lambda parameters: {
+                "profile": parameters["profile"],
+                "response": {
+                    "ok": True,
+                    "text": "mastic gateway contract ok",
+                    "contract": parameters["application_target"],
+                },
+            }
+        )
         port = self.port()
         preview = port.preview({})
 
@@ -316,17 +321,21 @@ class SetupOperationPortTests(unittest.TestCase):
             },
         )
 
-        tests = [call for call in self.clients.calls if call[0] == "client.test"]
+        tests = [
+            call
+            for call in self.application_targets.calls
+            if call[0] == "application-target.test"
+        ]
         self.assertEqual(
             tests,
             [
                 (
-                    "client.test",
-                    {"resource": "codex", "profile": "coding"},
+                    "application-target.test",
+                    {"application_target": "codex", "profile": "coding"},
                 ),
                 (
-                    "client.test",
-                    {"resource": "hindsight", "profile": "retain"},
+                    "application-target.test",
+                    {"application_target": "hindsight", "profile": "retain"},
                 ),
             ],
         )
@@ -340,7 +349,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self,
     ) -> None:
         def fail_hindsight(parameters):
-            if parameters["resource"] == "hindsight":
+            if parameters["application_target"] == "hindsight":
                 return {
                     "profile": parameters["profile"],
                     "response": {"ok": False, "text": "wrong"},
@@ -350,7 +359,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "response": {"ok": True, "text": "mastic gateway contract ok"},
             }
 
-        self.clients.results["client.test"] = fail_hindsight
+        self.application_targets.results["application-target.test"] = fail_hindsight
         port = self.port()
         preview = port.preview({})
 
@@ -370,11 +379,13 @@ class SetupOperationPortTests(unittest.TestCase):
             "gateway.contract.codex",
         )
 
-        self.clients.calls.clear()
-        self.clients.results["client.test"] = lambda parameters: {
-            "profile": parameters["profile"],
-            "response": {"ok": True, "text": "mastic gateway contract ok"},
-        }
+        self.application_targets.calls.clear()
+        self.application_targets.results["application-target.test"] = (
+            lambda parameters: {
+                "profile": parameters["profile"],
+                "response": {"ok": True, "text": "mastic gateway contract ok"},
+            }
+        )
         resumed = port.preview({})
         result = port.execute(
             "setup",
@@ -386,11 +397,11 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "complete")
         self.assertEqual(
-            self.clients.calls,
+            self.application_targets.calls,
             [
                 (
-                    "client.test",
-                    {"resource": "hindsight", "profile": "retain"},
+                    "application-target.test",
+                    {"application_target": "hindsight", "profile": "retain"},
                 )
             ],
         )
@@ -527,7 +538,8 @@ class SetupOperationPortTests(unittest.TestCase):
             preview["retained_settings"], list(self.inventory.unrelated_settings)
         )
         self.assertEqual(
-            self.supervisor.calls + self.clients.calls + self.config.calls, []
+            self.supervisor.calls + self.application_targets.calls + self.config.calls,
+            [],
         )
 
         result = port.remove(
@@ -543,7 +555,8 @@ class SetupOperationPortTests(unittest.TestCase):
             ["service.drain", "service.stop", "supervisor.unregister"],
         )
         self.assertEqual(
-            [call[0] for call in self.clients.calls], ["client.remove", "client.remove"]
+            [call[0] for call in self.application_targets.calls],
+            ["application-target.remove", "application-target.remove"],
         )
         state_remove = next(
             call for call in self.config.calls if call[0] == "state.remove"

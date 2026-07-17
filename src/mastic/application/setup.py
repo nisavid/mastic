@@ -85,8 +85,10 @@ class ExactSetupSelection:
     activation: str = "manual"
     pinned: bool = False
     service_options: Mapping[str, object] = field(default_factory=dict)
-    clients: tuple[str, ...] = ()
-    client_options: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    application_targets: tuple[str, ...] = ()
+    application_target_options: Mapping[str, Mapping[str, object]] = field(
+        default_factory=dict
+    )
     sampling_profiles: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     context_window: int | None = None
 
@@ -95,16 +97,18 @@ class ExactSetupSelection:
         object.__setattr__(
             self, "service_route", self.service_route or self.service_name
         )
-        object.__setattr__(self, "clients", tuple(self.clients))
+        object.__setattr__(self, "application_targets", tuple(self.application_targets))
         if self.trust_grants is not None:
             object.__setattr__(self, "trust_grants", tuple(self.trust_grants))
         object.__setattr__(
             self,
-            "client_options",
+            "application_target_options",
             MappingProxyType(
                 {
-                    str(name): _freeze_json_mapping(settings, f"client_options.{name}")
-                    for name, settings in self.client_options.items()
+                    str(name): _freeze_json_mapping(
+                        settings, f"application_target_options.{name}"
+                    )
+                    for name, settings in self.application_target_options.items()
                 }
             ),
         )
@@ -149,36 +153,42 @@ class ExactSetupSelection:
             raise ValueError("activation must be manual or supervisor") from error
         if type(self.pinned) is not bool:
             raise ValueError("pinned must be boolean")
-        unknown_clients = sorted(set(self.clients) - {"codex", "hindsight"})
-        if unknown_clients:
+        unknown_application_targets = sorted(
+            set(self.application_targets) - {"codex", "hindsight"}
+        )
+        if unknown_application_targets:
             raise ValueError(
                 "unsupported Application Configuration Targets in setup: "
-                + ", ".join(unknown_clients)
+                + ", ".join(unknown_application_targets)
             )
-        unselected_options = sorted(set(self.client_options) - set(self.clients))
+        unselected_options = sorted(
+            set(self.application_target_options) - set(self.application_targets)
+        )
         if unselected_options:
             raise ValueError(
-                "client_options require selected Application Configuration Targets: "
+                "application_target_options require selected Application Configuration Targets: "
                 + ", ".join(unselected_options)
             )
-        allowed_client_options = {
+        allowed_application_target_options = {
             "profile",
             "provider",
             "max_concurrent",
             "sampling_profiles",
             "context_window",
         }
-        for client, options in self.client_options.items():
-            unknown = sorted(set(options) - allowed_client_options)
+        for application_target, options in self.application_target_options.items():
+            unknown = sorted(set(options) - allowed_application_target_options)
             if unknown:
                 raise ValueError(
-                    f"client_options.{client} has unknown fields: " + ", ".join(unknown)
+                    f"application_target_options.{application_target} has unknown fields: "
+                    + ", ".join(unknown)
                 )
-        if "hindsight" in self.clients and not self.client_options.get(
-            "hindsight", {}
-        ).get("profile"):
+        if (
+            "hindsight" in self.application_targets
+            and not self.application_target_options.get("hindsight", {}).get("profile")
+        ):
             raise ValueError(
-                "Hindsight setup requires client_options.hindsight.profile"
+                "Hindsight setup requires application_target_options.hindsight.profile"
             )
         max_context = self.service_options.get("max_context")
         if max_context is not None and (
@@ -192,17 +202,21 @@ class ExactSetupSelection:
         ):
             raise ValueError("context_window cannot exceed service_options.max_context")
         if max_context is not None:
-            for client, options in self.client_options.items():
-                client_context = options.get("context_window")
-                if client_context is not None and (
-                    type(client_context) is not int or client_context <= 0
+            for application_target, options in self.application_target_options.items():
+                application_target_context = options.get("context_window")
+                if application_target_context is not None and (
+                    type(application_target_context) is not int
+                    or application_target_context <= 0
                 ):
                     raise ValueError(
-                        f"client_options.{client}.context_window must be a positive integer"
+                        f"application_target_options.{application_target}.context_window must be a positive integer"
                     )
-                if client_context is not None and client_context > max_context:
+                if (
+                    application_target_context is not None
+                    and application_target_context > max_context
+                ):
                     raise ValueError(
-                        f"client_options.{client}.context_window cannot exceed service_options.max_context"
+                        f"application_target_options.{application_target}.context_window cannot exceed service_options.max_context"
                     )
         lock_algorithm, separator, lock_value = self.runtime_lock_digest.partition(":")
         if (
@@ -308,8 +322,8 @@ class SetupPreview:
     pinned: bool
     service_options: Mapping[str, object]
     gateway_endpoint: str
-    clients: tuple[str, ...]
-    client_options: Mapping[str, Mapping[str, object]]
+    application_targets: tuple[str, ...]
+    application_target_options: Mapping[str, Mapping[str, object]]
     sampling_profiles: Mapping[str, Mapping[str, object]]
     context_window: int | None
     steps: tuple[PlanStep, ...]
@@ -335,7 +349,7 @@ class PlanExecutionError(RuntimeError):
 class RemovalInventory:
     running_services: tuple[str, ...] = ()
     registered: bool = False
-    client_integrations: tuple[str, ...] = ()
+    application_target_integrations: tuple[str, ...] = ()
     product_owned_paths: tuple[str, ...] = ()
     product_owned_bytes: int = 0
     shared_cache_paths: tuple[str, ...] = ()
@@ -345,7 +359,11 @@ class RemovalInventory:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "running_services", tuple(self.running_services))
-        object.__setattr__(self, "client_integrations", tuple(self.client_integrations))
+        object.__setattr__(
+            self,
+            "application_target_integrations",
+            tuple(self.application_target_integrations),
+        )
         object.__setattr__(self, "product_owned_paths", tuple(self.product_owned_paths))
         object.__setattr__(self, "shared_cache_paths", tuple(self.shared_cache_paths))
         object.__setattr__(self, "unrelated_settings", tuple(self.unrelated_settings))
@@ -503,8 +521,8 @@ class SetupPlanner:
             pinned=selection.pinned,
             service_options=selection.service_options,
             gateway_endpoint=selection.gateway_endpoint,
-            clients=selection.clients,
-            client_options=selection.client_options,
+            application_targets=selection.application_targets,
+            application_target_options=selection.application_target_options,
             sampling_profiles=selection.sampling_profiles,
             context_window=selection.context_window,
             steps=plan.steps,
@@ -542,14 +560,14 @@ class SetupPlanner:
                 "prompt_cache_bytes": capacity.prompt_cache_bytes,
             }
         )
-        client_options = {
+        application_target_options = {
             name: {**settings, "context_window": capacity.context_window}
-            for name, settings in selection.client_options.items()
+            for name, settings in selection.application_target_options.items()
         }
         return replace(
             selection,
             service_options=options,
-            client_options=client_options,
+            application_target_options=application_target_options,
             context_window=capacity.context_window,
         )
 
@@ -613,12 +631,12 @@ class SetupPlanner:
             )
         if inventory.registered:
             specs.append(("supervisor.unregister", "Unregister the Supervisor", {}))
-        if inventory.client_integrations:
+        if inventory.application_target_integrations:
             specs.append(
                 (
-                    "client.remove",
+                    "application-target.remove",
                     "Remove only MASTIC-owned application-target fields",
-                    {"clients": inventory.client_integrations},
+                    {"application_targets": inventory.application_target_integrations},
                 )
             )
         if inventory.product_owned_paths:
@@ -758,11 +776,11 @@ class SetupPlanner:
             ),
             ("service.configure", "Configure the Inference Service", common, False),
             (
-                "client.configure",
+                "application-target.configure",
                 "Configure selected Application Configuration Targets",
                 {
-                    "clients": selection.clients,
-                    "client_options": selection.client_options,
+                    "application_targets": selection.application_targets,
+                    "application_target_options": selection.application_target_options,
                     "service": selection.service_name,
                     "route": selection.service_route,
                     "endpoint": selection.gateway_endpoint,
@@ -773,7 +791,7 @@ class SetupPlanner:
             ("service.start", "Start the Inference Service", common, False),
         )
         canaries: list[tuple[str, str, Mapping[str, object], bool]] = []
-        if "codex" in selection.clients:
+        if "codex" in selection.application_targets:
             canaries.append(
                 (
                     "gateway.contract.codex",
@@ -789,8 +807,8 @@ class SetupPlanner:
                     False,
                 )
             )
-        if "hindsight" in selection.clients:
-            hindsight_options = selection.client_options["hindsight"]
+        if "hindsight" in selection.application_targets:
+            hindsight_options = selection.application_target_options["hindsight"]
             canaries.append(
                 (
                     "gateway.contract.hindsight",

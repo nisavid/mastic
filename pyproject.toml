@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mastic"
 version = "0.1.0"
-description = "Manage local MLX runtimes, models, services, and clients"
+description = "Manage local MLX runtimes, models, services, and application targets"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

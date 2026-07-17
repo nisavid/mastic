@@ -9,21 +9,21 @@ from pathlib import Path
 
 import tomlkit
 
-from mastic.application.config_schema import ClientSettings
-from mastic.infrastructure.client_integrations import (
-    ClientConfiguration,
-    ClientIntegrationConflict,
+from mastic.application.config_schema import ApplicationTargetSettings
+from mastic.infrastructure.application_target_integrations import (
+    ApplicationTargetConfiguration,
+    ApplicationTargetIntegrationConflict,
     CodexModelMetadata,
-    CodexClientIntegration,
-    HindsightClientIntegration,
-    LocalClientIntegrationFactory,
+    CodexApplicationTargetIntegration,
+    HindsightApplicationTargetIntegration,
+    LocalApplicationTargetIntegrationFactory,
     SamplingProfile,
 )
 
 
 class ClientIntegrationV1Tests(unittest.TestCase):
     def setUp(self) -> None:
-        self.configuration = ClientConfiguration(
+        self.configuration = ApplicationTargetConfiguration(
             gateway_endpoint="http://127.0.0.1:8766/v1",
             service_name="coding",
             context_window=32768,
@@ -121,7 +121,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     description="Local Qwen3.6 mixture-of-experts coding model.",
                 ),
             )
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config,
                 manifest,
                 backup,
@@ -181,7 +181,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     description="Local model",
                 ),
             )
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
                 root / "owner.json",
                 root / "config.backup",
@@ -198,14 +198,16 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             healthy = adapter.inspect()
 
             self.assertEqual(drifted["state"], "drifted")
-            self.assertIn("mastic client configure codex", drifted["next_actions"])
+            self.assertIn(
+                "mastic application-target configure codex", drifted["next_actions"]
+            )
             self.assertTrue(repaired.changed)
             self.assertEqual(healthy["state"], "healthy")
 
     def test_legacy_codex_ownership_requires_catalog_repair(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
                 root / "owner.json",
                 root / "config.backup",
@@ -217,7 +219,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             report = adapter.inspect()
 
             self.assertEqual(report["state"], "missing")
-            self.assertIn("mastic client configure codex", report["next_actions"])
+            self.assertIn(
+                "mastic application-target configure codex", report["next_actions"]
+            )
 
     def test_codex_inspect_detects_real_config_catalog_pointer_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -227,7 +231,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 context_window=131_072,
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
                 root / "owner.json",
                 root / "config.backup",
@@ -251,7 +255,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             catalog = root / "catalog.json"
             original = b'{"models":[{"slug":"user"}]}\n'
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
                 root / "owner.json",
                 root / "config.backup",
@@ -290,7 +294,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             def reject(_path: Path) -> None:
                 raise RuntimeError("Codex rejected catalog")
 
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config,
                 root / "owner.json",
                 root / "config.backup",
@@ -332,7 +336,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
             paths[3].write_text('{"models":[{"slug":"user"}]}\n')
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 *paths[:3],
                 catalog_path=paths[3],
                 catalog_backup_path=paths[4],
@@ -347,7 +351,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     raise OSError("catalog replace failed")
                 path.write_bytes(payload)
 
-            failing = CodexClientIntegration(
+            failing = CodexApplicationTargetIntegration(
                 *paths[:3],
                 catalog_path=paths[3],
                 catalog_backup_path=paths[4],
@@ -379,7 +383,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 context_window=131_072,
                 codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 *paths[:3],
                 catalog_path=paths[3],
                 catalog_backup_path=paths[4],
@@ -394,7 +398,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     raise OSError("catalog restore failed")
                 path.write_bytes(payload)
 
-            failing = CodexClientIntegration(
+            failing = CodexApplicationTargetIntegration(
                 *paths[:3],
                 catalog_path=paths[3],
                 catalog_backup_path=paths[4],
@@ -413,7 +417,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
     def test_installed_codex_resolves_catalog_without_fallback_warning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
                 root / "owner.json",
                 root / "config.backup",
@@ -448,7 +452,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 '[tui]\ntheme = "catppuccin-mocha"\n',
                 encoding="utf-8",
             )
-            adapter = CodexClientIntegration(config, manifest, backup)
+            adapter = CodexApplicationTargetIntegration(config, manifest, backup)
 
             preview = adapter.preview(self.configuration)
             applied = adapter.apply(self.configuration)
@@ -462,7 +466,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(document["oss_provider"], "mlx-local")
             self.assertEqual(
                 document["model_providers"]["mlx-local"]["base_url"],
-                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1",
+                "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1",
             )
             self.assertNotIn("profiles", document)
             self.assertEqual(document["tui"]["theme"], "catppuccin-mocha")
@@ -490,7 +494,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "codex" / "config.toml"
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config,
                 root / "mastic" / "codex-ownership.json",
                 root / "mastic" / "codex-config.backup",
@@ -506,12 +510,12 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("mlx-local", document["model_providers"])
             self.assertNotIn("mastic-local", document["model_providers"])
 
-    def test_managed_clients_fail_closed_on_missing_or_unrepresentable_profiles(
+    def test_managed_application_targets_fail_closed_on_missing_or_unrepresentable_profiles(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            codex = CodexClientIntegration(
+            codex = CodexApplicationTargetIntegration(
                 root / "codex.toml", root / "codex-owner.json", root / "codex-backup"
             )
             missing_coding = replace(
@@ -536,7 +540,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Responses"):
                 codex.preview(unsupported)
 
-            hindsight = HindsightClientIntegration(
+            hindsight = HindsightApplicationTargetIntegration(
                 root / "hindsight.env",
                 root / "hindsight-owner.json",
                 root / "hindsight-backup",
@@ -580,7 +584,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             configuration = replace(self.configuration, credential_path=credential)
 
             codex_path = root / "codex.toml"
-            codex = CodexClientIntegration(
+            codex = CodexApplicationTargetIntegration(
                 codex_path, root / "codex-owner.json", root / "codex-backup"
             )
             codex.apply(configuration)
@@ -596,7 +600,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 "HINDSIGHT_API_LLM_API_KEY=old-private-token\n",
                 encoding="utf-8",
             )
-            hindsight = HindsightClientIntegration(
+            hindsight = HindsightApplicationTargetIntegration(
                 hindsight_path,
                 root / "hindsight-owner.json",
                 root / "hindsight-backup",
@@ -630,7 +634,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             adapter.apply(self.configuration)
@@ -650,7 +654,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config.toml"
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             adapter.apply(self.configuration)
@@ -677,11 +681,11 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             config = root / "config.toml"
             original = '# original\nmodel = "cloud"\n'
             config.write_text(original, encoding="utf-8")
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             adapter.apply(self.configuration)
-            changed = ClientConfiguration(
+            changed = ApplicationTargetConfiguration(
                 gateway_endpoint=self.configuration.gateway_endpoint,
                 service_name="general",
                 context_window=16384,
@@ -700,7 +704,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             config = root / "config.toml"
             config.write_text('model = "before"\n', encoding="utf-8")
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             adapter.apply(self.configuration)
@@ -711,7 +715,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
 
             adapter.apply(self.configuration)
             config.write_text(configured + "# user edit\n", encoding="utf-8")
-            with self.assertRaises(ClientIntegrationConflict):
+            with self.assertRaises(ApplicationTargetIntegrationConflict):
                 adapter.restore()
 
     def test_invalid_codex_input_and_replace_failure_leave_current_config_intact(
@@ -721,7 +725,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             config = root / "config.toml"
             config.write_text("not valid = [\n", encoding="utf-8")
-            adapter = CodexClientIntegration(
+            adapter = CodexApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             before = config.read_bytes()
@@ -735,7 +739,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             def fail_replace(path: Path, payload: bytes) -> None:
                 raise OSError("simulated replace failure")
 
-            failing = CodexClientIntegration(
+            failing = CodexApplicationTargetIntegration(
                 config, root / "owner-2.json", root / "backup-2", replace=fail_replace
             )
             with self.assertRaisesRegex(OSError, "simulated"):
@@ -754,7 +758,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 "# memory profile\nHINDSIGHT_BANK_ID=existing-bank\nHINDSIGHT_API_LLM_MODEL=cloud\n",
                 encoding="utf-8",
             )
-            adapter = HindsightClientIntegration(
+            adapter = HindsightApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
 
@@ -776,27 +780,27 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_BANK_ID=existing-bank", text)
             self.assertIn("HINDSIGHT_API_LLM_MODEL=coding", text)
             self.assertIn(
-                "HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/verification/v1",
+                "HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8766/application-targets/hindsight/profiles/verification/v1",
                 text,
             )
             self.assertIn("HINDSIGHT_API_LLM_TEMPERATURE_REFLECT=1.0", text)
             self.assertIn(
-                "HINDSIGHT_API_RETAIN_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1",
+                "HINDSIGHT_API_RETAIN_LLM_BASE_URL=http://127.0.0.1:8766/application-targets/hindsight/profiles/retain/v1",
                 text,
             )
             self.assertIn(
-                "HINDSIGHT_API_REFLECT_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/reflect/v1",
+                "HINDSIGHT_API_REFLECT_LLM_BASE_URL=http://127.0.0.1:8766/application-targets/hindsight/profiles/reflect/v1",
                 text,
             )
             self.assertIn(
-                "HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL=http://127.0.0.1:8766/clients/hindsight/profiles/consolidation/v1",
+                "HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL=http://127.0.0.1:8766/application-targets/hindsight/profiles/consolidation/v1",
                 text,
             )
             self.assertEqual(
                 calls,
                 [
                     (
-                        "http://127.0.0.1:8766/clients/hindsight/profiles/reflect/v1",
+                        "http://127.0.0.1:8766/application-targets/hindsight/profiles/reflect/v1",
                         "coding",
                         {},
                     )
@@ -813,10 +817,10 @@ class ClientIntegrationV1Tests(unittest.TestCase):
     def test_application_target_test_route_is_independent_of_profile_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            codex = CodexClientIntegration(
+            codex = CodexApplicationTargetIntegration(
                 root / "codex.toml", root / "codex-owner.json", root / "codex-backup"
             )
-            hindsight = HindsightClientIntegration(
+            hindsight = HindsightApplicationTargetIntegration(
                 root / "hindsight.env",
                 root / "hindsight-owner.json",
                 root / "hindsight-backup",
@@ -832,8 +836,8 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(
                 endpoints,
                 [
-                    "http://127.0.0.1:8766/clients/codex/profiles/reflect/v1",
-                    "http://127.0.0.1:8766/clients/hindsight/profiles/coding/v1",
+                    "http://127.0.0.1:8766/application-targets/codex/profiles/reflect/v1",
+                    "http://127.0.0.1:8766/application-targets/hindsight/profiles/coding/v1",
                 ],
             )
 
@@ -841,7 +845,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "profile.env"
-            adapter = HindsightClientIntegration(
+            adapter = HindsightApplicationTargetIntegration(
                 config, root / "owner.json", root / "backup"
             )
             adapter.apply(self.configuration)
@@ -858,9 +862,11 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertTrue(owned)
             self.assertTrue(all(not item["before_present"] for item in owned))
 
-    def test_client_endpoint_requires_a_literal_loopback_origin(self) -> None:
+    def test_application_target_endpoint_requires_a_literal_loopback_origin(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(ValueError, "literal HTTP loopback"):
-            ClientConfiguration(
+            ApplicationTargetConfiguration(
                 gateway_endpoint="http://localhost:8766/v1",
                 service_name="coding",
             )
@@ -871,15 +877,15 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profiles = root / "hindsight" / "profiles"
-            ownership = root / "mastic" / "clients"
-            factory = LocalClientIntegrationFactory(
+            ownership = root / "mastic" / "application-targets"
+            factory = LocalApplicationTargetIntegrationFactory(
                 codex_config_path=root / "codex" / "config.toml",
                 hindsight_profiles_dir=profiles,
                 ownership_dir=ownership,
             )
 
             adapter = factory(
-                "client.configure",
+                "application-target.configure",
                 "hindsight",
                 {"profile": "agent-memory"},
                 None,
@@ -891,7 +897,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 ownership / "hindsight-agent-memory.ownership.json",
             )
 
-            stored = ClientSettings(
+            stored = ApplicationTargetSettings(
                 name="hindsight",
                 kind="hindsight",
                 service="memory",
@@ -902,7 +908,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 sampling={},
             )
             test_adapter = factory(
-                "client.test",
+                "application-target.test",
                 "hindsight",
                 {"profile": "reflect"},
                 stored,
@@ -914,7 +920,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             root = Path(directory)
             profiles = root / "profiles"
             ownership = root / "ownership"
-            factory = LocalClientIntegrationFactory(
+            factory = LocalApplicationTargetIntegrationFactory(
                 codex_config_path=root / "config.toml",
                 hindsight_profiles_dir=profiles,
                 ownership_dir=ownership,
@@ -925,7 +931,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "profile"),
                 ):
                     factory(
-                        "client.configure",
+                        "application-target.configure",
                         "hindsight",
                         ({"profile": profile} if profile is not None else {}),
                         None,
@@ -937,7 +943,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             (profiles / "agent-memory.env").symlink_to(target)
             with self.assertRaisesRegex(ValueError, "symlink"):
                 factory(
-                    "client.configure",
+                    "application-target.configure",
                     "hindsight",
                     {"profile": "agent-memory"},
                     None,
