@@ -12,6 +12,7 @@ from mastic.infrastructure.application_target_contracts import (
     ApplicationTargetConfiguration,
     ApplicationTargetIntegrationConflict,
     ApplicationTargetRemovalResult,
+    HindsightTargetOptions,
     Replace,
     SemanticChange,
     TestRequest,
@@ -389,13 +390,15 @@ def _hindsight_fields(
     configuration: ApplicationTargetConfiguration, *, token: str | None = None
 ) -> Mapping[str, str]:
     _validate_application_target_profiles(configuration, "hindsight")
+    if not isinstance(configuration.target, HindsightTargetOptions):
+        raise ValueError("Hindsight configuration requires Hindsight target options")
     fields = {
-        "HINDSIGHT_API_LLM_PROVIDER": configuration.hindsight_provider,
+        "HINDSIGHT_API_LLM_PROVIDER": configuration.target.provider,
         "HINDSIGHT_API_LLM_BASE_URL": _profile_endpoint(
             configuration, "hindsight", "verification"
         ),
         "HINDSIGHT_API_LLM_MODEL": configuration.service_name,
-        "HINDSIGHT_API_LLM_MAX_CONCURRENT": str(configuration.max_concurrent),
+        "HINDSIGHT_API_LLM_MAX_CONCURRENT": str(configuration.target.max_concurrent),
     }
     if token is not None:
         fields[_HINDSIGHT_API_KEY] = token

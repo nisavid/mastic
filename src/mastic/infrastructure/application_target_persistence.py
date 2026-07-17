@@ -54,26 +54,6 @@ def _read(path: Path) -> tuple[bytes, bool]:
         return b"", False
 
 
-def _support_snapshot(
-    manifest_path: Path, backup_path: Path
-) -> tuple[tuple[bytes, bool], tuple[bytes, bool]]:
-    return _read(manifest_path), _read(backup_path)
-
-
-def _restore_support(
-    manifest_path: Path,
-    backup_path: Path,
-    snapshot: tuple[tuple[bytes, bool], tuple[bytes, bool]],
-) -> None:
-    for path, (payload, existed) in zip(
-        (manifest_path, backup_path), snapshot, strict=True
-    ):
-        if existed:
-            _atomic_replace(path, payload)
-        else:
-            path.unlink(missing_ok=True)
-
-
 def _write_private(path: Path, payload: bytes) -> None:
     _atomic_replace(path, payload)
 

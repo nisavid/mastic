@@ -4,6 +4,7 @@ import shutil
 import stat
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -18,12 +19,39 @@ from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetIntegrationConflict,
     ApplicationTargetOwnershipRecoveryRequired,
     CodexModelMetadata,
+    CodexTargetOptions,
+    HindsightTargetOptions,
     CodexApplicationTargetIntegration,
     HindsightApplicationTargetIntegration,
     LocalApplicationTargetIntegrationFactory,
     SamplingProfile,
 )
-from mastic.infrastructure.operation_ports import ApplicationTargetOperationPort
+from mastic.infrastructure.operation_ports import (
+    ApplicationTargetOperationPort as ProductionApplicationTargetOperationPort,
+)
+
+
+class ApplicationTargetOperationPort(ProductionApplicationTargetOperationPort):
+    """Test composition with explicit in-memory lifecycle collaborators."""
+
+    def __init__(
+        self,
+        adapter,
+        configuration,
+        *,
+        request,
+        settings=lambda _name: None,
+        record=lambda _name, _value: None,
+        transition=lambda _name: nullcontext(),
+    ) -> None:
+        super().__init__(
+            adapter,
+            configuration,
+            request=request,
+            settings=settings,
+            record=record,
+            transition=transition,
+        )
 
 
 class ClientIntegrationV1Tests(unittest.TestCase):
@@ -43,9 +71,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     enable_thinking=True,
                 ),
             },
-            codex_provider_id="mlx-local",
-            hindsight_provider="openai",
-            max_concurrent=1,
+            target=CodexTargetOptions(provider_id="mlx-local"),
         )
         self.hindsight_configuration = ApplicationTargetConfiguration(
             gateway_endpoint="http://127.0.0.1:8766/v1",
@@ -89,9 +115,17 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                     enable_thinking=False,
                 ),
             },
-            codex_provider_id="mlx-local",
-            hindsight_provider="openai",
-            max_concurrent=1,
+            target=HindsightTargetOptions(provider="openai", max_concurrent=1),
+        )
+
+    def _codex_with_model(
+        self, model: CodexModelMetadata, **changes: object
+    ) -> ApplicationTargetConfiguration:
+        assert isinstance(self.codex_configuration.target, CodexTargetOptions)
+        return replace(
+            self.codex_configuration,
+            target=replace(self.codex_configuration.target, model=model),
+            **changes,
         )
 
     @staticmethod
@@ -126,15 +160,14 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             backup = root / "config.backup"
             catalog = root / "model-catalog.json"
             catalog_backup = root / "model-catalog.backup"
-            configuration = replace(
-                self.codex_configuration,
-                context_window=131_072,
-                service_name="qwen36-optiq",
-                codex_model=CodexModelMetadata(
+            configuration = self._codex_with_model(
+                CodexModelMetadata(
                     slug="qwen36-optiq",
                     display_name="Qwen3.6 35B A3B OptiQ 4-bit",
                     description="Local Qwen3.6 mixture-of-experts coding model.",
                 ),
+                context_window=131_072,
+                service_name="qwen36-optiq",
             )
             adapter = CodexApplicationTargetIntegration(
                 config,
@@ -218,14 +251,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             catalog = root / "catalog.json"
-            configuration = replace(
-                self.codex_configuration,
-                context_window=196_608,
-                codex_model=CodexModelMetadata(
+            configuration = self._codex_with_model(
+                CodexModelMetadata(
                     slug="coding",
                     display_name="Local coding model",
                     description="Local model",
                 ),
+                context_window=196_608,
             )
             adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
@@ -272,10 +304,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
     def test_codex_inspect_detects_real_config_catalog_pointer_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            configuration = replace(
-                self.codex_configuration,
+            configuration = self._codex_with_model(
+                CodexModelMetadata("coding", "Coding", "Local model"),
                 context_window=131_072,
-                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
             adapter = CodexApplicationTargetIntegration(
                 root / "config.toml",
@@ -351,10 +382,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             document["model_catalog_json"] = str(catalog)
             (root / "config.toml").write_text(document.as_string())
             adapter.apply(
-                replace(
-                    self.codex_configuration,
+                self._codex_with_model(
+                    CodexModelMetadata("coding", "Coding", "Local model"),
                     context_window=131_072,
-                    codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
                 )
             )
 
@@ -384,14 +414,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 bundled_catalog=self._bundled_codex_catalog,
                 catalog_validator=reject,
             )
-            configuration = replace(
-                self.codex_configuration,
-                context_window=131_072,
-                codex_model=CodexModelMetadata(
+            configuration = self._codex_with_model(
+                CodexModelMetadata(
                     slug="coding",
                     display_name="Local coding model",
                     description="Local model",
                 ),
+                context_window=131_072,
             )
 
             with self.assertRaisesRegex(RuntimeError, "rejected"):
@@ -411,10 +440,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "catalog.json",
                 root / "catalog.backup",
             )
-            configuration = replace(
-                self.codex_configuration,
+            configuration = self._codex_with_model(
+                CodexModelMetadata("coding", "Coding", "Local model"),
                 context_window=131_072,
-                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
             paths[3].write_text('{"models":[{"slug":"user"}]}\n')
             adapter = CodexApplicationTargetIntegration(
@@ -459,10 +487,9 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             paths[0].write_text('unrelated = "keep"\n')
             paths[3].write_text('{"models":[{"slug":"user"}]}\n')
-            configuration = replace(
-                self.codex_configuration,
+            configuration = self._codex_with_model(
+                CodexModelMetadata("coding", "Coding", "Local model"),
                 context_window=131_072,
-                codex_model=CodexModelMetadata("coding", "Coding", "Local model"),
             )
             adapter = CodexApplicationTargetIntegration(
                 *paths[:3],
@@ -506,14 +533,13 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 catalog_backup_path=root / "catalog.backup",
             )
             result = adapter.apply(
-                replace(
-                    self.codex_configuration,
-                    context_window=131_072,
-                    codex_model=CodexModelMetadata(
+                self._codex_with_model(
+                    CodexModelMetadata(
                         slug="qwen36-optiq",
                         display_name="Qwen3.6 35B A3B OptiQ 4-bit",
                         description="Local coding model",
                     ),
+                    context_window=131_072,
                 )
             )
 
@@ -580,7 +606,10 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 root / "mastic" / "codex-ownership.json",
                 root / "mastic" / "codex-config.backup",
             )
-            legacy = replace(self.codex_configuration, codex_provider_id="mastic-local")
+            legacy = replace(
+                self.codex_configuration,
+                target=CodexTargetOptions(provider_id="mastic-local"),
+            )
 
             adapter.apply(legacy)
             adapter.apply(self.codex_configuration)

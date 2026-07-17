@@ -18,6 +18,7 @@ from mastic.infrastructure.application_target_contracts import (
     ApplicationTargetConfiguration,
     ApplicationTargetIntegrationConflict,
     ApplicationTargetRemovalResult,
+    CodexTargetOptions,
     Replace,
     SemanticChange,
     TestRequest,
@@ -34,9 +35,7 @@ from mastic.infrastructure.application_target_persistence import (
     _plain,
     _read,
     _restore_files,
-    _restore_support,
     _snapshot_files,
-    _support_snapshot,
     _validate_manifest_paths,
     _write_private,
     _load_manifest,
@@ -187,10 +186,10 @@ class CodexApplicationTargetIntegration:
                     else _digest(catalog_before)
                 ),
                 "applied_digest": _digest(catalog_rendered),
-                "slug": configuration.codex_model.slug,
+                "slug": _codex_target(configuration).model.slug,
                 "context_window": configuration.context_window,
             }
-        support = _support_snapshot(self.manifest_path, self.backup_path)
+        support = _snapshot_files(self.manifest_path, self.backup_path)
         try:
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
@@ -213,7 +212,7 @@ class CodexApplicationTargetIntegration:
                     _atomic_replace(self.catalog_path, catalog_before)
                 else:
                     self.catalog_path.unlink(missing_ok=True)
-            _restore_support(self.manifest_path, self.backup_path, support)
+            _restore_files(support)
             if catalog_ownership_new:
                 self.catalog_backup_path.unlink(missing_ok=True)
             raise
@@ -440,14 +439,15 @@ class CodexApplicationTargetIntegration:
         self, configuration: ApplicationTargetConfiguration
     ) -> Mapping[tuple[str, ...], object]:
         fields = dict(_codex_fields(configuration))
-        if configuration.codex_model is not None:
+        target = _codex_target(configuration)
+        if target.model is not None:
             fields[("model_catalog_json",)] = str(self.catalog_path)
         return MappingProxyType(fields)
 
     def _render_catalog(
         self, configuration: ApplicationTargetConfiguration
     ) -> bytes | None:
-        metadata = configuration.codex_model
+        metadata = _codex_target(configuration).model
         if metadata is None:
             return None
         if configuration.context_window is None:
@@ -526,7 +526,7 @@ def _codex_fields(
     configuration: ApplicationTargetConfiguration,
 ) -> Mapping[tuple[str, ...], object]:
     _validate_application_target_profiles(configuration, "codex")
-    provider = configuration.codex_provider_id
+    provider = _codex_target(configuration).provider_id
     fields: dict[tuple[str, ...], object] = {
         ("model",): configuration.service_name,
         ("model_provider",): provider,
@@ -545,6 +545,12 @@ def _codex_fields(
         fields[(*auth, "args")] = [str(configuration.credential_path)]
         fields[(*auth, "refresh_interval_ms")] = 0
     return MappingProxyType(fields)
+
+
+def _codex_target(configuration: ApplicationTargetConfiguration) -> CodexTargetOptions:
+    if not isinstance(configuration.target, CodexTargetOptions):
+        raise ValueError("Codex configuration requires Codex target options")
+    return configuration.target
 
 
 def _default_bundled_codex_catalog() -> Mapping[str, object]:

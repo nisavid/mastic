@@ -46,10 +46,6 @@ class ConfiguredRuntime:
     bundle_id: str | None = None
 
 
-# Compatibility name for callers of the supported-v1 configuration module.
-ApplicationTargetSamplingSettings = SamplingProfile
-
-
 @dataclass(frozen=True, slots=True)
 class ApplicationTargetSettings:
     name: str
@@ -59,7 +55,7 @@ class ApplicationTargetSettings:
     context_window: int | None
     provider: str
     max_concurrent: int | None
-    sampling: Mapping[str, ApplicationTargetSamplingSettings]
+    sampling: Mapping[str, SamplingProfile]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling", MappingProxyType(dict(self.sampling)))
@@ -391,7 +387,7 @@ def _application_targets(
             table.get("sampling", {}),
             f"Application Configuration Target {name!r} sampling",
         )
-        sampling: dict[str, ApplicationTargetSamplingSettings] = {}
+        sampling: dict[str, SamplingProfile] = {}
         normalized: set[str] = set()
         for sampling_name, sampling_value in sampling_raw.items():
             if not isinstance(sampling_name, str) or not _safe_sampling_name(

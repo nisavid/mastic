@@ -30,6 +30,8 @@ from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetOwnershipDiscovery,
     ApplicationTargetOwnershipRecoveryRequired,
     CodexModelMetadata,
+    CodexTargetOptions,
+    HindsightTargetOptions,
     LocalApplicationTargetIntegrationFactory,
     OwnershipDiscoveryPolicy,
 )
@@ -288,35 +290,37 @@ def application_target_port(
             service_name=str(service.route),
             context_window=context_window,
             sampling_profiles=sampling,
-            codex_provider_id=str(
-                parameters.get(
-                    "provider",
-                    stored_codex_provider,
+            target=(
+                CodexTargetOptions(
+                    provider_id=str(parameters.get("provider", stored_codex_provider)),
+                    model=CodexModelMetadata(
+                        slug=str(service.route),
+                        display_name=display_name,
+                        description=f"Local mastic-managed route for {repository}.",
+                    ),
                 )
-            ),
-            hindsight_provider=str(
-                parameters.get(
-                    "provider",
-                    stored.provider if stored and name == "hindsight" else "openai",
-                )
-            ),
-            max_concurrent=int(
-                parameters.get(
-                    "max_concurrent",
-                    stored.max_concurrent if stored and stored.max_concurrent else 1,
+                if name == "codex"
+                else HindsightTargetOptions(
+                    provider=str(
+                        parameters.get(
+                            "provider",
+                            stored.provider
+                            if stored and name == "hindsight"
+                            else "openai",
+                        )
+                    ),
+                    max_concurrent=int(
+                        parameters.get(
+                            "max_concurrent",
+                            stored.max_concurrent
+                            if stored and stored.max_concurrent
+                            else 1,
+                        )
+                    ),
                 )
             ),
             credential_path=paths.gateway_credential,
             service_identity=str(service.name),
-            codex_model=(
-                CodexModelMetadata(
-                    slug=str(service.route),
-                    display_name=display_name,
-                    description=f"Local mastic-managed route for {repository}.",
-                )
-                if name == "codex"
-                else None
-            ),
         )
 
     def record(name: str, value: ApplicationTargetSettings | None) -> None:

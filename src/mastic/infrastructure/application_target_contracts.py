@@ -37,16 +37,37 @@ class CodexModelMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class CodexTargetOptions:
+    provider_id: str = "mlx-local"
+    model: CodexModelMetadata | None = None
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.provider_id):
+            raise ValueError("Codex provider ID must be a TOML-safe identifier")
+
+
+@dataclass(frozen=True, slots=True)
+class HindsightTargetOptions:
+    provider: str = "openai"
+    max_concurrent: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.provider:
+            raise ValueError("Hindsight provider is required")
+        if self.max_concurrent <= 0:
+            raise ValueError("Hindsight max_concurrent must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationTargetConfiguration:
     gateway_endpoint: str
     service_name: str
     context_window: int | None = None
     sampling_profiles: Mapping[str, SamplingProfile] = field(default_factory=dict)
-    codex_provider_id: str = "mlx-local"
-    hindsight_provider: str = "openai"
-    max_concurrent: int = 1
+    target: CodexTargetOptions | HindsightTargetOptions = field(
+        default_factory=CodexTargetOptions
+    )
     credential_path: Path | None = None
-    codex_model: CodexModelMetadata | None = None
     service_identity: str | None = None
 
     def __post_init__(self) -> None:
@@ -75,12 +96,8 @@ class ApplicationTargetConfiguration:
             raise ValueError("service_name is required")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.service_name):
             raise ValueError("service_name must be a Gateway route name")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.codex_provider_id):
-            raise ValueError("codex_provider_id must be a TOML-safe identifier")
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError("context_window must be positive")
-        if self.max_concurrent <= 0:
-            raise ValueError("max_concurrent must be positive")
         if self.credential_path is not None:
             credential_path = Path(self.credential_path)
             if not credential_path.is_absolute():

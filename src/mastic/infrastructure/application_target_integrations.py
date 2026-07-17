@@ -21,6 +21,8 @@ from mastic.infrastructure.application_target_contracts import (
     ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
     CodexModelMetadata,
+    CodexTargetOptions as CodexTargetOptions,
+    HindsightTargetOptions as HindsightTargetOptions,
     SemanticChange,
 )
 from mastic.infrastructure.application_target_ownership import (
