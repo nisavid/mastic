@@ -1,4 +1,5 @@
 {
+  "updateCheck": false,
   "hook": {
     "enabled": true,
     "limits": {
