@@ -197,6 +197,15 @@ class ApplicationTargetOperationPort:
                         next_actions=("mastic application-target remove hindsight",),
                     )
             adapter = self._adapter(operation, name, parameters, stored)
+            configuration = (
+                self._configuration(name, parameters, stored)
+                if operation
+                not in {
+                    "application-target.inspect",
+                    "application-target.remove",
+                }
+                else None
+            )
         except ApplicationError:
             raise
         except ApplicationTargetOwnershipRecoveryRequired as error:
@@ -227,7 +236,7 @@ class ApplicationTargetOperationPort:
             if inspect is None:
                 return {"state": "healthy", "next_actions": []}
             return _plain(inspect())
-        configuration = self._configuration(name, parameters, stored)
+        assert configuration is not None
         if operation == "application-target.configure":
             required_profiles = (
                 {"coding"}

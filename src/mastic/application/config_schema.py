@@ -409,24 +409,6 @@ def _application_targets(
                 sampling_value,
                 f"Application Configuration Target {name!r} sampling profile {sampling_name!r}",
             )
-            _reject_unknown(
-                f"Application Configuration Target {name!r} sampling profile {sampling_name!r}",
-                values,
-                {
-                    "temperature",
-                    "top_p",
-                    "top_k",
-                    "min_p",
-                    "presence_penalty",
-                    "repetition_penalty",
-                    "max_tokens",
-                    "enable_thinking",
-                    "preserve_thinking",
-                    "upstream_profile",
-                    "source_url",
-                    "source_revision",
-                },
-            )
             try:
                 sampling[sampling_name] = SamplingProfile.from_mapping(values)
             except ValueError as error:
