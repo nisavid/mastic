@@ -9,7 +9,10 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from mastic.application.application_targets import SamplingProfile
+from mastic.application.application_targets import (
+    SamplingProfile,
+    validate_application_target_sampling_profiles,
+)
 from mastic.domain.resources import (
     ActivationPolicy,
     InferenceService,
@@ -415,26 +418,12 @@ def _application_targets(
                 raise ConfigSchemaError(
                     f"Application Configuration Target {name!r} sampling profile {sampling_name!r}: {error}"
                 ) from error
-        required_profiles = (
-            {"coding"}
-            if kind == "codex"
-            else {"verification", "retain", "reflect", "consolidation"}
-        )
-        if set(sampling) != required_profiles:
+        try:
+            validate_application_target_sampling_profiles(kind, sampling)
+        except ValueError as error:
             raise ConfigSchemaError(
-                f"Application Configuration Target {name!r} requires sampling profiles: {', '.join(sorted(required_profiles))}"
-            )
-        if kind == "codex":
-            coding = sampling["coding"]
-            if (
-                coding.min_p not in {None, 0.0}
-                or coding.presence_penalty not in {None, 0.0}
-                or coding.repetition_penalty not in {None, 1.0}
-                or coding.max_tokens is not None
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile 'coding' contains values OptiQ Responses cannot represent"
-                )
+                f"Application Configuration Target {name!r}: {error}"
+            ) from error
         result[name] = ApplicationTargetSettings(
             name=name,
             kind=kind,
