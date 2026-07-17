@@ -146,14 +146,21 @@ async def _iter_sse_until_terminal(
 
     pending = bytearray()
     async for chunk in upstream.aiter_raw():
-        yield chunk
+        prior_pending_bytes = len(pending)
         pending.extend(chunk)
+        consumed_bytes = 0
         while True:
+            before = len(pending)
             event = _pop_sse_message(pending, include_separator=False)
             if event is None:
                 break
+            consumed_bytes += before - len(pending)
             if _is_terminal_sse_event(event):
+                terminal_bytes = consumed_bytes - prior_pending_bytes
+                if terminal_bytes > 0:
+                    yield chunk[:terminal_bytes]
                 return
+        yield chunk
         if len(pending) > _SSE_INSPECTION_LIMIT:
             del pending[:-_SSE_INSPECTION_LIMIT]
 

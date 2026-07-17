@@ -778,6 +778,50 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
+    def test_same_chunk_sse_terminal_drops_trailing_frame(self) -> None:
+        terminals = (
+            b"data: [DONE]\n\n",
+            (
+                b"event: response.completed\n"
+                b'data: {"type":"response.completed","response":{"id":"resp-1"}}\n\n'
+            ),
+        )
+        for terminal in terminals:
+            with self.subTest(terminal=terminal):
+                resolver = FakeResolver(
+                    [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+                )
+                expected = b"data: one\n\n" + terminal
+                stream = ChunkStream([expected + b"data: must-not-forward\n\n"])
+                upstream = FakeUpstreamClient()
+                upstream.responses.append(
+                    httpx.Response(
+                        200,
+                        headers={"content-type": "text/event-stream"},
+                        stream=stream,
+                    )
+                )
+                activity = FakeActivity()
+                app = create_gateway(
+                    resolver, client_factory=lambda: upstream, activity=activity
+                )
+
+                with TestClient(app) as client:
+                    with client.stream(
+                        "POST",
+                        "/v1/chat/completions",
+                        json={"model": "coding", "stream": True, "messages": []},
+                    ) as response:
+                        body = b"".join(response.iter_bytes())
+
+                self.assertEqual(body, expected)
+                self.assertEqual(stream.pulled, 1)
+                self.assertTrue(stream.closed)
+                self.assertEqual(
+                    activity.events, [("begin", "coding"), ("end", "coding")]
+                )
+                self.assertEqual(activity.active["coding"], 0)
+
     def test_responses_stream_stops_and_releases_activity_at_terminal_event(self):
         resolver = FakeResolver(
             [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
