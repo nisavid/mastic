@@ -407,7 +407,7 @@ class SetupOperationPort:
                     {
                         "client": client,
                         # Desired state refers to the internal service identity;
-                        # the client owner resolves its public Gateway route.
+                        # the application target owner resolves its public Gateway route.
                         "service": selection.service_name,
                         "endpoint": selection.gateway_endpoint,
                         "sampling_profiles": selection.sampling_profiles,

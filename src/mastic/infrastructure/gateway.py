@@ -402,15 +402,15 @@ def create_gateway(
                 return _error_response(
                     404,
                     "profile_not_found",
-                    f"Client generation profile {client_name}/{profile_name} is not configured.",
-                    action="Reconfigure the client with mastic and retry.",
+                    f"Application Configuration Target profile {client_name}/{profile_name} is not configured.",
+                    action="Reconfigure the Application Configuration Target with MASTIC and retry.",
                     parameter="profile",
                 )
             if profile.service != service:
                 return _error_response(
                     400,
                     "profile_service_mismatch",
-                    f"Client generation profile {client_name}/{profile_name} targets {profile.service!r}, not {service!r}.",
+                    f"Application Configuration Target profile {client_name}/{profile_name} targets {profile.service!r}, not {service!r}.",
                     action=f"Set model to {profile.service!r} and retry.",
                     parameter="model",
                 )
