@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 
 from mastic.infrastructure.responses_adapter import (
@@ -10,6 +11,15 @@ from mastic.infrastructure.responses_adapter import (
     flatten_request,
     transform_response,
 )
+
+
+def _remember_response(
+    adapter: CodexNamespaceAdapter,
+    data: object,
+    reconstruction: dict[str, tuple[str, str]],
+) -> None:
+    raw = json.dumps(data, separators=(",", ":")).encode()
+    adapter.transform_response_body(data, raw, reconstruction, max_bytes=4096)
 
 
 class RequestTransformTests(unittest.TestCase):
@@ -200,11 +210,11 @@ class ResponseTransformTests(unittest.TestCase):
 class ContinuationStateTests(unittest.TestCase):
     def test_byte_budget_evicts_least_recently_used_response_mapping(self) -> None:
         adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=8)
-        adapter.transform_response({"id": "a"}, {"a": ("n", "a")})
-        adapter.transform_response({"id": "b"}, {"b": ("n", "b")})
+        _remember_response(adapter, {"id": "a"}, {"a": ("n", "a")})
+        _remember_response(adapter, {"id": "b"}, {"b": ("n", "b")})
 
         adapter.transform_request({"previous_response_id": "a"})
-        adapter.transform_response({"id": "c"}, {"c": ("n", "c")})
+        _remember_response(adapter, {"id": "c"}, {"c": ("n", "c")})
 
         self.assertEqual(
             adapter.transform_request({"previous_response_id": "a"})[1],
@@ -220,7 +230,7 @@ class ContinuationStateTests(unittest.TestCase):
     def test_oversized_mapping_is_not_retained_for_continuation(self) -> None:
         adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=5)
 
-        adapter.transform_response({"id": "a"}, {"tool": ("ns", "call")})
+        _remember_response(adapter, {"id": "a"}, {"tool": ("ns", "call")})
 
         with self.assertRaisesRegex(TransformationError, "state is unavailable"):
             adapter.transform_request({"previous_response_id": "a"})
@@ -228,17 +238,17 @@ class ContinuationStateTests(unittest.TestCase):
     def test_oversized_response_id_is_not_retained_for_continuation(self) -> None:
         adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=8)
 
-        adapter.transform_response({"id": "response-id-too-large"}, {})
+        _remember_response(adapter, {"id": "response-id-too-large"}, {})
 
         with self.assertRaisesRegex(TransformationError, "state is unavailable"):
             adapter.transform_request({"previous_response_id": "response-id-too-large"})
 
     def test_replacing_response_mapping_updates_its_byte_accounting(self) -> None:
         adapter = CodexNamespaceAdapter(capacity=10, byte_capacity=10)
-        adapter.transform_response({"id": "same"}, {"a": ("n", "a")})
+        _remember_response(adapter, {"id": "same"}, {"a": ("n", "a")})
         replacement = {"bb": ("nn", "bb")}
 
-        adapter.transform_response({"id": "same"}, replacement)
+        _remember_response(adapter, {"id": "same"}, replacement)
 
         self.assertEqual(
             adapter.transform_request({"previous_response_id": "same"})[1], replacement
@@ -259,7 +269,7 @@ class ContinuationStateTests(unittest.TestCase):
             }
         )
         self.assertEqual(first_request["tools"][0]["name"], "math__add")
-        adapter.transform_response({"id": "response-one", "output": []}, first_mapping)
+        _remember_response(adapter, {"id": "response-one", "output": []}, first_mapping)
 
         continued, mapping = adapter.transform_request(
             {"previous_response_id": "response-one", "input": []}
@@ -271,7 +281,7 @@ class ContinuationStateTests(unittest.TestCase):
     def test_known_empty_mapping_is_distinct_from_unknown_continuation(self) -> None:
         adapter = CodexNamespaceAdapter()
         request, mapping = adapter.transform_request({"tools": [], "input": []})
-        adapter.transform_response({"id": "ordinary-one", "output": []}, mapping)
+        _remember_response(adapter, {"id": "ordinary-one", "output": []}, mapping)
 
         continued, inherited = adapter.transform_request(
             {"previous_response_id": "ordinary-one", "input": []}
@@ -298,7 +308,7 @@ class ContinuationStateTests(unittest.TestCase):
                 ]
             }
         )
-        adapter.transform_response({"id": "mapped-one", "output": []}, mapping)
+        _remember_response(adapter, {"id": "mapped-one", "output": []}, mapping)
 
         with self.assertRaisesRegex(TransformationError, "collides"):
             adapter.transform_request(

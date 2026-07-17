@@ -106,12 +106,6 @@ class CodexNamespaceAdapter:
             )
         return transformed, _merge_reconstruction(inherited, current)
 
-    def transform_response(self, data: Any, reconstruction: ReconstructionMap) -> Any:
-        transformed = transform_response(data, reconstruction)
-        for response_id in response_ids(data):
-            self._state.remember(response_id, reconstruction)
-        return transformed
-
     def transform_response_body(
         self,
         data: Any,
