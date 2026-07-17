@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Protocol
@@ -18,6 +19,9 @@ from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
 )
 from mastic.infrastructure.supervisor_v1 import Supervisor
+
+
+_APPLICATION_TARGET_NAMES = frozenset({"codex", "hindsight"})
 
 
 class ControlClient(Protocol):
@@ -37,7 +41,7 @@ class ApplicationTargetAdapter(Protocol):
 
     def remove(self): ...
 
-    def restore(self) -> None: ...
+    def rollback_point(self) -> Callable[[], None]: ...
 
     def test(
         self, configuration: ApplicationTargetConfiguration, request, *, profile: str
@@ -135,17 +139,39 @@ class ApplicationTargetOperationPort:
         request: Callable[[str, str, str, Mapping[str, object]], object],
         settings: Callable[[str], ApplicationTargetSettings | None] | None = None,
         record: Callable[[str, ApplicationTargetSettings | None], object] | None = None,
+        transition: Callable[[str], AbstractContextManager[None]] | None = None,
     ) -> None:
         self._adapter = adapter
         self._configuration = configuration
         self._request = request
         self._settings = settings or (lambda _name: None)
         self._record = record or (lambda _name, _configuration: None)
+        self._transition = transition or (lambda _name: nullcontext())
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
         name = str(parameters.get("application_target", ""))
+        if name not in _APPLICATION_TARGET_NAMES:
+            raise ApplicationError(
+                "invalid_parameter",
+                f"unsupported Application Configuration Target: {name!r}",
+                next_actions=(f"mastic {operation.replace('.', ' ')} --help",),
+            )
+        if operation in {
+            "application-target.configure",
+            "application-target.remove",
+        }:
+            with self._transition(name):
+                return self._execute(operation, parameters, name)
+        return self._execute(operation, parameters, name)
+
+    def _execute(
+        self,
+        operation: str,
+        parameters: Mapping[str, object],
+        name: str,
+    ) -> Mapping[str, object]:
         stored = self._settings(name)
         if (
             operation
@@ -180,11 +206,7 @@ class ApplicationTargetOperationPort:
                 next_actions=(f"mastic {operation.replace('.', ' ')} --help",),
             ) from error
         if operation == "application-target.remove":
-            inverse_configuration = (
-                self._configuration(name, parameters, stored)
-                if stored is not None
-                else None
-            )
+            rollback = adapter.rollback_point()
             result = adapter.remove()
             plain_result = _plain(result)
             if isinstance(plain_result, Mapping) and plain_result.get("skipped_paths"):
@@ -194,13 +216,8 @@ class ApplicationTargetOperationPort:
             try:
                 self._record(name, None)
             except Exception:
-                if inverse_configuration is not None:
-                    try:
-                        adapter.apply(inverse_configuration)
-                    except Exception as recovery_error:
-                        raise _application_target_recovery_required(
-                            name
-                        ) from recovery_error
+                if self._settle_record_error(name, stored, None, rollback):
+                    return plain_result
                 raise
             return plain_result
         if operation == "application-target.inspect":
@@ -226,25 +243,16 @@ class ApplicationTargetOperationPort:
             desired_settings = _application_target_settings(
                 name, parameters, configuration, stored
             )
-            previous_configuration = (
-                self._configuration(name, {}, stored) if stored is not None else None
-            )
             preview = adapter.preview(configuration)
+            rollback = adapter.rollback_point()
             result = adapter.apply(
                 configuration, takeover=bool(parameters.get("takeover", False))
             )
             try:
                 self._record(name, desired_settings)
             except Exception:
-                try:
-                    if previous_configuration is None:
-                        adapter.restore()
-                    else:
-                        adapter.apply(previous_configuration)
-                except Exception as recovery_error:
-                    raise _application_target_recovery_required(
-                        name
-                    ) from recovery_error
+                if self._settle_record_error(name, stored, desired_settings, rollback):
+                    return {"preview": _plain(preview), "result": _plain(result)}
                 raise
             return {"preview": _plain(preview), "result": _plain(result)}
         if operation == "application-target.test":
@@ -271,6 +279,27 @@ class ApplicationTargetOperationPort:
             "operation_unavailable",
             f"{operation} is not an Application Configuration Target operation",
         )
+
+    def _settle_record_error(
+        self,
+        name: str,
+        previous: ApplicationTargetSettings | None,
+        intended: ApplicationTargetSettings | None,
+        rollback: Callable[[], None],
+    ) -> bool:
+        try:
+            observed = self._settings(name)
+        except Exception as reload_error:
+            raise _application_target_recovery_required(name) from reload_error
+        if observed == intended:
+            return True
+        if observed != previous:
+            raise _application_target_recovery_required(name)
+        try:
+            rollback()
+        except Exception as recovery_error:
+            raise _application_target_recovery_required(name) from recovery_error
+        return False
 
 
 def _application_target_recovery_required(name: str) -> ApplicationError:

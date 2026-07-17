@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import plistlib
 import socket
@@ -40,6 +41,7 @@ from mastic.infrastructure.production_host import (
     coherent_application_target_context,
     configured_model_installations,
     default_sampling,
+    removal_inventory,
     resolve_uv,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
@@ -911,6 +913,136 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertEqual(
                 installations["adopted"].installation_id,
                 f"owner/model@{revision}",
+            )
+
+    def test_removal_inventory_includes_manifest_backed_orphan_targets(self) -> None:
+        class Supply:
+            def inventory(self):
+                return CacheInventory((), "local-observed", ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = MasticPaths(
+                home / "config", home / "state", home / "data", home / "logs"
+            )
+            paths.prepare()
+            ownership = paths.state_dir / "application-targets"
+            ownership.mkdir(mode=0o700)
+            (ownership / "codex.ownership.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "integration": "codex",
+                        "config_path": str(home / ".codex/config.toml"),
+                        "backup_path": str(ownership / "codex.config.backup"),
+                        "fields": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profile = "agent-memory"
+            (ownership / f"hindsight-{profile}.ownership.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "integration": "hindsight",
+                        "config_path": str(home / f".hindsight/profiles/{profile}.env"),
+                        "backup_path": str(
+                            ownership / f"hindsight-{profile}.config.backup"
+                        ),
+                        "fields": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            inventory = removal_inventory(
+                paths,
+                _Launchd(False),
+                ConfigStore(paths.config_file, validate_config),
+                Supply(),
+                home,
+            )
+
+            self.assertEqual(
+                inventory.application_target_integrations, ("codex", "hindsight")
+            )
+            self.assertIn(str(paths.state_dir), inventory.product_owned_paths)
+
+    def test_removal_inventory_fails_closed_on_invalid_recovery_manifest(self) -> None:
+        class Supply:
+            def inventory(self):
+                return CacheInventory((), "local-observed", ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = MasticPaths(
+                home / "config", home / "state", home / "data", home / "logs"
+            )
+            paths.prepare()
+            ownership = paths.state_dir / "application-targets"
+            ownership.mkdir(mode=0o700)
+            (ownership / "codex.ownership.json").write_text(
+                "not-json", encoding="utf-8"
+            )
+
+            with self.assertRaises(ApplicationError) as raised:
+                removal_inventory(
+                    paths,
+                    _Launchd(False),
+                    ConfigStore(paths.config_file, validate_config),
+                    Supply(),
+                    home,
+                )
+
+            self.assertEqual(
+                raised.exception.code, "application_target_recovery_required"
+            )
+
+    def test_removal_inventory_fails_closed_on_ambiguous_hindsight_recovery(
+        self,
+    ) -> None:
+        class Supply:
+            def inventory(self):
+                return CacheInventory((), "local-observed", ())
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = MasticPaths(
+                home / "config", home / "state", home / "data", home / "logs"
+            )
+            paths.prepare()
+            ownership = paths.state_dir / "application-targets"
+            ownership.mkdir(mode=0o700)
+            for profile in ("one", "two"):
+                (ownership / f"hindsight-{profile}.ownership.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "integration": "hindsight",
+                            "config_path": str(
+                                home / f".hindsight/profiles/{profile}.env"
+                            ),
+                            "backup_path": str(
+                                ownership / f"hindsight-{profile}.config.backup"
+                            ),
+                            "fields": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with self.assertRaises(ApplicationError) as raised:
+                removal_inventory(
+                    paths,
+                    _Launchd(False),
+                    ConfigStore(paths.config_file, validate_config),
+                    Supply(),
+                    home,
+                )
+
+            self.assertEqual(
+                raised.exception.code, "application_target_recovery_required"
             )
 
 

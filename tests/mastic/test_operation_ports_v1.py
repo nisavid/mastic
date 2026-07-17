@@ -1,4 +1,6 @@
+import threading
 import unittest
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from mastic.application.dispatch import ApplicationError
@@ -69,9 +71,7 @@ class FakeSupervisor:
 class FakeApplicationTargetAdapter:
     def __init__(self) -> None:
         self.calls = []
-        self.apply_error = None
-        self.apply_error_on_call = None
-        self.restore_error = None
+        self.rollback_error = None
 
     def preview(self, configuration):
         self.calls.append(("preview", configuration.service_name))
@@ -79,22 +79,21 @@ class FakeApplicationTargetAdapter:
 
     def apply(self, configuration, *, takeover=False):
         self.calls.append(("apply", configuration.service_name, takeover))
-        apply_count = sum(call[0] == "apply" for call in self.calls)
-        if self.apply_error is not None and self.apply_error_on_call in {
-            None,
-            apply_count,
-        }:
-            raise self.apply_error
         return {"changed": True}
 
     def remove(self):
         self.calls.append(("remove",))
         return {"changed": True}
 
-    def restore(self):
-        self.calls.append(("restore",))
-        if self.restore_error is not None:
-            raise self.restore_error
+    def rollback_point(self):
+        self.calls.append(("rollback_point",))
+
+        def rollback():
+            self.calls.append(("rollback",))
+            if self.rollback_error is not None:
+                raise self.rollback_error
+
+        return rollback
 
     def test(self, configuration, request, *, profile):
         self.calls.append(("test", profile))
@@ -111,6 +110,19 @@ class FakeApplicationTargetAdapter:
     def restart_service(self, resource):
         self.calls.append(("restart_service", resource))
         return {"service": resource, "state": "ready"}
+
+
+def _target_settings(service: str) -> ApplicationTargetSettings:
+    return ApplicationTargetSettings(
+        name="codex",
+        kind="codex",
+        service=service,
+        profile=None,
+        context_window=32768,
+        provider="mlx-local",
+        max_concurrent=None,
+        sampling={},
+    )
 
 
 class OperationPortTests(unittest.TestCase):
@@ -218,7 +230,15 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(tested["response"]["model"], "coding")
         self.assertTrue(removed["changed"])
         self.assertEqual(
-            [call[0] for call in adapter.calls], ["preview", "apply", "test", "remove"]
+            [call[0] for call in adapter.calls],
+            [
+                "preview",
+                "rollback_point",
+                "apply",
+                "test",
+                "rollback_point",
+                "remove",
+            ],
         )
         self.assertEqual(records[-1], ("codex", None))
 
@@ -388,13 +408,27 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(result["skipped_paths"], [["model"]])
         self.assertEqual(recorded, [])
 
-    def test_configure_restores_external_state_when_desired_state_record_fails(
+    def test_configure_rolls_back_exactly_when_desired_state_is_unchanged(
         self,
     ) -> None:
         adapter = FakeApplicationTargetAdapter()
+        events = adapter.calls
+
+        def settings(_name):
+            events.append(("settings", None))
+            return None
 
         def record(_name, _value):
+            events.append(("record", "coding"))
             raise RuntimeError("desired state write failed")
+
+        @contextmanager
+        def transition(name):
+            events.append(("transition_enter", name))
+            try:
+                yield
+            finally:
+                events.append(("transition_exit", name))
 
         port = ApplicationTargetOperationPort(
             lambda operation, name, parameters, settings: adapter,
@@ -405,7 +439,9 @@ class OperationPortTests(unittest.TestCase):
                 service_identity="coding",
             ),
             request=lambda target, endpoint, model, sampling: {},
+            settings=settings,
             record=record,
+            transition=transition,
         )
 
         with self.assertRaisesRegex(RuntimeError, "desired state write failed"):
@@ -415,23 +451,137 @@ class OperationPortTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [call[0] for call in adapter.calls], ["preview", "apply", "restore"]
+            events,
+            [
+                ("transition_enter", "codex"),
+                ("settings", None),
+                ("preview", "coding"),
+                ("rollback_point",),
+                ("apply", "coding", False),
+                ("record", "coding"),
+                ("settings", None),
+                ("rollback",),
+                ("transition_exit", "codex"),
+            ],
         )
 
-    def test_reconfigure_reapplies_previous_desired_state_when_record_fails(
+    def test_same_target_transition_serializes_settings_mutation_and_record(
         self,
     ) -> None:
         adapter = FakeApplicationTargetAdapter()
-        stored = ApplicationTargetSettings(
-            name="codex",
-            kind="codex",
-            service="old-coding",
-            profile=None,
-            context_window=32768,
-            provider="mlx-local",
-            max_concurrent=None,
-            sampling={},
+        transition_lock = threading.Lock()
+        first_apply_entered = threading.Event()
+        release_first_apply = threading.Event()
+        second_transition_attempted = threading.Event()
+        settings_reads = []
+        state = None
+        original_apply = adapter.apply
+
+        def apply(configuration, *, takeover=False):
+            result = original_apply(configuration, takeover=takeover)
+            if configuration.service_name == "first":
+                first_apply_entered.set()
+                release_first_apply.wait(1)
+            return result
+
+        adapter.apply = apply
+
+        @contextmanager
+        def transition(_name):
+            if first_apply_entered.is_set():
+                second_transition_attempted.set()
+            with transition_lock:
+                yield
+
+        def settings(_name):
+            settings_reads.append(state.service if state is not None else None)
+            return state
+
+        def record(_name, value):
+            nonlocal state
+            state = value
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, current: adapter,
+            lambda name, parameters, current: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                str(parameters["service"]),
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=str(parameters["service"]),
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=settings,
+            record=record,
+            transition=transition,
         )
+        errors = []
+
+        def configure(service):
+            try:
+                port.execute(
+                    "application-target.configure",
+                    {"application_target": "codex", "service": service},
+                )
+            except Exception as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
+        first = threading.Thread(target=configure, args=("first",))
+        second = threading.Thread(target=configure, args=("second",))
+        first.start()
+        self.assertTrue(first_apply_entered.wait(1))
+        second.start()
+        self.assertTrue(second_transition_attempted.wait(1))
+
+        self.assertEqual(settings_reads, [None])
+        self.assertEqual(
+            [call for call in adapter.calls if call[0] == "apply"],
+            [("apply", "first", False)],
+        )
+
+        release_first_apply.set()
+        first.join(1)
+        second.join(1)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(settings_reads, [None, "first"])
+        self.assertEqual(state.service, "second")
+
+    def test_configure_accepts_post_error_state_when_intended_state_committed(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        state = None
+
+        def record(_name, value):
+            nonlocal state
+            state = value
+            raise RuntimeError("post-replace failure")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity="coding",
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: state,
+            record=record,
+        )
+
+        result = port.execute(
+            "application-target.configure",
+            {"application_target": "codex", "service": "coding"},
+        )
+
+        self.assertTrue(result["result"]["changed"])
+        self.assertEqual(state.service, "coding")
+        self.assertNotIn(("rollback",), adapter.calls)
+
+    def test_reconfigure_uses_exact_rollback_when_old_state_is_unchanged(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        stored = _target_settings("old-coding")
 
         def configuration(name, parameters, settings):
             service = str(parameters.get("service") or settings.service)
@@ -463,27 +613,18 @@ class OperationPortTests(unittest.TestCase):
             adapter.calls,
             [
                 ("preview", "new-coding"),
+                ("rollback_point",),
                 ("apply", "new-coding", False),
-                ("apply", "old-coding", False),
+                ("rollback",),
             ],
         )
 
-    def test_reconfigure_reports_recovery_when_previous_state_reapply_fails(
+    def test_configure_reports_recovery_without_rollback_for_ambiguous_state(
         self,
     ) -> None:
         adapter = FakeApplicationTargetAdapter()
-        adapter.apply_error = OSError("reapply failed")
-        adapter.apply_error_on_call = 2
-        stored = ApplicationTargetSettings(
-            name="codex",
-            kind="codex",
-            service="old-coding",
-            profile=None,
-            context_window=32768,
-            provider="mlx-local",
-            max_concurrent=None,
-            sampling={},
-        )
+        stored = _target_settings("old-coding")
+        state = stored
 
         def configuration(name, parameters, settings):
             service = str(parameters.get("service") or settings.service)
@@ -495,13 +636,15 @@ class OperationPortTests(unittest.TestCase):
             )
 
         def record(_name, _value):
+            nonlocal state
+            state = _target_settings("other-coding")
             raise RuntimeError("desired state write failed")
 
         port = ApplicationTargetOperationPort(
             lambda operation, name, parameters, settings: adapter,
             configuration,
             request=lambda target, endpoint, model, sampling: {},
-            settings=lambda name: stored,
+            settings=lambda name: state,
             record=record,
         )
 
@@ -512,24 +655,56 @@ class OperationPortTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "application_target_recovery_required")
-        self.assertEqual(
-            [call[0] for call in adapter.calls], ["preview", "apply", "apply"]
-        )
+        self.assertNotIn(("rollback",), adapter.calls)
 
-    def test_remove_reapplies_external_state_when_desired_state_delete_fails(
+    def test_configure_reports_recovery_without_rollback_when_reload_fails(
         self,
     ) -> None:
         adapter = FakeApplicationTargetAdapter()
-        stored = ApplicationTargetSettings(
-            name="codex",
-            kind="codex",
-            service="coding",
-            profile=None,
-            context_window=32768,
-            provider="mlx-local",
-            max_concurrent=None,
-            sampling={},
+        stored = _target_settings("old-coding")
+        settings_calls = 0
+
+        def settings(_name):
+            nonlocal settings_calls
+            settings_calls += 1
+            if settings_calls == 1:
+                return stored
+            raise OSError("desired state is unreadable")
+
+        def configuration(name, parameters, current):
+            service = str(parameters.get("service") or current.service)
+            return ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=service,
+            )
+
+        def record(_name, _value):
+            raise RuntimeError("desired state write failed")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, current: adapter,
+            configuration,
+            request=lambda target, endpoint, model, sampling: {},
+            settings=settings,
+            record=record,
         )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "new-coding"},
+            )
+
+        self.assertEqual(raised.exception.code, "application_target_recovery_required")
+        self.assertNotIn(("rollback",), adapter.calls)
+
+    def test_remove_rolls_back_exactly_when_desired_state_is_unchanged(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        stored = _target_settings("coding")
 
         def record(_name, _value):
             raise RuntimeError("desired state delete failed")
@@ -550,7 +725,37 @@ class OperationPortTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "desired state delete failed"):
             port.execute("application-target.remove", {"application_target": "codex"})
 
-        self.assertEqual([call[0] for call in adapter.calls], ["remove", "apply"])
+        self.assertEqual(
+            [call[0] for call in adapter.calls],
+            ["rollback_point", "remove", "rollback"],
+        )
+
+    def test_remove_accepts_post_error_state_when_delete_committed(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        state = _target_settings("coding")
+
+        def record(_name, _value):
+            nonlocal state
+            state = None
+            raise RuntimeError("post-replace failure")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1", settings.service
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda name: state,
+            record=record,
+        )
+
+        result = port.execute(
+            "application-target.remove", {"application_target": "codex"}
+        )
+
+        self.assertTrue(result["changed"])
+        self.assertIsNone(state)
+        self.assertNotIn(("rollback",), adapter.calls)
 
     def test_remove_delegates_manifest_backed_cleanup_without_desired_state(
         self,
@@ -575,14 +780,14 @@ class OperationPortTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "resource_not_found")
         self.assertTrue(result["changed"])
-        self.assertEqual(adapter.calls, [("remove",)])
+        self.assertEqual(adapter.calls, [("rollback_point",), ("remove",)])
         self.assertEqual(recorded, [])
 
-    def test_configure_reports_manifest_backed_recovery_when_restore_fails(
+    def test_configure_reports_recovery_when_exact_rollback_fails(
         self,
     ) -> None:
         adapter = FakeApplicationTargetAdapter()
-        adapter.restore_error = OSError("restore failed")
+        adapter.rollback_error = OSError("rollback failed")
 
         def record(_name, _value):
             raise RuntimeError("desired state write failed")
@@ -613,22 +818,14 @@ class OperationPortTests(unittest.TestCase):
             "mastic application-target remove codex", raised.exception.next_actions
         )
         self.assertEqual(
-            [call[0] for call in adapter.calls], ["preview", "apply", "restore"]
+            [call[0] for call in adapter.calls],
+            ["preview", "rollback_point", "apply", "rollback"],
         )
 
-    def test_remove_reports_recovery_when_inverse_reapply_fails(self) -> None:
+    def test_remove_reports_recovery_when_exact_rollback_fails(self) -> None:
         adapter = FakeApplicationTargetAdapter()
-        adapter.apply_error = OSError("reapply failed")
-        stored = ApplicationTargetSettings(
-            name="codex",
-            kind="codex",
-            service="coding",
-            profile=None,
-            context_window=32768,
-            provider="mlx-local",
-            max_concurrent=None,
-            sampling={},
-        )
+        adapter.rollback_error = OSError("rollback failed")
+        stored = _target_settings("coding")
 
         def record(_name, _value):
             raise RuntimeError("desired state delete failed")
@@ -653,7 +850,10 @@ class OperationPortTests(unittest.TestCase):
         self.assertIn(
             "mastic application-target configure codex", raised.exception.next_actions
         )
-        self.assertEqual([call[0] for call in adapter.calls], ["remove", "apply"])
+        self.assertEqual(
+            [call[0] for call in adapter.calls],
+            ["rollback_point", "remove", "rollback"],
+        )
 
 
 if __name__ == "__main__":

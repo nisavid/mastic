@@ -94,6 +94,7 @@ _LOCAL_MUTATIONS = frozenset(
         "config.restore",
     }
 )
+_APPLICATION_TARGET_NAMES = frozenset({"codex", "hindsight"})
 
 
 class LocalOperationBackend:
@@ -338,13 +339,18 @@ class LocalOperationBackend:
                 {str(item["id"]) for item in self._state_store.operations()},
                 "Operation",
             )
+        elif name == "application-target.test":
+            _resource(
+                request, config.application_targets, "Application Configuration Target"
+            )
         elif name in {
             "application-target.inspect",
-            "application-target.test",
             "application-target.remove",
         }:
             _resource(
-                request, config.application_targets, "Application Configuration Target"
+                request,
+                set(config.application_targets) | _APPLICATION_TARGET_NAMES,
+                "Application Configuration Target",
             )
 
     def _query(self, request: OperationRequest) -> Mapping[str, object]:
@@ -903,10 +909,12 @@ class LocalOperationBackend:
                 evidence=["desired-state"],
                 next_actions=[],
             )
-        resource = _resource(
-            request, config.application_targets, "Application Configuration Target"
-        )
         if request.name == "application-target.test":
+            resource = _resource(
+                request,
+                config.application_targets,
+                "Application Configuration Target",
+            )
             value = self._application_targets.execute(
                 request.name, {**request.parameters, "application_target": resource}
             )
@@ -917,18 +925,30 @@ class LocalOperationBackend:
                 next_actions=[],
             )
         if request.name == "application-target.inspect":
+            resource = _resource(
+                request,
+                set(config.application_targets) | _APPLICATION_TARGET_NAMES,
+                "Application Configuration Target",
+            )
             value = self._application_targets.execute(
                 request.name, {**request.parameters, "application_target": resource}
             )
+            desired = config.application_targets.get(resource)
+            evidence = ["managed-application-target-files"]
+            if desired is not None:
+                evidence.insert(0, "desired-state")
             return _result(
                 request.name,
                 resource={
-                    "desired": _plain(config.application_targets[resource]),
+                    "desired": _plain(desired) if desired is not None else None,
                     "integration": _plain(value),
                 },
-                evidence=["desired-state", "managed-application-target-files"],
+                evidence=evidence,
                 next_actions=list(value.get("next_actions", [])),
             )
+        resource = _resource(
+            request, config.application_targets, "Application Configuration Target"
+        )
         return _result(
             request.name,
             resource=_plain(config.application_targets[resource]),

@@ -458,6 +458,54 @@ class LocalOperationBackendTests(unittest.TestCase):
                 raised.exception.message,
             )
 
+    def test_known_orphan_target_can_be_inspected_and_removed_but_not_tested(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            application_targets = _Port(
+                {"state": "healthy", "source": "ownership-manifest"}
+            )
+            backend, _ = self._backend(
+                Path(directory),
+                config=_EMPTY_CONFIG,
+                application_targets=application_targets,
+            )
+
+            inspected = backend.prepare(
+                OperationRequest(
+                    "application-target.inspect",
+                    {"application_target": "hindsight"},
+                )
+            ).execute()
+            removed = backend.prepare(
+                OperationRequest(
+                    "application-target.remove",
+                    {"application_target": "hindsight"},
+                )
+            ).execute()
+
+            self.assertIsNone(inspected["resource"]["desired"])
+            self.assertEqual(
+                inspected["resource"]["integration"]["source"],
+                "ownership-manifest",
+            )
+            self.assertEqual(
+                inspected["evidence"], ["managed-application-target-files"]
+            )
+            self.assertEqual(removed["resource"]["source"], "ownership-manifest")
+            self.assertEqual(
+                [call[0] for call in application_targets.calls],
+                ["application-target.inspect", "application-target.remove"],
+            )
+            with self.assertRaises(ApplicationError) as raised:
+                backend.prepare(
+                    OperationRequest(
+                        "application-target.test",
+                        {"application_target": "hindsight"},
+                    )
+                )
+            self.assertEqual(raised.exception.code, "resource_not_found")
+
     def test_empty_metrics_are_reported_as_absent_not_invented(self) -> None:
         with TemporaryDirectory() as directory:
             metrics = _Telemetry()

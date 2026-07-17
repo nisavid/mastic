@@ -143,14 +143,8 @@ class ConfigStore(Generic[ValidatedConfig]):
     @contextmanager
     def _locked(self) -> Iterator[None]:
         lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
-        descriptor = _open_private_file(lock_path, os.O_RDWR | os.O_CREAT)
-        try:
-            os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with private_file_lock(lock_path):
             yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
     @staticmethod
     def _atomic_replace(path: Path, payload: bytes) -> None:
@@ -285,6 +279,21 @@ class ConfigStore(Generic[ValidatedConfig]):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+@contextmanager
+def private_file_lock(path: str | Path) -> Iterator[None]:
+    """Hold one user-owned, cross-process advisory file lock."""
+
+    lock_path = Path(path)
+    _prepare_private_directory(lock_path.parent)
+    descriptor = _open_private_file(lock_path, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _prepare_private_directory(path: Path) -> None:

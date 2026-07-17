@@ -171,6 +171,37 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertFalse(catalog.exists())
             self.assertFalse(manifest.exists())
 
+    def test_codex_rollback_point_restores_every_managed_file_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (
+                root / "config.toml",
+                root / "owner.json",
+                root / "config.backup",
+                root / "model-catalog.json",
+                root / "model-catalog.backup",
+            )
+            adapter = CodexApplicationTargetIntegration(
+                *paths[:3],
+                catalog_path=paths[3],
+                catalog_backup_path=paths[4],
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(self.configuration)
+            before = {
+                path: path.read_bytes() if path.exists() else None for path in paths
+            }
+            rollback = adapter.rollback_point()
+
+            adapter.remove()
+            rollback()
+
+            self.assertEqual(
+                {path: path.read_bytes() if path.exists() else None for path in paths},
+                before,
+            )
+
     def test_codex_catalog_inspect_reports_and_repair_fixes_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -817,6 +848,194 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertIn("HINDSIGHT_API_LLM_MODEL=cloud", restored)
             self.assertNotIn("HINDSIGHT_API_LLM_BASE_URL", restored)
 
+    def test_hindsight_inspect_reports_healthy_owned_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "healthy")
+            self.assertIn("matches mastic ownership", report["detail"])
+            self.assertEqual(report["config_path"], str(adapter.config_path))
+            self.assertEqual(report["next_actions"], [])
+
+    def test_hindsight_inspect_reports_changed_owned_field_as_drifted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.config_path.write_text(
+                adapter.config_path.read_text(encoding="utf-8").replace(
+                    "HINDSIGHT_API_LLM_MODEL=coding",
+                    "HINDSIGHT_API_LLM_MODEL=user-choice",
+                ),
+                encoding="utf-8",
+            )
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "drifted")
+            self.assertIn("HINDSIGHT_API_LLM_MODEL", report["detail"])
+            self.assertEqual(
+                report["next_actions"],
+                ["mastic application-target configure hindsight --help"],
+            )
+
+    def test_hindsight_inspect_reports_profile_without_manifest_as_unmanaged(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.config_path.write_text(
+                "HINDSIGHT_API_LLM_MODEL=user-choice\n", encoding="utf-8"
+            )
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "unmanaged")
+            self.assertNotIn("user-choice", repr(report))
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_missing_owned_support(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.backup_path.unlink()
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "missing")
+            self.assertIn("backup", report["detail"].lower())
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_changed_ownership_backup_as_drifted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.backup_path.write_text("changed support data\n", encoding="utf-8")
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "drifted")
+            self.assertIn("backup", report["detail"].lower())
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_invalid_support_path_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.backup_path.unlink()
+            adapter.backup_path.mkdir()
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "malformed")
+            self.assertIn("support", report["detail"].lower())
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_missing_owned_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.config_path.unlink()
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "missing")
+            self.assertIn("profile", report["detail"].lower())
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_malformed_ownership_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.config_path.write_text(
+                "HINDSIGHT_API_LLM_API_KEY=must-not-leak\n", encoding="utf-8"
+            )
+            adapter.manifest_path.write_text("not json", encoding="utf-8")
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "malformed")
+            self.assertNotIn("must-not-leak", repr(report))
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_reports_malformed_owned_profile_fail_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.configuration)
+            adapter.config_path.write_text(
+                "HINDSIGHT_API_LLM_MODEL=must-not-leak\n"
+                "HINDSIGHT_API_LLM_MODEL=duplicate\n",
+                encoding="utf-8",
+            )
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "malformed")
+            self.assertNotIn("must-not-leak", repr(report))
+            self.assertNotIn("duplicate", repr(report))
+            self.assertTrue(report["next_actions"])
+
+    def test_hindsight_inspect_detects_rotated_secret_without_exposing_values(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "gateway.token"
+            original = "original-secret-value-must-never-leak"
+            rotated = "rotated-secret-value-must-never-leak"
+            credential.write_text(original + "\n", encoding="ascii")
+            credential.chmod(0o600)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(replace(self.configuration, credential_path=credential))
+            adapter.config_path.write_text(
+                adapter.config_path.read_text(encoding="utf-8").replace(
+                    original, rotated
+                ),
+                encoding="utf-8",
+            )
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "drifted")
+            self.assertIn("credential", report["detail"].lower())
+            self.assertNotIn(original, repr(report))
+            self.assertNotIn(rotated, repr(report))
+            self.assertTrue(report["next_actions"])
+
     def test_hindsight_apply_restores_all_files_after_a_post_replace_failure(
         self,
     ) -> None:
@@ -845,6 +1064,23 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(config.read_bytes(), original)
             self.assertFalse(manifest.exists())
             self.assertFalse(backup.exists())
+
+    def test_hindsight_rollback_point_restores_every_managed_file_exactly(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            adapter = HindsightApplicationTargetIntegration(*paths)
+            adapter.apply(self.configuration)
+            before = {path: path.read_bytes() for path in paths}
+            rollback = adapter.rollback_point()
+
+            adapter.remove()
+            rollback()
+
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
     def test_hindsight_remove_restores_all_files_after_a_post_replace_failure(
         self,
