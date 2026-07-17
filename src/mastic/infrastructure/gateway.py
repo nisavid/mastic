@@ -20,11 +20,13 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from mastic.infrastructure.responses_adapter import (
-    DELIMITER,
-    CodexNamespaceAdapter,
-    ReconstructionMap,
     TransformationError,
-    TransformationTooLarge,
+)
+from mastic.infrastructure.responses_transport import (
+    RequestTransformationTooLarge,
+    ResponseAdaptationTooLarge,
+    ResponsesTransport,
+    iter_sse_until_terminal,
 )
 
 RouteState = Literal["ready", "stopped", "unavailable"]
@@ -38,10 +40,6 @@ DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_RESPONSE_ADAPTATION_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_RESPONSE_ADAPTERS = 64
 DEFAULT_UPSTREAM_RESPONSE_TIMEOUT = 30.0
-_SSE_INSPECTION_LIMIT = 1024 * 1024
-_TERMINAL_RESPONSE_EVENTS = frozenset(
-    {"response.completed", "response.failed", "response.incomplete"}
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,30 +59,6 @@ class GatewayRequestProfile:
 
     service: str
     parameters: Mapping[str, object]
-
-
-@dataclass(slots=True)
-class _ResponsesSSEState:
-    response_id: str | None = None
-    next_sequence_number: int = 0
-
-    def observe(self, frame: bytes) -> None:
-        payload = _sse_json_payload(frame)
-        if not isinstance(payload, dict):
-            return
-        sequence_number = payload.get("sequence_number")
-        if type(sequence_number) is int:
-            self.next_sequence_number = max(
-                self.next_sequence_number, sequence_number + 1
-            )
-        response = payload.get("response")
-        if isinstance(response, dict):
-            response_id = response.get("id")
-            if isinstance(response_id, str) and response_id:
-                self.response_id = response_id
-        response_id = payload.get("response_id")
-        if isinstance(response_id, str) and response_id:
-            self.response_id = response_id
 
 
 class GatewayRouteResolver(Protocol):
@@ -120,7 +94,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
         content_encoding = upstream.headers.get("content-encoding", "identity")
         if body is None:
             body = (
-                _iter_sse_until_terminal(upstream)
+                iter_sse_until_terminal(upstream)
                 if content_type.strip().lower() == "text/event-stream"
                 and content_encoding.strip().lower() in {"", "identity"}
                 else upstream.aiter_raw()
@@ -137,273 +111,6 @@ class _UpstreamStreamingResponse(StreamingResponse):
                 if self._on_close is not None:
                     self._on_close()
                     self._on_close = None
-
-
-async def _iter_sse_until_terminal(
-    upstream: httpx.Response,
-) -> AsyncIterator[bytes]:
-    """Stop an SSE transport after its protocol-level terminal event."""
-
-    pending = bytearray()
-    async for chunk in upstream.aiter_raw():
-        prior_pending_bytes = len(pending)
-        pending.extend(chunk)
-        consumed_bytes = 0
-        while True:
-            before = len(pending)
-            event = _pop_sse_message(pending, include_separator=False)
-            if event is None:
-                break
-            consumed_bytes += before - len(pending)
-            if _is_terminal_sse_event(event):
-                terminal_bytes = consumed_bytes - prior_pending_bytes
-                if terminal_bytes > 0:
-                    yield chunk[:terminal_bytes]
-                return
-        yield chunk
-        if len(pending) > _SSE_INSPECTION_LIMIT:
-            del pending[:-_SSE_INSPECTION_LIMIT]
-
-
-async def _adapt_non_sse_response(
-    upstream: httpx.Response,
-    adapter: CodexNamespaceAdapter,
-    reconstruction: ReconstructionMap,
-    *,
-    content_type: str,
-    limit: int,
-) -> bytes:
-    body = bytearray()
-    async for chunk in upstream.aiter_bytes():
-        if len(body) + len(chunk) > limit:
-            raise ResponseAdaptationTooLarge(limit)
-        body.extend(chunk)
-    raw = bytes(body)
-    if "json" not in content_type or not raw:
-        return raw
-    try:
-        original = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return raw
-    try:
-        return adapter.transform_response_body(
-            original,
-            raw,
-            reconstruction,
-            max_bytes=limit,
-        )
-    except TransformationTooLarge as error:
-        raise ResponseAdaptationTooLarge(limit) from error
-
-
-async def _prefetch_adapted_sse(
-    upstream: httpx.Response,
-    adapter: CodexNamespaceAdapter,
-    reconstruction: ReconstructionMap,
-    *,
-    limit: int,
-) -> AsyncIterator[bytes]:
-    frames = _iter_bounded_sse_frames(upstream, limit).__aiter__()
-    try:
-        first_raw, complete = await anext(frames)
-    except StopAsyncIteration:
-        return _empty_chunks()
-    if not complete:
-        return _single_chunk(first_raw)
-    first = _adapt_sse_frame(first_raw, adapter, reconstruction, limit)
-    state = _ResponsesSSEState()
-    state.observe(first_raw)
-    return _iter_adapted_sse_after_first(
-        first,
-        first_raw,
-        frames,
-        adapter,
-        reconstruction,
-        limit,
-        state,
-    )
-
-
-async def _iter_bounded_sse_frames(
-    upstream: httpx.Response, limit: int
-) -> AsyncIterator[tuple[bytes, bool]]:
-    pending = bytearray()
-    async for chunk in upstream.aiter_bytes():
-        view = memoryview(chunk)
-        offset = 0
-        while offset < len(view):
-            available = limit - len(pending)
-            if available <= 0:
-                raise ResponseAdaptationTooLarge(limit)
-            take = min(available, len(view) - offset)
-            pending.extend(view[offset : offset + take])
-            offset += take
-            while (
-                frame := _pop_sse_message(pending, include_separator=True)
-            ) is not None:
-                yield frame, True
-            if len(pending) == limit and offset < len(view):
-                raise ResponseAdaptationTooLarge(limit)
-    if pending:
-        yield bytes(pending), False
-
-
-async def _iter_adapted_sse_after_first(
-    first: bytes,
-    first_raw: bytes,
-    frames: AsyncIterator[tuple[bytes, bool]],
-    adapter: CodexNamespaceAdapter,
-    reconstruction: ReconstructionMap,
-    limit: int,
-    state: _ResponsesSSEState,
-) -> AsyncIterator[bytes]:
-    yield first
-    if _is_terminal_sse_event(first_raw):
-        return
-
-    try:
-        async for frame, complete in frames:
-            if not complete:
-                yield frame
-                return
-            try:
-                transformed = _adapt_sse_frame(frame, adapter, reconstruction, limit)
-            except ResponseAdaptationTooLarge:
-                yield _response_adaptation_failed_sse(state)
-                return
-            state.observe(frame)
-            yield transformed
-            if _is_terminal_sse_event(frame):
-                return
-    except ResponseAdaptationTooLarge:
-        yield _response_adaptation_failed_sse(state)
-
-
-def _adapt_sse_frame(
-    frame: bytes,
-    adapter: CodexNamespaceAdapter,
-    reconstruction: ReconstructionMap,
-    limit: int,
-) -> bytes:
-    if len(frame) > limit:
-        raise ResponseAdaptationTooLarge(limit)
-    try:
-        return adapter.transform_sse_frame(frame, reconstruction, max_bytes=limit)
-    except TransformationTooLarge as error:
-        raise ResponseAdaptationTooLarge(limit) from error
-
-
-async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
-    yield chunk
-
-
-async def _empty_chunks() -> AsyncIterator[bytes]:
-    if False:
-        yield b""
-
-
-def _response_adaptation_failed_sse(state: _ResponsesSSEState) -> bytes:
-    if state.response_id is None:
-        event_name = "error"
-        payload: dict[str, Any] = {
-            "type": "error",
-            "code": "response_adaptation_too_large",
-            "message": "MASTIC could not safely adapt the upstream response.",
-            "param": None,
-            "sequence_number": state.next_sequence_number,
-        }
-    else:
-        event_name = "response.failed"
-        payload = {
-            "type": "response.failed",
-            "response": {
-                "id": state.response_id,
-                "object": "response",
-                "created_at": 0,
-                "status": "failed",
-                "completed_at": None,
-                "error": {
-                    "code": "server_error",
-                    "message": "MASTIC could not safely adapt the upstream response.",
-                },
-                "incomplete_details": None,
-                "instructions": None,
-                "max_output_tokens": None,
-                "model": "mastic-gateway",
-                "output": [],
-                "previous_response_id": None,
-                "reasoning_effort": None,
-                "store": False,
-                "temperature": 1,
-                "text": {"format": {"type": "text"}},
-                "tool_choice": "auto",
-                "tools": [],
-                "top_p": 1,
-                "truncation": "disabled",
-                "usage": None,
-                "user": None,
-                "metadata": {},
-            },
-            "sequence_number": state.next_sequence_number,
-        }
-    encoded = json.dumps(payload, separators=(",", ":")).encode()
-    return f"event: {event_name}\n".encode() + b"data: " + encoded + b"\n\n"
-
-
-def _pop_sse_message(pending: bytearray, *, include_separator: bool) -> bytes | None:
-    boundaries = tuple(
-        (index, separator)
-        for separator in (b"\r\n\r\n", b"\n\n", b"\r\r")
-        if (index := pending.find(separator)) >= 0
-    )
-    if not boundaries:
-        return None
-    index, separator = min(boundaries, key=lambda item: item[0])
-    end = index + len(separator)
-    message = bytes(pending[: end if include_separator else index])
-    del pending[:end]
-    return message
-
-
-def _is_terminal_sse_event(event: bytes) -> bool:
-    event_name = ""
-    data_lines: list[bytes] = []
-    for line in event.splitlines():
-        field, separator, value = line.partition(b":")
-        if not separator:
-            continue
-        value = value.lstrip(b" ")
-        if field == b"event":
-            event_name = value.decode("utf-8", errors="replace")
-        elif field == b"data":
-            data_lines.append(value)
-    if event_name in _TERMINAL_RESPONSE_EVENTS:
-        return True
-    data = b"\n".join(data_lines).strip()
-    if data == b"[DONE]":
-        return True
-    try:
-        payload = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return (
-        isinstance(payload, dict) and payload.get("type") in _TERMINAL_RESPONSE_EVENTS
-    )
-
-
-def _sse_json_payload(event: bytes) -> Any:
-    data_lines = []
-    for line in event.splitlines():
-        field, separator, value = line.partition(b":")
-        if separator and field == b"data":
-            data_lines.append(value.lstrip(b" "))
-    data = b"\n".join(data_lines).strip()
-    if not data or data == b"[DONE]":
-        return None
-    try:
-        return json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
 
 
 def validate_loopback_bind(host: str) -> str:
@@ -455,18 +162,21 @@ def create_gateway(
             trust_env=False,
         )
     )
-    responses_adapters: OrderedDict[str, CodexNamespaceAdapter] = OrderedDict()
+    responses_transports: OrderedDict[str, ResponsesTransport] = OrderedDict()
 
-    def response_adapter(service: str) -> CodexNamespaceAdapter:
-        adapter = responses_adapters.get(service)
-        if adapter is None:
-            adapter = CodexNamespaceAdapter()
-            responses_adapters[service] = adapter
-            if len(responses_adapters) > max_response_adapters:
-                responses_adapters.popitem(last=False)
+    def responses_transport(service: str) -> ResponsesTransport:
+        transport = responses_transports.get(service)
+        if transport is None:
+            transport = ResponsesTransport(
+                max_request_bytes=max_request_bytes,
+                max_response_bytes=max_response_adaptation_bytes,
+            )
+            responses_transports[service] = transport
+            if len(responses_transports) > max_response_adapters:
+                responses_transports.popitem(last=False)
         else:
-            responses_adapters.move_to_end(service)
-        return adapter
+            responses_transports.move_to_end(service)
+        return transport
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Mapping[str, Any]]:
@@ -574,8 +284,8 @@ def create_gateway(
                 retryable=True,
             )
         is_responses = request.url.path.endswith("/responses")
-        responses_adapter = response_adapter(service) if is_responses else None
-        reconstruction: ReconstructionMap = {}
+        transport = responses_transport(service) if is_responses else None
+        reconstruction = {}
         application_target_name = request.path_params.get("application_target")
         profile_name = request.path_params.get("profile")
         if application_target_name is not None and profile_name is not None:
@@ -608,11 +318,10 @@ def create_gateway(
                 responses=is_responses,
             )
         if is_responses:
-            assert responses_adapter is not None
+            assert transport is not None
             try:
-                _enforce_responses_transform_budget(payload, max_request_bytes)
-                payload, reconstruction = responses_adapter.transform_request(payload)
-            except RequestTooLarge:
+                payload, reconstruction = transport.transform_request(payload)
+            except RequestTransformationTooLarge:
                 return _error_response(
                     413,
                     "request_too_large",
@@ -709,7 +418,7 @@ def create_gateway(
                 and (not is_responses or name.lower() != "content-encoding")
             }
             if is_responses:
-                assert responses_adapter is not None
+                assert transport is not None
                 content_type = (
                     upstream.headers.get("content-type", "")
                     .partition(";")[0]
@@ -717,11 +426,9 @@ def create_gateway(
                     .lower()
                 )
                 if content_type == "text/event-stream":
-                    adapted_stream = await _prefetch_adapted_sse(
+                    adapted_stream = await transport.adapt_sse_response(
                         upstream,
-                        responses_adapter,
                         reconstruction,
-                        limit=max_response_adaptation_bytes,
                     )
                     response = _UpstreamStreamingResponse(
                         upstream,
@@ -737,12 +444,10 @@ def create_gateway(
                     ownership_transferred = True
                     return response
 
-                adapted_body = await _adapt_non_sse_response(
+                adapted_body = await transport.adapt_response_body(
                     upstream,
-                    responses_adapter,
                     reconstruction,
                     content_type=content_type,
-                    limit=max_response_adaptation_bytes,
                 )
                 return Response(
                     adapted_body,
@@ -850,13 +555,6 @@ class RequestTooLarge(ValueError):
     """The Gateway request exceeded its configured body limit."""
 
 
-class ResponseAdaptationTooLarge(RuntimeError):
-    """A Responses body exceeded the memory allowed for safe adaptation."""
-
-    def __init__(self, limit: int) -> None:
-        super().__init__(f"response adaptation exceeded the {limit}-byte limit")
-
-
 async def _close_upstream_and_release(
     upstream: httpx.Response,
     activity: GatewayActivity | None,
@@ -908,56 +606,6 @@ def _encode_limited_json(payload: Any, limit: int) -> bytes:
             raise RequestTooLarge
         body.extend(encoded)
     return bytes(body)
-
-
-def _enforce_responses_transform_budget(payload: dict[str, Any], limit: int) -> None:
-    tools = payload.get("tools")
-    if not isinstance(tools, list):
-        return
-
-    namespaces: list[tuple[str, str, list[Any]]] = []
-    for tool in tools:
-        if not isinstance(tool, dict) or tool.get("type") != "namespace":
-            continue
-        namespace = tool.get("name")
-        description = tool.get("description", "")
-        children = tool.get("tools")
-        if (
-            not isinstance(namespace, str)
-            or not namespace
-            or not isinstance(description, str)
-            or not isinstance(children, list)
-            or any(
-                not isinstance(child, dict)
-                or child.get("type") != "function"
-                or not isinstance(child.get("name"), str)
-                or not child.get("name")
-                or not isinstance(child.get("description", ""), str)
-                for child in children
-            )
-        ):
-            return
-        namespaces.append((namespace, description, children))
-
-    transformed_string_bytes = 0
-    for namespace, namespace_description, children in namespaces:
-        namespace_bytes = len(namespace.encode())
-        namespace_description_bytes = len(namespace_description.encode())
-        for child in children:
-            child_name = child["name"]
-            child_description = child.get("description", "")
-            transformed_string_bytes += (
-                namespace_bytes + len(DELIMITER) + len(child_name.encode())
-            )
-            if namespace_description:
-                transformed_string_bytes += (
-                    namespace_bytes
-                    + namespace_description_bytes
-                    + len(child_description.encode())
-                    + (5 if child_description else 3)
-                )
-            if transformed_string_bytes > limit:
-                raise RequestTooLarge
 
 
 def _validated_upstream_origin(endpoint: str) -> str:
