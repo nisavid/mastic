@@ -411,7 +411,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "sampling_profiles",
-                "JSON object of per-client or per-operation sampling profiles.",
+                "JSON object of per-target or per-operation sampling profiles.",
                 value_type="json",
             ),
             _option(
@@ -658,7 +658,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "service",
-                "Inference Service route the client should use.",
+                "Inference Service route the application target should use.",
                 required=True,
             ),
             _option("profile", "Hindsight profile name when configuring Hindsight."),
@@ -675,12 +675,12 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             _option("provider", "Application target provider identifier."),
             _option(
                 "max_concurrent",
-                "Maximum concurrent client requests.",
+                "Maximum concurrent application-target requests.",
                 value_type="integer",
             ),
             _option(
                 "takeover",
-                "Explicitly adopt already-equal client fields into mastic ownership.",
+                "Explicitly adopt already-equal application-target fields into MASTIC ownership.",
                 value_type="boolean",
             ),
         )

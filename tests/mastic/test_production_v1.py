@@ -765,12 +765,15 @@ class ProductionCompositionTests(unittest.TestCase):
                     {
                         "type": "message",
                         "content": [
-                            {"type": "output_text", "text": "mastic target ready"}
+                            {
+                                "type": "output_text",
+                                "text": "mastic gateway contract ok",
+                            }
                         ],
                     }
                 ]
             },
-            {"choices": [{"message": {"content": "mastic target ready"}}]},
+            {"choices": [{"message": {"content": "mastic gateway contract ok"}}]},
         ]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -801,8 +804,8 @@ class ProductionCompositionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "mastic ready")
-        self.assertEqual(codex["text"], "mastic target ready")
-        self.assertEqual(hindsight["text"], "mastic target ready")
+        self.assertEqual(codex["text"], "mastic gateway contract ok")
+        self.assertEqual(hindsight["text"], "mastic gateway contract ok")
         self.assertEqual(
             [call.args[0] for call in post.call_args_list],
             [
@@ -817,7 +820,7 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(
             post.call_args_list[1].kwargs["json"]["input"],
-            "Respond with exactly: mastic target ready",
+            "Respond with exactly: mastic gateway contract ok",
         )
         self.assertNotIn("messages", post.call_args_list[1].kwargs["json"])
         self.assertEqual(

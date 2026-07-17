@@ -140,7 +140,7 @@ class SetupOperationPortTests(unittest.TestCase):
             {
                 "client.test": lambda parameters: {
                     "profile": parameters["profile"],
-                    "response": {"ok": True, "text": "mastic target ready"},
+                    "response": {"ok": True, "text": "mastic gateway contract ok"},
                 }
             }
         )
@@ -201,7 +201,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertTrue(preview["selection"]["pinned"])
         self.assertTrue(preview["selection"]["service_options"]["mtp"])
         self.assertEqual(len(preview["plan_fingerprint"]), 64)
-        self.assertEqual(preview["steps"][-1]["id"], "client.test.hindsight")
+        self.assertEqual(preview["steps"][-1]["id"], "gateway.contract.hindsight")
         self.assertEqual(
             self.runtime.calls
             + self.model.calls
@@ -235,6 +235,12 @@ class SetupOperationPortTests(unittest.TestCase):
         )
 
         self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["completion"], "complete")
+        self.assertEqual(result["readiness"], "unverified")
+        self.assertEqual(
+            result["application_target_readiness"],
+            {"codex": "unverified", "hindsight": "unverified"},
+        )
         self.assertEqual(
             self.runtime.calls[0],
             (
@@ -295,7 +301,7 @@ class SetupOperationPortTests(unittest.TestCase):
             "profile": parameters["profile"],
             "response": {
                 "ok": True,
-                "text": "mastic target ready",
+                "text": "mastic gateway contract ok",
                 "contract": parameters["resource"],
             },
         }
@@ -327,7 +333,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(self.verifier.calls, [])
         self.assertEqual(
             list(result["results"])[-2:],
-            ["client.test.codex", "client.test.hindsight"],
+            ["gateway.contract.codex", "gateway.contract.hindsight"],
         )
 
     def test_failed_target_canary_is_attributed_and_resumes_at_that_target(
@@ -341,7 +347,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 }
             return {
                 "profile": parameters["profile"],
-                "response": {"ok": True, "text": "mastic target ready"},
+                "response": {"ok": True, "text": "mastic gateway contract ok"},
             }
 
         self.clients.results["client.test"] = fail_hindsight
@@ -358,16 +364,16 @@ class SetupOperationPortTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "setup_interrupted")
-        self.assertIn("client.test.hindsight", str(raised.exception))
+        self.assertIn("gateway.contract.hindsight", str(raised.exception))
         self.assertEqual(
             [item.step_id for item in self.evidence.items["setup"]][-1],
-            "client.test.codex",
+            "gateway.contract.codex",
         )
 
         self.clients.calls.clear()
         self.clients.results["client.test"] = lambda parameters: {
             "profile": parameters["profile"],
-            "response": {"ok": True, "text": "mastic target ready"},
+            "response": {"ok": True, "text": "mastic gateway contract ok"},
         }
         resumed = port.preview({})
         result = port.execute(

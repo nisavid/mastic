@@ -393,7 +393,7 @@ def client_request(
         body = {
             **dict(payload),
             "model": route,
-            "input": "Respond with exactly: mastic target ready",
+            "input": "Respond with exactly: mastic gateway contract ok",
         }
     elif target == "hindsight":
         path = "/chat/completions"
@@ -403,7 +403,7 @@ def client_request(
             "messages": [
                 {
                     "role": "user",
-                    "content": "Respond with exactly: mastic target ready",
+                    "content": "Respond with exactly: mastic gateway contract ok",
                 }
             ],
         }
