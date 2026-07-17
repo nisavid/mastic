@@ -151,7 +151,10 @@ class ExactSetupSelection:
             raise ValueError("pinned must be boolean")
         unknown_clients = sorted(set(self.clients) - {"codex", "hindsight"})
         if unknown_clients:
-            raise ValueError("unsupported setup clients: " + ", ".join(unknown_clients))
+            raise ValueError(
+                "unsupported Application Configuration Targets in setup: "
+                + ", ".join(unknown_clients)
+            )
         unselected_options = sorted(set(self.client_options) - set(self.clients))
         if unselected_options:
             raise ValueError(

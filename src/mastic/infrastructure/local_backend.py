@@ -339,7 +339,7 @@ class LocalOperationBackend:
                 "Operation",
             )
         elif name in {"client.inspect", "client.test", "client.remove"}:
-            _resource(request, config.clients, "Client")
+            _resource(request, config.clients, "Application Configuration Target")
 
     def _query(self, request: OperationRequest) -> Mapping[str, object]:
         name = request.name
@@ -563,7 +563,7 @@ class LocalOperationBackend:
                 {
                     "scheme": "Bearer",
                     "path": str(self._gateway_credential_path),
-                    "instructions": "Configure clients with mastic client configure; do not copy the token into desired state.",
+                    "instructions": "Configure Application Configuration Targets with mastic client configure; do not copy the token into desired state.",
                 }
                 if self._gateway_credential_path is not None
                 else None
@@ -892,7 +892,9 @@ class LocalOperationBackend:
                 evidence=["desired-state"],
                 next_actions=[],
             )
-        resource = _resource(request, config.clients, "Client")
+        resource = _resource(
+            request, config.clients, "Application Configuration Target"
+        )
         if request.name == "client.test":
             value = self._clients.execute(
                 request.name, {**request.parameters, "resource": resource}
