@@ -536,7 +536,7 @@ class RuntimeSupplyPort:
             )
             if expected_digest is not None and expected_digest != bundle.lock_sha256:
                 raise SupplyPortError(
-                    "tested bundle lock digest does not match the setup plan"
+                    "tested bundle lock digest does not match the Plan"
                 )
             intended_id = bundle.bundle_id
             plan = _runtime_intent_plan(
