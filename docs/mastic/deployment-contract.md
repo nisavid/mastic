@@ -13,7 +13,7 @@ models, services, client configuration, operational state, and lifecycle.
 | `masticd` | Foreground per-user Supervisor used by launchd. |
 | `python -m mastic.entrypoints daemon` | Private stable target used by mastic's generated LaunchAgent. |
 
-Install from `tools/mastic/` with `uv tool install`. Do not install separate
+Install from the repository root with `uv tool install .`. Do not install separate
 MLX runtimes globally for mastic: `mastic runtime install` owns isolated exact
 Runtime Installations.
 
