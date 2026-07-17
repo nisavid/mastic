@@ -29,7 +29,7 @@ complete arguments and options of one operation.
 | `mastic model` | Searches, inspects, installs, verifies, and trusts exact Model Revisions. |
 | `mastic service` | Creates and controls named Inference Services. |
 | `mastic operation` | Inspects durable physical operations and their events. |
-| `mastic client` | Configures and verifies Codex and Hindsight integrations. |
+| `mastic application-target` | Configures and verifies Codex and Hindsight integrations. |
 | `mastic config` | Inspects, edits, validates, diffs, and restores desired configuration. |
 
 ## Output formats

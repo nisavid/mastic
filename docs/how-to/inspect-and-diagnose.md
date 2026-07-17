@@ -78,8 +78,8 @@ mastic status
 If the problem involves a managed application, also inspect that integration:
 
 ```sh
-mastic client inspect codex
-mastic client inspect hindsight
+mastic application-target inspect codex
+mastic application-target inspect hindsight
 ```
 
 For owned files, ports, launchd behavior, and target-Mac validation, see the

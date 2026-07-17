@@ -140,7 +140,7 @@ stays healthy when an upstream fails, reports per-service readiness through
 services. Requests never start services implicitly.
 
 Application Configuration Targets use workload-profiled Gateway base URLs under
-`/application-targets/<target>/profiles/<profile>/v1`. The profile resolves from mastic's
+`/application-targets/<application-target>/profiles/<profile>/v1`. The profile resolves from mastic's
 validated desired state and must target the request's service route. Before
 forwarding, the Gateway replaces the supported generation and chat-template
 fields with that profile's values. This makes the complete request policy
