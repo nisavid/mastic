@@ -7,7 +7,7 @@ from mastic.application.setup import (
     ExactSetupSelection,
     RecommendedProfile,
     RemovalInventory,
-    SetupPlanner,
+    SetupResolver,
     SetupPreflight,
 )
 from mastic.infrastructure.setup_port import (
@@ -109,7 +109,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "Larger requests.",
             ),
         )
-        self.planner = SetupPlanner(
+        self.resolver = SetupResolver(
             (compact, workstation),
             capacity_profiles=capacities,
         )
@@ -162,7 +162,7 @@ class SetupOperationPortTests(unittest.TestCase):
 
     def port(self, *, model=None, facts=None):
         return SetupOperationPort(
-            self.planner,
+            self.resolver,
             preflight=lambda offline: (
                 facts
                 or SetupPreflight(
@@ -574,8 +574,8 @@ class SetupOperationPortTests(unittest.TestCase):
         state = FakeOperationalState()
         evidence = OperationalSetupEvidenceStore(state)
         port = self.port()
-        plan = port.preview({})
-        first = self.planner.plan(self.facts).steps[0]
+        resolved = port.preview({})
+        first = self.resolver.resolve(self.facts).steps[0]
 
         from mastic.application.setup import SetupEvidence
 
@@ -588,7 +588,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(restored[0].fingerprint, first.fingerprint)
         self.assertEqual(state.rows[0]["kind"], "setup_evidence")
         self.assertNotIn("prompt", json.dumps(state.rows[0]))
-        self.assertEqual(len(plan["preview_fingerprint"]), 64)
+        self.assertEqual(len(resolved["preview_fingerprint"]), 64)
 
 
 if __name__ == "__main__":

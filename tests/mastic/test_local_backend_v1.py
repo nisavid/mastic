@@ -685,7 +685,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 lambda document: document["gateway"].update({"port": 9000})
             )
 
-            with self.assertRaisesRegex(ApplicationError, "plan changed") as caught:
+            with self.assertRaisesRegex(ApplicationError, "preview changed") as caught:
                 backend.prepare(
                     OperationRequest(
                         "service.remove",

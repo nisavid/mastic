@@ -27,7 +27,7 @@ from mastic.infrastructure.production import (
     _LocalModelSupply,
     _SetupSupervisorOwner,
     _sampling_matches_service_model,
-    _setup_planner,
+    _setup_resolver,
     compose_daemon,
     compose_local,
     make_launchd,
@@ -680,7 +680,7 @@ class ProductionCompositionTests(unittest.TestCase):
 
     def test_recommended_setup_blocks_undersized_mac(self) -> None:
         with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
-            _setup_planner().plan(
+            _setup_resolver().resolve(
                 SetupPreflight(
                     "darwin",
                     "arm64",
@@ -693,8 +693,8 @@ class ProductionCompositionTests(unittest.TestCase):
     def test_recommended_setup_defaults_to_balanced_capacity_and_application_targets(
         self,
     ) -> None:
-        preview = _setup_planner().preview(
-            _setup_planner().plan(
+        preview = _setup_resolver().preview(
+            _setup_resolver().resolve(
                 SetupPreflight(
                     "darwin",
                     "arm64",

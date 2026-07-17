@@ -1,8 +1,8 @@
-"""Supported-v1 guided setup and product removal plans.
+"""Supported-v1 guided setup and product removal resolution.
 
-The planner is deliberately side-effect free. Interfaces show and edit its
-resolved setup preview, while the Supervisor executes steps and persists the returned
-evidence.  This keeps interactive and noninteractive setup on one resumable
+The resolver is deliberately side-effect free. Interfaces show and edit its
+resolved setup preview, while the Supervisor executes steps and persists the
+returned evidence. This keeps interactive and noninteractive setup on one resumable
 contract.
 """
 
@@ -269,7 +269,7 @@ class SetupRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class PlanStep:
+class MutationStep:
     id: str
     title: str
     inputs: Mapping[str, object]
@@ -290,16 +290,16 @@ class SetupEvidence:
     detail: str = ""
 
     @classmethod
-    def complete(cls, step: PlanStep, detail: str = "") -> SetupEvidence:
+    def complete(cls, step: MutationStep, detail: str = "") -> SetupEvidence:
         return cls(step.id, step.fingerprint, StepState.COMPLETE, detail)
 
 
 @dataclass(frozen=True, slots=True)
-class SetupPlan:
+class ResolvedSetup:
     profile_name: str
     selection: ExactSetupSelection
     preflight: SetupPreflight
-    steps: tuple[PlanStep, ...]
+    steps: tuple[MutationStep, ...]
     offline: bool
     editable: bool
     confirmation_required: bool
@@ -326,7 +326,7 @@ class SetupPreview:
     application_target_options: Mapping[str, Mapping[str, object]]
     sampling_profiles: Mapping[str, Mapping[str, object]]
     context_window: int | None
-    steps: tuple[PlanStep, ...]
+    steps: tuple[MutationStep, ...]
     offline_note: str
     capacity_profile: str | None = None
     projected_kv_bytes: int | None = None
@@ -334,12 +334,12 @@ class SetupPreview:
 
 
 @dataclass(frozen=True, slots=True)
-class PlanExecutionResult:
+class MutationExecutionResult:
     evidence: tuple[SetupEvidence, ...]
     complete: bool
 
 
-class PlanExecutionError(RuntimeError):
+class MutationExecutionError(RuntimeError):
     def __init__(self, step_id: str, message: str) -> None:
         super().__init__(f"{step_id}: {message}")
         self.step_id = step_id
@@ -377,8 +377,8 @@ class RemovalInventory:
 
 
 @dataclass(frozen=True, slots=True)
-class RemovalPlan:
-    steps: tuple[PlanStep, ...]
+class ResolvedRemoval:
+    steps: tuple[MutationStep, ...]
     references: Mapping[str, tuple[str, ...]]
     freed_bytes_estimate: int
     retained_paths: tuple[str, ...]
@@ -386,12 +386,12 @@ class RemovalPlan:
     retained_settings: tuple[str, ...]
 
 
-StepExecutor = Callable[[PlanStep], SetupEvidence]
+MutationExecutor = Callable[[MutationStep], SetupEvidence]
 EvidenceRecorder = Callable[[SetupEvidence], object]
 
 
-class SetupPlanner:
-    """Create exact guided, unattended, resume, and removal plans."""
+class SetupResolver:
+    """Resolve exact guided, unattended, resume, and removal operations."""
 
     def __init__(
         self,
@@ -428,13 +428,13 @@ class SetupPlanner:
 
         return self._profiles[0].selection
 
-    def plan(
+    def resolve(
         self,
         preflight: SetupPreflight,
         request: SetupRequest | None = None,
         *,
         evidence: Sequence[SetupEvidence] = (),
-    ) -> SetupPlan:
+    ) -> ResolvedSetup:
         self._validate_machine(preflight)
         request = request or SetupRequest()
         if request.selection is None:
@@ -465,7 +465,7 @@ class SetupPlanner:
 
         evidence_by_step = {item.step_id: item for item in evidence}
         specifications = self._setup_specs(preflight, selection)
-        steps: list[PlanStep] = []
+        steps: list[MutationStep] = []
         dependency_blocked = False
         for step_id, title, inputs, network_required in specifications:
             fingerprint = _fingerprint(step_id, inputs)
@@ -488,12 +488,12 @@ class SetupPlanner:
                 state = StepState.READY
                 reason = ""
             steps.append(
-                PlanStep(
+                MutationStep(
                     step_id, title, inputs, fingerprint, state, reason, network_required
                 )
             )
 
-        return SetupPlan(
+        return ResolvedSetup(
             profile_name=profile.name if profile is not None else "custom",
             selection=selection,
             preflight=preflight,
@@ -504,11 +504,11 @@ class SetupPlanner:
             capacity_profile=capacity,
         )
 
-    def preview(self, plan: SetupPlan) -> SetupPreview:
-        selection = plan.selection
+    def preview(self, resolved: ResolvedSetup) -> SetupPreview:
+        selection = resolved.selection
         return SetupPreview(
-            profile_name=plan.profile_name,
-            editable=plan.editable,
+            profile_name=resolved.profile_name,
+            editable=resolved.editable,
             runtime=f"{selection.runtime_name}=={selection.runtime_version}",
             runtime_lock_digest=selection.runtime_lock_digest,
             model_repository=selection.model_repository,
@@ -525,25 +525,25 @@ class SetupPlanner:
             application_target_options=selection.application_target_options,
             sampling_profiles=selection.sampling_profiles,
             context_window=selection.context_window,
-            steps=plan.steps,
+            steps=resolved.steps,
             offline_note=(
                 "No completed evidence can be assumed while offline; network artifacts without matching evidence are blocked."
-                if plan.offline
+                if resolved.offline
                 else "Online preflight succeeded."
             ),
             capacity_profile=(
-                plan.capacity_profile.name
-                if plan.capacity_profile is not None
+                resolved.capacity_profile.name
+                if resolved.capacity_profile is not None
                 else None
             ),
             projected_kv_bytes=(
-                plan.capacity_profile.projected_kv_bytes
-                if plan.capacity_profile is not None
+                resolved.capacity_profile.projected_kv_bytes
+                if resolved.capacity_profile is not None
                 else None
             ),
             capacity_description=(
-                plan.capacity_profile.description
-                if plan.capacity_profile is not None
+                resolved.capacity_profile.description
+                if resolved.capacity_profile is not None
                 else ""
             ),
         )
@@ -573,15 +573,15 @@ class SetupPlanner:
 
     def apply(
         self,
-        plan: SetupPlan,
-        execute: StepExecutor,
+        resolved: ResolvedSetup,
+        execute: MutationExecutor,
         *,
         evidence: Sequence[SetupEvidence] = (),
         record: EvidenceRecorder | None = None,
-    ) -> PlanExecutionResult:
+    ) -> MutationExecutionResult:
         known = {(item.step_id, item.fingerprint): item for item in evidence}
         ordered = list(evidence)
-        for step in plan.steps:
+        for step in resolved.steps:
             prior = known.get((step.id, step.fingerprint))
             if step.state is StepState.COMPLETE and prior is None:
                 prior = SetupEvidence.complete(step)
@@ -590,29 +590,29 @@ class SetupPlanner:
             if prior is not None and prior.state is StepState.COMPLETE:
                 continue
             if step.state is StepState.BLOCKED:
-                raise PlanExecutionError(step.id, step.reason)
+                raise MutationExecutionError(step.id, step.reason)
             try:
                 completed = execute(step)
             except Exception as error:
-                raise PlanExecutionError(step.id, str(error)) from error
+                raise MutationExecutionError(step.id, str(error)) from error
             if (
                 completed.step_id != step.id
                 or completed.fingerprint != step.fingerprint
                 or completed.state is not StepState.COMPLETE
             ):
-                raise PlanExecutionError(
+                raise MutationExecutionError(
                     step.id, "executor returned invalid completion evidence"
                 )
             known[(step.id, step.fingerprint)] = completed
             ordered.append(completed)
             if record is not None:
                 record(completed)
-        return PlanExecutionResult(
+        return MutationExecutionResult(
             tuple(ordered),
-            all(step.state is not StepState.BLOCKED for step in plan.steps),
+            all(step.state is not StepState.BLOCKED for step in resolved.steps),
         )
 
-    def plan_removal(self, inventory: RemovalInventory) -> RemovalPlan:
+    def resolve_removal(self, inventory: RemovalInventory) -> ResolvedRemoval:
         specs: list[tuple[str, str, Mapping[str, object]]] = []
         if inventory.running_services:
             specs.extend(
@@ -648,12 +648,12 @@ class SetupPlanner:
                 )
             )
         steps = tuple(
-            PlanStep(
+            MutationStep(
                 step_id, title, inputs, _fingerprint(step_id, inputs), StepState.READY
             )
             for step_id, title, inputs in specs
         )
-        return RemovalPlan(
+        return ResolvedRemoval(
             steps=steps,
             references=inventory.references,
             freed_bytes_estimate=inventory.product_owned_bytes,
@@ -664,17 +664,17 @@ class SetupPlanner:
 
     def apply_removal(
         self,
-        plan: RemovalPlan,
-        execute: StepExecutor,
+        resolved: ResolvedRemoval,
+        execute: MutationExecutor,
         *,
         evidence: Sequence[SetupEvidence] = (),
         record: EvidenceRecorder | None = None,
-    ) -> PlanExecutionResult:
-        synthetic = SetupPlan(
+    ) -> MutationExecutionResult:
+        synthetic = ResolvedSetup(
             profile_name="removal",
             selection=self._profiles[0].selection,
             preflight=SetupPreflight("darwin", "arm64", 0, 0, True),
-            steps=plan.steps,
+            steps=resolved.steps,
             offline=False,
             editable=False,
             confirmation_required=True,
@@ -856,7 +856,7 @@ def _json_default(value: object) -> object:
         return dict(value)
     if isinstance(value, tuple):
         return list(value)
-    raise TypeError(f"unsupported plan value: {type(value).__name__}")
+    raise TypeError(f"unsupported resolved value: {type(value).__name__}")
 
 
 def _freeze_json_mapping(

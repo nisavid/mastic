@@ -18,7 +18,7 @@ from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
     RecommendedProfile,
-    SetupPlanner,
+    SetupResolver,
 )
 from mastic.infrastructure.composition import (
     ApplicationComposition,
@@ -446,7 +446,7 @@ def compose_local(
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
     setup = SetupOperationPort(
-        _setup_planner(),
+        _setup_resolver(),
         preflight=SystemSetupPreflight(paths),
         runtime=activating_remote,
         model=activating_remote,
@@ -680,7 +680,7 @@ def make_launchd(
     )
 
 
-def _setup_planner() -> SetupPlanner:
+def _setup_resolver() -> SetupResolver:
     catalogue = RuntimeCatalogue.load_builtin()
     bundle = next(item for item in catalogue.tested_bundles if item.runtime == "optiq")
     selection = ExactSetupSelection(
@@ -768,7 +768,7 @@ def _setup_planner() -> SetupPlanner:
             "The model's native context with three simultaneous inference requests.",
         ),
     )
-    return SetupPlanner(
+    return SetupResolver(
         (
             RecommendedProfile(
                 "qwen36-optiq",
