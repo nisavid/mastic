@@ -1133,8 +1133,63 @@ class GatewayTests(unittest.TestCase):
         resolver = FakeResolver(
             [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
         )
+        created = (
+            b"event: response.created\n"
+            b'data: {"type":"response.created","response":{"id":"resp-active"},'
+            b'"sequence_number":7}\n\n'
+        )
+        delta = (
+            b"event: response.output_text.delta\n"
+            b'data: {"type":"response.output_text.delta","delta":"ok",'
+            b'"sequence_number":8}\n\n'
+        )
+        oversized = b'data: {"padding":"' + (b"x" * 600) + b'"}\n\n'
+        stream = ChunkStream([created, delta, oversized])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=512,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "stream": True, "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(created + delta))
+        failed_frame = response.content[len(created + delta) :]
+        event_line, data_line = failed_frame.strip().splitlines()
+        event = json.loads(data_line.removeprefix(b"data: "))
+        self.assertEqual(event_line, b"event: response.failed")
+        self.assertEqual(event["type"], "response.failed")
+        self.assertEqual(event["sequence_number"], 9)
+        self.assertEqual(event["response"]["id"], "resp-active")
+        self.assertEqual(event["response"]["status"], "failed")
+        self.assertEqual(event["response"]["error"]["code"], "server_error")
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_sse_single_chunk_never_buffers_an_oversized_tail(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
         first = b"data: {}\n\n"
-        stream = ChunkStream([first, b'data: {"delta":"over-limit"}\n\n'])
+        stream = ChunkStream([first + b"data: " + (b"x" * 128)])
         upstream = FakeUpstreamClient()
         upstream.responses.append(
             httpx.Response(
@@ -1159,14 +1214,13 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.content.startswith(first))
-        failed_frame = response.content[len(first) :]
-        event_line, data_line = failed_frame.strip().splitlines()
+        self.assertNotIn(b"x" * 17, response.content)
+        error_frame = response.content[len(first) :]
+        event_line, data_line = error_frame.strip().splitlines()
         event = json.loads(data_line.removeprefix(b"data: "))
-        self.assertEqual(event_line, b"event: response.failed")
-        self.assertEqual(event["type"], "response.failed")
-        self.assertEqual(event["sequence_number"], 0)
-        self.assertEqual(event["response"]["status"], "failed")
-        self.assertEqual(event["response"]["error"]["code"], "server_error")
+        self.assertEqual(event_line, b"event: error")
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["code"], "response_adaptation_too_large")
         self.assertTrue(stream.closed)
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
