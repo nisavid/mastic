@@ -218,7 +218,8 @@ class ClientOperationPort:
                 ) from error
             return {"profile": profile, "response": _plain(response)}
         raise ApplicationError(
-            "operation_unavailable", f"{operation} is not a client operation"
+            "operation_unavailable",
+            f"{operation} is not an Application Configuration Target operation",
         )
 
 
@@ -236,7 +237,7 @@ def _client_settings(
     if not service:
         raise ApplicationError(
             "invalid_parameter",
-            "client configure requires an Inference Service",
+            "Application Configuration Target configuration requires an Inference Service",
         )
     if name == "hindsight":
         profile = validate_hindsight_profile_name(parameters.get("profile"))
