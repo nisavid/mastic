@@ -1596,6 +1596,31 @@ class ClientIntegrationV1Tests(unittest.TestCase):
 
             self.assertEqual(adapter.config_path, root / "profiles/agent-memory.env")
 
+    def test_codex_factory_discovery_ignores_malformed_hindsight_ownership(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ownership = root / "ownership"
+            ownership.mkdir()
+            (ownership / "hindsight-Bad!.ownership.json").write_text(
+                "not json", encoding="utf-8"
+            )
+            factory = LocalApplicationTargetIntegrationFactory(
+                codex_config_path=root / "config.toml",
+                hindsight_profiles_dir=root / "profiles",
+                ownership_dir=ownership,
+            )
+
+            for operation in (
+                "application-target.inspect",
+                "application-target.configure",
+                "application-target.remove",
+            ):
+                with self.subTest(operation=operation):
+                    adapter = factory(operation, "codex", {}, None)
+                    self.assertIsInstance(adapter, CodexApplicationTargetIntegration)
+
     def test_local_factory_refuses_ambiguous_manifest_backed_hindsight_profiles(
         self,
     ) -> None:

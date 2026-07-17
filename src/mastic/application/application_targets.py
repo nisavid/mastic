@@ -98,7 +98,10 @@ class SamplingProfile:
     def from_mapping(cls, value: Mapping[str, object]) -> SamplingProfile:
         """Validate recognized fields from an untyped operation payload."""
         names = {field.name for field in fields(cls)}
-        return cls(**{name: item for name, item in value.items() if name in names})  # type: ignore[arg-type]
+        unknown = sorted(set(value) - names)
+        if unknown:
+            raise ValueError("unknown sampling profile fields: " + ", ".join(unknown))
+        return cls(**dict(value))  # type: ignore[arg-type]
 
     def values(self) -> Mapping[str, object]:
         """Return runtime sampling values without provenance metadata."""

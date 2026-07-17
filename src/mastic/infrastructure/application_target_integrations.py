@@ -195,6 +195,13 @@ class ApplicationTargetOwnershipDiscovery:
             return ()
         ownership: list[ApplicationTargetOwnership] = []
         for manifest_path in sorted(self.ownership_dir.iterdir()):
+            if integration == "codex" and manifest_path.name != "codex.ownership.json":
+                continue
+            if integration == "hindsight" and not (
+                manifest_path.name.startswith("hindsight-")
+                and manifest_path.name.endswith(".ownership.json")
+            ):
+                continue
             try:
                 recognized = self._recognize(manifest_path)
             except ValueError as error:
