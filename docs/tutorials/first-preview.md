@@ -14,8 +14,9 @@ Use an Apple-silicon Mac with:
 - at least 48 GiB of unified memory and 24 GiB of free disk for the
   recommended profile used in this tutorial;
 - `git` and `uv` available in your shell;
-- internet access for live model and runtime evidence, or the required
-  artifacts already cached for an offline preview.
+- internet access unless every network-backed setup step has matching durable
+  completion evidence. `--offline` prevents network access; it does not infer
+  readiness from installed runtime or cached model bytes.
 
 ## Install MASTIC
 
