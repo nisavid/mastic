@@ -131,10 +131,10 @@ class SetupOperationPort:
         plan = self._setup_plan(parameters)
         preview = self._setup_preview(plan)
         if parameters.get("confirmed") is not True or not parameters.get(
-            "plan_fingerprint"
+            "preview_fingerprint"
         ):
             return preview
-        self._assert_plan_identity(parameters, preview)
+        self._assert_preview_identity(parameters, preview)
         blocked = next(
             (step for step in plan.steps if step.state is StepState.BLOCKED), None
         )
@@ -171,7 +171,7 @@ class SetupOperationPort:
                 "setup_interrupted",
                 str(error),
                 next_actions=(
-                    "rerun the same exact Plan to resume",
+                    "rerun the same exact setup preview to resume",
                     "mastic operation list",
                 ),
             ) from error
@@ -197,10 +197,10 @@ class SetupOperationPort:
         plan = self._planner.plan_removal(self._removal_inventory())
         preview = self._removal_preview(plan)
         if parameters.get("confirmed") is not True or not parameters.get(
-            "plan_fingerprint"
+            "preview_fingerprint"
         ):
             return preview
-        self._assert_plan_identity(parameters, preview)
+        self._assert_preview_identity(parameters, preview)
         prior = tuple(self._evidence.load("removal"))
         results: dict[str, object] = {}
 
@@ -272,7 +272,7 @@ class SetupOperationPort:
 
     def _setup_preview(self, plan: SetupPlan) -> Mapping[str, object]:
         preview = self._planner.preview(plan)
-        identity = _plan_identity(
+        identity = _preview_identity(
             plan.steps,
             {
                 "profile": plan.profile_name,
@@ -300,7 +300,7 @@ class SetupOperationPort:
             ),
             "editable": preview.editable,
             "confirmation_required": True,
-            "plan_fingerprint": identity,
+            "preview_fingerprint": identity,
             "selection": {
                 "runtime": preview.runtime,
                 "runtime_lock_digest": preview.runtime_lock_digest,
@@ -459,7 +459,7 @@ class SetupOperationPort:
         raise RuntimeError(f"unsupported setup step: {step.id}")
 
     def _removal_preview(self, plan: RemovalPlan) -> Mapping[str, object]:
-        identity = _plan_identity(
+        identity = _preview_identity(
             plan.steps,
             {
                 "references": plan.references,
@@ -472,7 +472,7 @@ class SetupOperationPort:
         return {
             "state": "review_required",
             "confirmation_required": True,
-            "plan_fingerprint": identity,
+            "preview_fingerprint": identity,
             "steps": [_plain(step) for step in plan.steps],
             "references": _plain(plan.references),
             "freed_bytes_estimate": plan.freed_bytes_estimate,
@@ -517,14 +517,14 @@ class SetupOperationPort:
             self._evidence.record("removal", evidence)
 
     @staticmethod
-    def _assert_plan_identity(
+    def _assert_preview_identity(
         parameters: Mapping[str, object], preview: Mapping[str, object]
     ) -> None:
-        if parameters.get("plan_fingerprint") != preview["plan_fingerprint"]:
+        if parameters.get("preview_fingerprint") != preview["preview_fingerprint"]:
             raise ApplicationError(
-                "plan_changed",
-                "the setup or removal plan changed after review",
-                next_actions=("review the newly rendered exact plan",),
+                "preview_changed",
+                "the setup or removal preview changed after review",
+                next_actions=("review the newly rendered preview",),
             )
 
 
@@ -770,7 +770,7 @@ def _content_free_result(
     }
 
 
-def _plan_identity(steps: Sequence[PlanStep], extra: Mapping[str, object]) -> str:
+def _preview_identity(steps: Sequence[PlanStep], extra: Mapping[str, object]) -> str:
     payload = {
         "steps": [{"id": step.id, "fingerprint": step.fingerprint} for step in steps],
         **dict(extra),

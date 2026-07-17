@@ -139,17 +139,19 @@ def _add_command(
             if not confirmed and (json_output or json_lines):
                 raise typer.Abort()
             try:
-                plan = dispatcher.preview(OperationRequest(operation.name, parameters))
+                preview = dispatcher.preview(
+                    OperationRequest(operation.name, parameters)
+                )
             except ApplicationError as error:
                 _render_error(error, json_output=json_output or json_lines)
                 raise typer.Exit(1) from error
-            fingerprint = plan.value.get("plan_fingerprint")
+            fingerprint = preview.value.get("preview_fingerprint")
             if isinstance(fingerprint, str):
-                parameters["plan_fingerprint"] = fingerprint
+                parameters["preview_fingerprint"] = fingerprint
             if not confirmed:
-                Console().print("[bold]Resolved mutation plan[/bold]")
-                Console().print(Pretty(_plain(plan.value), expand_all=True))
-                if not typer.confirm("Apply this exact plan?"):
+                Console().print("[bold]Resolved mutation preview[/bold]")
+                Console().print(Pretty(_plain(preview.value), expand_all=True))
+                if not typer.confirm("Apply this resolved preview?"):
                     raise typer.Abort()
             parameters["confirmed"] = True
         _invoke(
@@ -183,7 +185,7 @@ def _command_signature(
                     bool,
                     typer.Option(
                         "--yes",
-                        help="Confirm the complete mutation plan noninteractively.",
+                        help="Confirm the resolved mutation preview noninteractively.",
                     ),
                 ],
             )

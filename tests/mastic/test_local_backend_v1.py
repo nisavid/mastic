@@ -105,14 +105,14 @@ class _SetupPort(_Port):
     def preview(self, parameters):
         return {
             "state": "review_required",
-            "plan_fingerprint": "sha256:exact",
+            "preview_fingerprint": "sha256:exact",
             "parameters": dict(parameters),
         }
 
     def preview_removal(self):
         return {
             "state": "review_required",
-            "plan_fingerprint": "sha256:remove-exact",
+            "preview_fingerprint": "sha256:remove-exact",
             "steps": ({"id": "state.remove"},),
         }
 
@@ -518,7 +518,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                     {
                         **dict(request.parameters),
                         "confirmed": True,
-                        "plan_fingerprint": preview["plan_fingerprint"],
+                        "preview_fingerprint": preview["preview_fingerprint"],
                     },
                 )
             ).execute()
@@ -550,7 +550,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                     {
                         **dict(request.parameters),
                         "confirmed": True,
-                        "plan_fingerprint": preview["plan_fingerprint"],
+                        "preview_fingerprint": preview["preview_fingerprint"],
                     },
                 )
             ).execute()
@@ -666,7 +666,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                     {
                         "source": str(source),
                         "confirmed": True,
-                        "plan_fingerprint": preview["plan_fingerprint"],
+                        "preview_fingerprint": preview["preview_fingerprint"],
                     },
                 )
             ).execute()
@@ -679,7 +679,7 @@ class LocalOperationBackendTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             backend, _ = self._backend(Path(directory))
             request = OperationRequest("service.remove", {"resource": "chat"})
-            fingerprint = backend.prepare(request).events[-1]["plan_fingerprint"]
+            fingerprint = backend.prepare(request).events[-1]["preview_fingerprint"]
 
             backend._config_store.edit(  # noqa: SLF001 - verifies stale-plan boundary.
                 lambda document: document["gateway"].update({"port": 9000})
@@ -692,11 +692,11 @@ class LocalOperationBackendTests(unittest.TestCase):
                         {
                             "resource": "chat",
                             "confirmed": True,
-                            "plan_fingerprint": fingerprint,
+                            "preview_fingerprint": fingerprint,
                         },
                     )
                 )
-            self.assertEqual(caught.exception.code, "stale_plan")
+            self.assertEqual(caught.exception.code, "stale_preview")
 
     def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
         with TemporaryDirectory() as directory:
@@ -894,7 +894,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             prepared = backend.prepare(OperationRequest("setup"))
 
             self.assertFalse(prepared.requires_supervisor)
-            self.assertEqual(prepared.events[0]["plan_fingerprint"], "sha256:exact")
+            self.assertEqual(prepared.events[0]["preview_fingerprint"], "sha256:exact")
             self.assertEqual(setup.calls, [])
 
     def test_product_removal_previews_exact_plan_without_starting_supervisor(
@@ -908,7 +908,7 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             self.assertFalse(prepared.requires_supervisor)
             self.assertEqual(
-                prepared.events[0]["plan_fingerprint"], "sha256:remove-exact"
+                prepared.events[0]["preview_fingerprint"], "sha256:remove-exact"
             )
             result = prepared.execute()
             self.assertTrue(result["resource"]["removed"])
@@ -1044,7 +1044,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                     )
                     self.assertEqual(prepared.events[0]["phase"], "preview")
                     self.assertTrue(
-                        str(prepared.events[0]["plan_fingerprint"]).startswith(
+                        str(prepared.events[0]["preview_fingerprint"]).startswith(
                             "sha256:"
                         )
                     )

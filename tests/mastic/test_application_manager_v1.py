@@ -30,7 +30,7 @@ class _Backend:
                 "operation": request.name,
                 "parameters": dict(request.parameters),
             },
-            events=({"phase": "plan", "state": "complete"},),
+            events=({"phase": "preview", "state": "complete"},),
         )
 
 
@@ -66,13 +66,13 @@ class ApplicationManagerTests(unittest.TestCase):
             OperationRequest("model.cache.evict", {"resource": "cached"})
         )
 
-        self.assertEqual(result.value["state"], "planned")
+        self.assertEqual(result.value["state"], "review_required")
         self.assertTrue(result.value["confirmation_required"])
         self.assertTrue(result.value["requires_supervisor"])
-        self.assertEqual(result.value["plan"][0]["phase"], "plan")
+        self.assertEqual(result.value["preview"][0]["phase"], "preview")
         self.assertEqual(self.activator.calls, 0)
 
-    def test_preview_promotes_exact_plan_identity_for_interface_confirmation(self):
+    def test_preview_promotes_exact_preview_identity_for_interface_confirmation(self):
         original = self.backend.prepare
 
         def prepare(request):
@@ -80,14 +80,14 @@ class ApplicationManagerTests(unittest.TestCase):
             return PreparedOperation(
                 prepared.requires_supervisor,
                 prepared.execute,
-                ({"phase": "plan", "plan_fingerprint": "sha256:exact"},),
+                ({"phase": "preview", "preview_fingerprint": "sha256:exact"},),
             )
 
         self.backend.prepare = prepare
 
         result = self.dispatcher.preview(OperationRequest("setup"))
 
-        self.assertEqual(result.value["plan_fingerprint"], "sha256:exact")
+        self.assertEqual(result.value["preview_fingerprint"], "sha256:exact")
 
     def test_service_start_can_visibly_activate_supervisor(self) -> None:
         self.backend.require.add("service.start")
@@ -133,7 +133,7 @@ class ApplicationManagerTests(unittest.TestCase):
         result = self.dispatcher.execute(OperationRequest("runtime.available"))
 
         self.assertEqual(result.value["operation"], "runtime.available")
-        self.assertEqual(result.events[0]["phase"], "plan")
+        self.assertEqual(result.events[0]["phase"], "preview")
 
 
 if __name__ == "__main__":

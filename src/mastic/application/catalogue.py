@@ -218,7 +218,7 @@ def build_operation_catalogue() -> Mapping[str, Operation]:
 
 def _summary(name: str) -> str:
     return {
-        "setup": "Plan and create a complete local inference service on this Mac.",
+        "setup": "Preview and create a complete local inference service on this Mac.",
         "remove": "Preview and remove mastic-owned services, state, and integrations.",
         "status": "Show the whole local inference system without starting it.",
         "check": "Run concise health checks across the Supervisor, Gateway, and services.",
@@ -345,7 +345,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         return (
             _option(
                 "profile",
-                "Setup profile to preselect; the complete plan remains editable.",
+                "Setup profile to preselect; the resolved preview remains editable.",
                 accepted=("recommended", "exact"),
             ),
             _option(
@@ -421,7 +421,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "yes",
-                "Apply an exact noninteractive plan after all required values are supplied.",
+                "Apply the resolved setup preview after all required values are supplied.",
                 value_type="boolean",
             ),
         )

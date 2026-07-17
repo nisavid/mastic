@@ -290,7 +290,7 @@ class MasticApp(App[None]):
             f"{operation.kind.value.title()} · Supervisor: "
             f"{operation.supervisor.value.replace('_', ' ')}\n\n"
             "Set the operation inputs below. Read-only operations do not start the "
-            "Supervisor. Confirmed mutations show their complete plan before any "
+            "Supervisor. Confirmed mutations show their resolved preview before any "
             "change.\n\n"
             f"CLI equivalent: {operation.examples[0]} --help"
         )
@@ -359,7 +359,7 @@ class MasticApp(App[None]):
                     )
                 )
         submit_label = (
-            "Review complete plan" if operation.confirmation else "Run operation"
+            "Review resolved preview" if operation.confirmation else "Run operation"
         )
         widgets.append(
             Horizontal(
@@ -486,23 +486,23 @@ class MasticApp(App[None]):
             if actions:
                 body += f"\n\nNext actions\n{actions}"
             self.query_one("#view-body", Static).update(body)
-            self.notify(error.message, title="Plan failed", severity="error")
+            self.notify(error.message, title="Preview failed", severity="error")
             self._set_operation_busy(False, operation.name)
             return
         except Exception:
             self._set_operation_busy(False, operation.name)
             raise
         pending = dict(parameters)
-        fingerprint = preview.value.get("plan_fingerprint")
+        fingerprint = preview.value.get("preview_fingerprint")
         if isinstance(fingerprint, str):
-            pending["plan_fingerprint"] = fingerprint
+            pending["preview_fingerprint"] = fingerprint
         self.pending_parameters = pending
         resolved = json.dumps(
             dict(preview.value), indent=2, sort_keys=True, default=str
         )
         self.query_one("#view-body", Static).update(
             self._mutation_plan(operation, parameters)
-            + f"\n\nResolved backend plan\n{resolved}"
+            + f"\n\nResolved backend preview\n{resolved}"
         )
         self.query_one("#operation-submit", Button).styles.display = "none"
         self.query_one("#operation-confirm", Button).styles.display = "block"
@@ -526,7 +526,7 @@ class MasticApp(App[None]):
         self.query_one("#view-body", Static).update(
             f"No changes made.\n\n{operation.summary}\n\n"
             "The editable inputs are preserved. Review them, then preview the "
-            "complete plan again."
+            "resolved preview again."
         )
         self.query_one("#operation-submit", Button).styles.display = "block"
         self.query_one("#operation-confirm", Button).styles.display = "none"
@@ -598,12 +598,12 @@ class MasticApp(App[None]):
         parameter_text = "\n".join(rows) if rows else "  No operation inputs"
         supervisor = operation.supervisor.value.replace("_", " ")
         return (
-            "Complete mutation plan\n\n"
+            "Resolved mutation preview\n\n"
             f"Operation: {operation.name}\n"
             f"Intent: {operation.summary}\n"
             f"Supervisor: {supervisor}\n"
             f"Confirmation: required\n\nInputs\n{parameter_text}\n\n"
-            "No change has been made. Confirm to apply this exact plan, or cancel "
+            "No change has been made. Confirm to apply this resolved preview, or cancel "
             "to return to the editable inputs."
         )
 
@@ -652,7 +652,7 @@ class MasticApp(App[None]):
                 "5  Name the service and stable Gateway route\n"
                 "6  Preview Application Configuration Targets, resource effects, "
                 "and verification request\n\n"
-                "Nothing changes until the complete plan is reviewed and confirmed. "
+                "Nothing changes until the resolved preview is reviewed and confirmed. "
                 "Every recommendation remains editable.",
             )
         if name == "help":

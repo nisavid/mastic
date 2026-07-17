@@ -26,12 +26,12 @@ class _Dispatcher:
         if self.error is not None:
             raise self.error
         value = {
-            "state": "planned",
+            "state": "review_required",
             "operation": request.name,
             "parameters": dict(request.parameters),
         }
         if request.name == "setup":
-            value["plan_fingerprint"] = "sha256:exact"
+            value["preview_fingerprint"] = "sha256:exact"
         return OperationResult(request.name, value)
 
     def execute(self, request):
@@ -140,7 +140,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             body = str(self.app.query_one("#view-body", Static).content)
             self.assertEqual(title, "setup")
             self.assertEqual(self.app.selected_operation, "setup")
-            self.assertIn("complete plan", body)
+            self.assertIn("resolved preview", body)
             self.assertTrue(
                 self.app.query_one("#operation-form").styles.display == "block"
             )
@@ -243,8 +243,8 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.dispatcher.requests, [])
             self.assertEqual(self.dispatcher.previews[-1].name, "model.install")
             plan = str(self.app.query_one("#view-body", Static).content)
-            self.assertIn("Complete mutation plan", plan)
-            self.assertIn("Resolved backend plan", plan)
+            self.assertIn("Resolved mutation preview", plan)
+            self.assertIn("Resolved backend preview", plan)
             self.assertIn("model.install", plan)
             self.assertIn("mlx-community/Qwen3-4B-4bit", plan)
             self.assertIn("revision: abc123", plan)
@@ -265,7 +265,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(self.app.focused.id, "operation-submit")
 
-    async def test_setup_confirmation_carries_the_reviewed_plan_fingerprint(
+    async def test_setup_confirmation_carries_the_reviewed_preview_fingerprint(
         self,
     ) -> None:
         async with self.app.run_test(size=(120, 45)) as pilot:
@@ -276,7 +276,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertEqual(
-                self.dispatcher.requests[-1].parameters["plan_fingerprint"],
+                self.dispatcher.requests[-1].parameters["preview_fingerprint"],
                 "sha256:exact",
             )
 
