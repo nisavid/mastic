@@ -16,12 +16,12 @@ class _Dispatcher:
     def preview(self, request):
         self.previews.append(request)
         value = {
-            "state": "planned",
+            "state": "review_required",
             "operation": request.name,
             "parameters": dict(request.parameters),
         }
         if request.name == "setup":
-            value["plan_fingerprint"] = "sha256:exact"
+            value["preview_fingerprint"] = "sha256:exact"
         return OperationResult(request.name, value)
 
     def execute(self, request):
@@ -172,16 +172,16 @@ class CliV1Tests(unittest.TestCase):
         )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Resolved mutation plan", result.output)
+        self.assertIn("Resolved mutation preview", result.output)
         self.assertEqual(self.dispatcher.previews[-1].name, "service.remove")
         self.assertFalse(self.dispatcher.requests)
 
-    def test_setup_confirmation_carries_the_reviewed_plan_fingerprint(self) -> None:
+    def test_setup_confirmation_carries_the_reviewed_preview_fingerprint(self) -> None:
         result = self.runner.invoke(self.app, ["setup"], input="y\n")
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            self.dispatcher.requests[-1].parameters["plan_fingerprint"],
+            self.dispatcher.requests[-1].parameters["preview_fingerprint"],
             "sha256:exact",
         )
 
@@ -205,7 +205,7 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(parameters["service_options"]["kv_config"], "kv_config.json")
         self.assertTrue(parameters["service_options"]["mtp"])
         self.assertEqual(parameters["application_targets"], ["codex", "hindsight"])
-        self.assertEqual(parameters["plan_fingerprint"], "sha256:exact")
+        self.assertEqual(parameters["preview_fingerprint"], "sha256:exact")
 
     def test_setup_help_explains_capacity_choices_and_concurrency(self) -> None:
         result = self.runner.invoke(self.app, ["setup", "--help"])

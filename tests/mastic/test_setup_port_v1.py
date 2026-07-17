@@ -200,7 +200,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(preview["selection"]["activation"], "supervisor")
         self.assertTrue(preview["selection"]["pinned"])
         self.assertTrue(preview["selection"]["service_options"]["mtp"])
-        self.assertEqual(len(preview["plan_fingerprint"]), 64)
+        self.assertEqual(len(preview["preview_fingerprint"]), 64)
         self.assertEqual(preview["steps"][-1]["id"], "gateway.contract.hindsight")
         self.assertEqual(
             self.runtime.calls
@@ -211,7 +211,7 @@ class SetupOperationPortTests(unittest.TestCase):
             [],
         )
 
-    def test_capacity_choice_is_discoverable_and_changes_plan_identity(self):
+    def test_capacity_choice_is_discoverable_and_changes_preview_identity(self):
         baseline = self.port().preview({})
         selected = self.port().preview({"capacity": "long-context"})
 
@@ -220,7 +220,9 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(selected["capacity"]["context_window"], 196_608)
         self.assertEqual(selected["capacity"]["max_concurrent"], 4)
         self.assertIn("simultaneous inference requests", selected["capacity"]["note"])
-        self.assertNotEqual(baseline["plan_fingerprint"], selected["plan_fingerprint"])
+        self.assertNotEqual(
+            baseline["preview_fingerprint"], selected["preview_fingerprint"]
+        )
 
     def test_confirmed_exact_plan_orchestrates_owners_and_persists_evidence(self):
         port = self.port()
@@ -230,7 +232,7 @@ class SetupOperationPortTests(unittest.TestCase):
             "setup",
             {
                 "confirmed": True,
-                "plan_fingerprint": preview["plan_fingerprint"],
+                "preview_fingerprint": preview["preview_fingerprint"],
             },
         )
 
@@ -317,7 +319,7 @@ class SetupOperationPortTests(unittest.TestCase):
             "setup",
             {
                 "confirmed": True,
-                "plan_fingerprint": preview["plan_fingerprint"],
+                "preview_fingerprint": preview["preview_fingerprint"],
             },
         )
 
@@ -368,7 +370,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "setup",
                 {
                     "confirmed": True,
-                    "plan_fingerprint": preview["plan_fingerprint"],
+                    "preview_fingerprint": preview["preview_fingerprint"],
                 },
             )
 
@@ -391,7 +393,7 @@ class SetupOperationPortTests(unittest.TestCase):
             "setup",
             {
                 "confirmed": True,
-                "plan_fingerprint": resumed["plan_fingerprint"],
+                "preview_fingerprint": resumed["preview_fingerprint"],
             },
         )
 
@@ -406,7 +408,7 @@ class SetupOperationPortTests(unittest.TestCase):
             ],
         )
 
-    def test_editing_service_identity_or_options_changes_plan_identity(self):
+    def test_editing_service_identity_or_options_changes_preview_identity(self):
         port = self.port()
         baseline = port.preview({})
         route = port.preview({"service_route": "assistant"})
@@ -414,8 +416,12 @@ class SetupOperationPortTests(unittest.TestCase):
             {"service_options": {"kv_config": "kv_config.json", "mtp": False}}
         )
 
-        self.assertNotEqual(baseline["plan_fingerprint"], route["plan_fingerprint"])
-        self.assertNotEqual(baseline["plan_fingerprint"], options["plan_fingerprint"])
+        self.assertNotEqual(
+            baseline["preview_fingerprint"], route["preview_fingerprint"]
+        )
+        self.assertNotEqual(
+            baseline["preview_fingerprint"], options["preview_fingerprint"]
+        )
 
     def test_explicit_revision_scoped_trust_is_applied_but_never_inferred(self):
         trusted = selection(trust=("remote_code",))
@@ -425,7 +431,7 @@ class SetupOperationPortTests(unittest.TestCase):
             {
                 "selection": trusted,
                 "confirmed": True,
-                "plan_fingerprint": preview["plan_fingerprint"],
+                "preview_fingerprint": preview["preview_fingerprint"],
             },
         )
 
@@ -433,7 +439,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(trust[1]["accepted_risks"], ("remote_code",))
         self.assertEqual(trust[1]["revision"], "2" * 40)
 
-    def test_missing_or_changed_plan_fingerprint_never_mutates(self):
+    def test_missing_or_changed_preview_fingerprint_never_mutates(self):
         port = self.port()
         review = port.execute("setup", {"confirmed": True})
         self.assertEqual(review["state"], "review_required")
@@ -441,10 +447,10 @@ class SetupOperationPortTests(unittest.TestCase):
         with self.assertRaises(ApplicationError) as raised:
             port.execute(
                 "setup",
-                {"confirmed": True, "plan_fingerprint": "0" * 64},
+                {"confirmed": True, "preview_fingerprint": "0" * 64},
             )
 
-        self.assertEqual(raised.exception.code, "plan_changed")
+        self.assertEqual(raised.exception.code, "preview_changed")
         self.assertEqual(self.runtime.calls, [])
 
     def test_exact_setup_requires_every_exact_identity_field(self) -> None:
@@ -478,7 +484,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "setup",
                 {
                     "confirmed": True,
-                    "plan_fingerprint": preview["plan_fingerprint"],
+                    "preview_fingerprint": preview["preview_fingerprint"],
                 },
             )
         self.assertEqual(raised.exception.code, "setup_interrupted")
@@ -498,7 +504,7 @@ class SetupOperationPortTests(unittest.TestCase):
             "setup",
             {
                 "confirmed": True,
-                "plan_fingerprint": resumed_preview["plan_fingerprint"],
+                "preview_fingerprint": resumed_preview["preview_fingerprint"],
             },
         )
 
@@ -519,7 +525,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 {
                     "offline": True,
                     "confirmed": True,
-                    "plan_fingerprint": preview["plan_fingerprint"],
+                    "preview_fingerprint": preview["preview_fingerprint"],
                 },
             )
 
@@ -545,7 +551,7 @@ class SetupOperationPortTests(unittest.TestCase):
         result = port.remove(
             {
                 "confirmed": True,
-                "plan_fingerprint": preview["plan_fingerprint"],
+                "preview_fingerprint": preview["preview_fingerprint"],
             }
         )
 
@@ -582,7 +588,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(restored[0].fingerprint, first.fingerprint)
         self.assertEqual(state.rows[0]["kind"], "setup_evidence")
         self.assertNotIn("prompt", json.dumps(state.rows[0]))
-        self.assertEqual(len(plan["plan_fingerprint"]), 64)
+        self.assertEqual(len(plan["preview_fingerprint"]), 64)
 
 
 if __name__ == "__main__":

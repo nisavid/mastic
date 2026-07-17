@@ -164,19 +164,19 @@ class LocalOperationBackend:
             }
         else:
             preview = self._resolved_mutation_preview(request, operation)
-        owner_fingerprint = preview.get("plan_fingerprint")
+        owner_fingerprint = preview.get("preview_fingerprint")
         if not isinstance(owner_fingerprint, str):
-            owner_fingerprint = _plan_fingerprint(preview)
-            preview["plan_fingerprint"] = owner_fingerprint
+            owner_fingerprint = _preview_fingerprint(preview)
+            preview["preview_fingerprint"] = owner_fingerprint
         if request.parameters.get("confirmed") is True:
-            supplied = request.parameters.get("plan_fingerprint")
+            supplied = request.parameters.get("preview_fingerprint")
             if supplied != owner_fingerprint:
                 raise ApplicationError(
-                    "stale_plan",
-                    "The mutation plan changed or was not reviewed; preview it again.",
+                    "stale_preview",
+                    "The mutation preview changed or was not reviewed; resolve it again.",
                     next_actions=(
                         f"mastic {request.name.replace('.', ' ')} --help",
-                        "review the newly resolved plan before confirming",
+                        "review the newly resolved preview before confirming",
                     ),
                 )
         requires_supervisor = (
@@ -198,7 +198,7 @@ class LocalOperationBackend:
         parameters = {
             key: _plain(value)
             for key, value in request.parameters.items()
-            if key not in {"confirmed", "plan_fingerprint"}
+            if key not in {"confirmed", "preview_fingerprint"}
         }
         config = self._config()
         config_revision = (
@@ -294,7 +294,7 @@ class LocalOperationBackend:
         return resolved
 
     def _validate_request(self, request: OperationRequest) -> None:
-        """Resolve named resources before returning an exact Plan."""
+        """Resolve named resources before returning a mutation preview."""
         name = request.name
         config = self._config()
         if name == "runtime.inspect":
@@ -1411,9 +1411,9 @@ def _result(operation: str, **value: object) -> Mapping[str, object]:
     return {"schema_version": 1, "operation": operation, **value}
 
 
-def _plan_fingerprint(plan: Mapping[str, object]) -> str:
+def _preview_fingerprint(preview: Mapping[str, object]) -> str:
     canonical = json.dumps(
-        _plain(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        _plain(preview), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 

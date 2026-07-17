@@ -94,7 +94,7 @@ class CompositionTests(unittest.TestCase):
                     {
                         "runtime": "optiq",
                         "confirmed": True,
-                        "plan_fingerprint": preview.value["plan_fingerprint"],
+                        "preview_fingerprint": preview.value["preview_fingerprint"],
                     },
                 )
             )

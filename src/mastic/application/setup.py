@@ -1,7 +1,7 @@
 """Supported-v1 guided setup and product removal plans.
 
-The planner is deliberately side-effect free.  Interfaces show and edit its
-exact plan, while the Supervisor executes steps and persists the returned
+The planner is deliberately side-effect free. Interfaces show and edit its
+resolved setup preview, while the Supervisor executes steps and persists the returned
 evidence.  This keeps interactive and noninteractive setup on one resumable
 contract.
 """

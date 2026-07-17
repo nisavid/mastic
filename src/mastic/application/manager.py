@@ -17,7 +17,7 @@ from .dispatch import (
 
 @dataclass(frozen=True, slots=True)
 class PreparedOperation:
-    """A validated operation plan ready to cross a mutation boundary."""
+    """A validated operation preview ready to cross a mutation boundary."""
 
     requires_supervisor: bool
     execute: Callable[[], Mapping[str, object]]
@@ -48,25 +48,25 @@ class ApplicationManager:
         def preview(request: OperationRequest) -> OperationResult:
             operation = self._catalogue[request.name]
             prepared = self._backend.prepare(request)
-            plan = tuple(dict(event) for event in prepared.events)
+            preview_events = tuple(dict(event) for event in prepared.events)
             identity = next(
                 (
-                    event["plan_fingerprint"]
-                    for event in reversed(plan)
-                    if isinstance(event.get("plan_fingerprint"), str)
+                    event["preview_fingerprint"]
+                    for event in reversed(preview_events)
+                    if isinstance(event.get("preview_fingerprint"), str)
                 ),
                 None,
             )
             value = {
                 "schema_version": 1,
                 "operation": request.name,
-                "state": "planned",
+                "state": "review_required",
                 "confirmation_required": operation.confirmation,
                 "requires_supervisor": prepared.requires_supervisor,
-                "plan": plan,
+                "preview": preview_events,
             }
             if identity is not None:
-                value["plan_fingerprint"] = identity
+                value["preview_fingerprint"] = identity
             return OperationResult(
                 request.name,
                 value,
@@ -88,7 +88,7 @@ class ApplicationManager:
                     f"{request.name} requires review and explicit confirmation",
                     next_actions=(
                         f"mastic {request.name.replace('.', ' ')} --help",
-                        "rerun with --yes after reviewing the complete plan",
+                        "rerun with --yes after reviewing the resolved preview",
                     ),
                 )
             if prepared.requires_supervisor and (
