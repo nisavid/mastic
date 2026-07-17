@@ -320,6 +320,34 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
         self.assertNotIn("hindsight", records)
 
+    def test_configure_translates_unknown_sampling_fields_to_invalid_parameter(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+
+        def invalid_configuration(name, parameters, settings):
+            raise ValueError("unknown sampling profile fields: temprature")
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            invalid_configuration,
+            request=lambda target, endpoint, model, sampling: {},
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.configure",
+                {
+                    "application_target": "codex",
+                    "service": "coding",
+                    "sampling_profiles": {"coding": {"temprature": 0.6}},
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_parameter")
+        self.assertIn("temprature", str(raised.exception))
+        self.assertEqual(adapter.calls, [])
+
     def test_extra_application_target_profiles_fail_before_external_apply(self) -> None:
         adapter = FakeApplicationTargetAdapter()
         port = ApplicationTargetOperationPort(

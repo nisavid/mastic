@@ -195,15 +195,8 @@ class ApplicationTargetOwnershipDiscovery:
             return ()
         ownership: list[ApplicationTargetOwnership] = []
         for manifest_path in sorted(self.ownership_dir.iterdir()):
-            if integration == "codex" and manifest_path.name != "codex.ownership.json":
-                continue
-            if integration == "hindsight" and not (
-                manifest_path.name.startswith("hindsight-")
-                and manifest_path.name.endswith(".ownership.json")
-            ):
-                continue
             try:
-                recognized = self._recognize(manifest_path)
+                recognized = self._recognize(manifest_path, integration)
             except ValueError as error:
                 raise ApplicationTargetOwnershipRecoveryRequired(
                     "invalid Hindsight ownership manifest name"
@@ -211,8 +204,6 @@ class ApplicationTargetOwnershipDiscovery:
             if recognized is None:
                 continue
             owned_integration, profile, config_path, backup_path = recognized
-            if integration is not None and owned_integration != integration:
-                continue
             try:
                 manifest = _load_manifest(manifest_path, owned_integration, False)
                 _validate_manifest_paths(manifest, config_path, backup_path)
@@ -262,15 +253,19 @@ class ApplicationTargetOwnershipDiscovery:
         return hindsight[0]
 
     def _recognize(
-        self, manifest_path: Path
+        self, manifest_path: Path, integration: str | None
     ) -> tuple[str, str | None, Path, Path] | None:
         if manifest_path.name == "codex.ownership.json":
+            if integration == "hindsight":
+                return None
             return (
                 "codex",
                 None,
                 self.codex_config_path,
                 self.ownership_dir / "codex.config.backup",
             )
+        if integration == "codex":
+            return None
         prefix = "hindsight-"
         suffix = ".ownership.json"
         if not manifest_path.name.startswith(prefix) or not manifest_path.name.endswith(
