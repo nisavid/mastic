@@ -1,6 +1,6 @@
-# mastic architecture
+# MASTIC architecture
 
-mastic is a per-user local inference manager for Apple silicon. It manages
+MASTIC is a per-user local inference manager for Apple silicon. It manages
 runtimes, exact model revisions, named inference services, one stable loopback
 Gateway, and the Supervisor that owns durable work and live processes.
 
@@ -67,7 +67,7 @@ cancellation semantics that an operation owner cannot guarantee.
   Service names across their successive Service Runs.
 - Runtime Installations are immutable side-by-side environments under the
   per-user data directory.
-- Model bytes stay in official Hugging Face or declared local caches. mastic
+- Model bytes stay in official Hugging Face or declared local caches. MASTIC
   records Model Installations, aliases, provenance, and references without
   claiming ownership of shared blobs.
 
