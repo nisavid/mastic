@@ -884,7 +884,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(state.operations(), ())
             self.assertEqual(state.events(), ())
 
-    def test_setup_prepares_exact_plan_and_defers_activation_to_remote_steps(
+    def test_setup_prepares_exact_preview_and_defers_activation_to_remote_steps(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -897,7 +897,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(prepared.events[0]["preview_fingerprint"], "sha256:exact")
             self.assertEqual(setup.calls, [])
 
-    def test_product_removal_previews_exact_plan_without_starting_supervisor(
+    def test_product_removal_previews_exact_operations_without_starting_supervisor(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:

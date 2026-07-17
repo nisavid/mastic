@@ -224,7 +224,7 @@ class SetupOperationPortTests(unittest.TestCase):
             baseline["preview_fingerprint"], selected["preview_fingerprint"]
         )
 
-    def test_confirmed_exact_plan_orchestrates_owners_and_persists_evidence(self):
+    def test_confirmed_exact_preview_orchestrates_owners_and_persists_evidence(self):
         port = self.port()
         preview = port.preview({})
 
@@ -301,7 +301,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertNotIn("mastic ready", verification_evidence)
         self.assertIn("response_sha256", verification_evidence)
 
-    def test_confirmed_plan_executes_each_selected_target_canary(self) -> None:
+    def test_confirmed_preview_executes_each_selected_target_canary(self) -> None:
         self.application_targets.results["application-target.test"] = (
             lambda parameters: {
                 "profile": parameters["profile"],
@@ -532,7 +532,7 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "offline_blocked")
         self.assertEqual(self.runtime.calls, [])
 
-    def test_removal_plan_retains_shared_cache_and_unrelated_settings(self):
+    def test_removal_preview_retains_shared_cache_and_unrelated_settings(self):
         port = self.port()
         preview = port.preview_removal()
 
