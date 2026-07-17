@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import plistlib
@@ -22,15 +21,16 @@ from mastic.application.config_schema import (
     ApplicationTargetSamplingSettings,
     ApplicationTargetSettings,
     MasticConfig,
-    validate_hindsight_profile_name,
     validate_config,
 )
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import RemovalInventory, SetupPreflight
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
+    ApplicationTargetOwnershipDiscovery,
     CodexModelMetadata,
     LocalApplicationTargetIntegrationFactory,
+    OwnershipDiscoveryPolicy,
     SamplingProfile,
 )
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
@@ -521,59 +521,21 @@ def _removal_application_targets(
     paths: MasticPaths, config: MasticConfig, home: Path
 ) -> tuple[str, ...]:
     targets = set(config.application_targets)
-    ownership_dir = paths.state_dir / "application-targets"
+    discovery = ApplicationTargetOwnershipDiscovery(
+        codex_config_path=home / ".codex/config.toml",
+        hindsight_profiles_dir=home / ".hindsight/profiles",
+        ownership_dir=paths.state_dir / "application-targets",
+    )
     try:
-        directory_metadata = ownership_dir.lstat()
-    except FileNotFoundError:
-        return tuple(sorted(targets))
-    if stat.S_ISLNK(directory_metadata.st_mode) or not stat.S_ISDIR(
-        directory_metadata.st_mode
-    ):
-        raise _removal_recovery_required("application targets")
-
-    hindsight_profiles: list[str] = []
-    for manifest_path in ownership_dir.iterdir():
-        if manifest_path.name == "codex.ownership.json":
-            integration = "codex"
-            config_path = home / ".codex/config.toml"
-            backup_path = ownership_dir / "codex.config.backup"
-        elif manifest_path.name.startswith(
-            "hindsight-"
-        ) and manifest_path.name.endswith(".ownership.json"):
-            integration = "hindsight"
-            profile = manifest_path.name[len("hindsight-") : -len(".ownership.json")]
-            try:
-                profile = validate_hindsight_profile_name(profile)
-            except ValueError as error:
-                raise _removal_recovery_required(integration) from error
-            config_path = home / f".hindsight/profiles/{profile}.env"
-            backup_path = ownership_dir / f"hindsight-{profile}.config.backup"
-        else:
-            continue
-
-        try:
-            metadata = manifest_path.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                raise ValueError("ownership manifest must be a regular file")
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (
-                not isinstance(manifest, dict)
-                or manifest.get("schema_version") != 1
-                or manifest.get("integration") != integration
-                or not isinstance(manifest.get("fields"), list)
-                or manifest.get("config_path") != str(config_path)
-                or manifest.get("backup_path") != str(backup_path)
-            ):
-                raise ValueError("invalid ownership manifest")
-        except (OSError, UnicodeError, ValueError) as error:
-            raise _removal_recovery_required(integration) from error
-
-        targets.add(integration)
-        if integration == "hindsight":
-            hindsight_profiles.append(profile)
-
-    if len(hindsight_profiles) > 1:
-        raise _removal_recovery_required("hindsight")
+        ownership = discovery.discover(OwnershipDiscoveryPolicy.STRICT)
+        desired_hindsight = config.application_targets.get("hindsight")
+        discovery.reconcile_hindsight(
+            desired_hindsight.profile if desired_hindsight is not None else None,
+            ownership,
+        )
+    except (OSError, ValueError) as error:
+        raise _removal_recovery_required("application targets") from error
+    targets.update(item.integration for item in ownership)
     return tuple(sorted(targets))
 
 

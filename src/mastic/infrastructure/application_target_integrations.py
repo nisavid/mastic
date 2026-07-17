@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+from enum import Enum
 from ipaddress import ip_address
 from pathlib import Path
 from types import MappingProxyType
@@ -233,6 +234,146 @@ class ApplicationTargetIntegrationConflict(RuntimeError):
     """A managed field or snapshot changed outside mastic."""
 
 
+class OwnershipDiscoveryPolicy(Enum):
+    """How ownership discovery handles recognizable invalid manifests."""
+
+    INSPECT_RECOVERY = "inspect-recovery"
+    STRICT = "strict"
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationTargetOwnership:
+    integration: str
+    profile: str | None
+    config_path: Path
+    manifest_path: Path
+    backup_path: Path
+    valid: bool
+
+
+class ApplicationTargetOwnershipDiscovery:
+    """Discover and validate application-target ownership manifests once."""
+
+    def __init__(
+        self,
+        *,
+        codex_config_path: str | Path,
+        hindsight_profiles_dir: str | Path,
+        ownership_dir: str | Path,
+    ) -> None:
+        self.codex_config_path = Path(codex_config_path).expanduser()
+        self.hindsight_profiles_dir = Path(hindsight_profiles_dir).expanduser()
+        self.ownership_dir = Path(ownership_dir).expanduser()
+        for path, label in (
+            (self.codex_config_path, "Codex config path"),
+            (self.hindsight_profiles_dir, "Hindsight profiles directory"),
+            (self.ownership_dir, "application-target ownership directory"),
+        ):
+            if not path.is_absolute():
+                raise ValueError(f"{label} must be absolute")
+
+    def discover(
+        self,
+        policy: OwnershipDiscoveryPolicy,
+        *,
+        integration: str | None = None,
+    ) -> tuple[ApplicationTargetOwnership, ...]:
+        if integration not in {None, "codex", "hindsight"}:
+            raise ValueError(
+                f"unsupported Application Configuration Target: {integration}"
+            )
+        _safe_directory(self.ownership_dir, "application-target ownership directory")
+        if not self.ownership_dir.exists():
+            return ()
+        ownership: list[ApplicationTargetOwnership] = []
+        for manifest_path in sorted(self.ownership_dir.iterdir()):
+            try:
+                recognized = self._recognize(manifest_path)
+            except ValueError as error:
+                raise ValueError("invalid Hindsight ownership manifest name") from error
+            if recognized is None:
+                continue
+            owned_integration, profile, config_path, backup_path = recognized
+            if integration is not None and owned_integration != integration:
+                continue
+            valid = True
+            try:
+                manifest = _load_manifest(manifest_path, owned_integration, False)
+                _validate_manifest_paths(manifest, config_path, backup_path)
+            except (
+                ApplicationTargetIntegrationConflict,
+                OSError,
+                UnicodeError,
+                ValueError,
+            ) as error:
+                valid = False
+                if policy is OwnershipDiscoveryPolicy.STRICT:
+                    raise ValueError(
+                        f"invalid {owned_integration} ownership manifest"
+                    ) from error
+            ownership.append(
+                ApplicationTargetOwnership(
+                    owned_integration,
+                    profile,
+                    config_path,
+                    manifest_path,
+                    backup_path,
+                    valid,
+                )
+            )
+        hindsight = [item for item in ownership if item.integration == "hindsight"]
+        if len(hindsight) > 1:
+            raise ValueError(
+                "Hindsight profile recovery requires exactly one recognizable ownership manifest"
+            )
+        return tuple(ownership)
+
+    @staticmethod
+    def reconcile_hindsight(
+        desired_profile: object,
+        ownership: tuple[ApplicationTargetOwnership, ...],
+    ) -> ApplicationTargetOwnership | None:
+        hindsight = tuple(item for item in ownership if item.integration == "hindsight")
+        if not hindsight:
+            return None
+        profile = (
+            validate_hindsight_profile_name(desired_profile)
+            if desired_profile is not None
+            else None
+        )
+        if profile is not None and hindsight[0].profile != profile:
+            raise ValueError(
+                "Desired Hindsight profile does not match the owned profile"
+            )
+        return hindsight[0]
+
+    def _recognize(
+        self, manifest_path: Path
+    ) -> tuple[str, str | None, Path, Path] | None:
+        if manifest_path.name == "codex.ownership.json":
+            return (
+                "codex",
+                None,
+                self.codex_config_path,
+                self.ownership_dir / "codex.config.backup",
+            )
+        prefix = "hindsight-"
+        suffix = ".ownership.json"
+        if not manifest_path.name.startswith(prefix) or not manifest_path.name.endswith(
+            suffix
+        ):
+            return None
+        profile = validate_hindsight_profile_name(
+            manifest_path.name[len(prefix) : -len(suffix)]
+        )
+        return (
+            "hindsight",
+            profile,
+            self.hindsight_profiles_dir / f"{profile}.env",
+            self.ownership_dir / f"hindsight-{profile}.config.backup",
+        )
+
+
 Replace = Callable[[Path, bytes], None]
 TestResult = TypeVar("TestResult")
 TestRequest = Callable[[str, str, Mapping[str, object]], TestResult]
@@ -253,13 +394,11 @@ class LocalApplicationTargetIntegrationFactory:
         self.hindsight_profiles_dir = Path(hindsight_profiles_dir).expanduser()
         self.ownership_dir = Path(ownership_dir).expanduser()
         self._credential_reader = credential_reader
-        for path, label in (
-            (self.codex_config_path, "Codex config path"),
-            (self.hindsight_profiles_dir, "Hindsight profiles directory"),
-            (self.ownership_dir, "application-target ownership directory"),
-        ):
-            if not path.is_absolute():
-                raise ValueError(f"{label} must be absolute")
+        self._ownership = ApplicationTargetOwnershipDiscovery(
+            codex_config_path=self.codex_config_path,
+            hindsight_profiles_dir=self.hindsight_profiles_dir,
+            ownership_dir=self.ownership_dir,
+        )
 
     def __call__(
         self,
@@ -281,15 +420,30 @@ class LocalApplicationTargetIntegrationFactory:
         if name != "hindsight":
             raise ValueError(f"unsupported Application Configuration Target: {name}")
         _safe_directory(self.hindsight_profiles_dir, "Hindsight profiles directory")
-        if operation == "application-target.configure":
-            profile = parameters.get("profile")
-        elif settings is None and operation in {
-            "application-target.inspect",
-            "application-target.remove",
-        }:
-            profile = self._owned_hindsight_profile()
-        else:
-            profile = settings.profile if settings is not None else None
+        policy = (
+            OwnershipDiscoveryPolicy.INSPECT_RECOVERY
+            if operation == "application-target.inspect"
+            else OwnershipDiscoveryPolicy.STRICT
+        )
+        ownership = self._ownership.discover(policy, integration="hindsight")
+        desired_profile = (
+            parameters.get("profile")
+            if operation == "application-target.configure"
+            else settings.profile
+            if settings is not None
+            else None
+        )
+        owned = self._ownership.reconcile_hindsight(
+            desired_profile,
+            ownership,
+        )
+        profile = (
+            desired_profile
+            if desired_profile is not None
+            else owned.profile
+            if owned
+            else None
+        )
         profile_name = validate_hindsight_profile_name(profile)
         config_path = self.hindsight_profiles_dir / f"{profile_name}.env"
         _safe_target(config_path, "Hindsight profile")
@@ -299,32 +453,6 @@ class LocalApplicationTargetIntegrationFactory:
             self.ownership_dir / f"hindsight-{profile_name}.config.backup",
             credential_reader=self._credential_reader,
         )
-
-    def _owned_hindsight_profile(self) -> str:
-        profiles = []
-        prefix = "hindsight-"
-        suffix = ".ownership.json"
-        for manifest_path in self.ownership_dir.glob(f"{prefix}*{suffix}"):
-            profile = manifest_path.name[len(prefix) : -len(suffix)]
-            try:
-                profile = validate_hindsight_profile_name(profile)
-                config_path = self.hindsight_profiles_dir / f"{profile}.env"
-                backup_path = self.ownership_dir / f"hindsight-{profile}.config.backup"
-                manifest = _load_manifest(manifest_path, "hindsight", False)
-                _validate_manifest_paths(manifest, config_path, backup_path)
-            except (
-                ApplicationTargetIntegrationConflict,
-                OSError,
-                UnicodeError,
-                ValueError,
-            ):
-                continue
-            profiles.append(profile)
-        if len(profiles) != 1:
-            raise ValueError(
-                "Hindsight profile recovery requires exactly one valid ownership manifest"
-            )
-        return profiles[0]
 
 
 class CodexApplicationTargetIntegration:
@@ -612,7 +740,20 @@ class CodexApplicationTargetIntegration:
             raise
 
     def inspect(self) -> Mapping[str, object]:
-        manifest = self._manifest(optional=True)
+        try:
+            manifest = self._manifest(optional=True)
+        except (
+            ApplicationTargetIntegrationConflict,
+            OSError,
+            UnicodeError,
+            ValueError,
+        ):
+            return {
+                "state": "malformed",
+                "detail": "Codex ownership manifest is malformed.",
+                "catalog_path": str(self.catalog_path),
+                "next_actions": ["mastic application-target configure codex"],
+            }
         if not manifest:
             return {
                 "state": "unmanaged",
