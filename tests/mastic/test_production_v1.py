@@ -44,6 +44,7 @@ from mastic.infrastructure.production_host import (
     default_sampling,
     removal_inventory,
     resolve_uv,
+    sampling_profile,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
 
@@ -421,6 +422,7 @@ class ProductionCompositionTests(unittest.TestCase):
         repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
         revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
         coding = default_sampling(repository, revision, "codex")["coding"]
+        self.assertIs(sampling_profile(coding), coding)
         self.assertEqual(coding.temperature, 0.6)
         self.assertEqual(coding.top_p, 0.95)
         self.assertEqual(coding.top_k, 20)

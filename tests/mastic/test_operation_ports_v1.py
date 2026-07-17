@@ -3,6 +3,7 @@ import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.application.dispatch import ApplicationError
 from mastic.application.config_schema import (
     ApplicationTargetSettings,
@@ -18,7 +19,6 @@ from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
     ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
-    SamplingProfile,
 )
 
 
@@ -188,12 +188,13 @@ class OperationPortTests(unittest.TestCase):
         adapter = FakeApplicationTargetAdapter()
         records = []
         persisted = {}
+        coding_profile = SamplingProfile(temperature=0.0)
 
         def configuration(name, parameters, settings):
             return ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1",
                 "coding",
-                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                sampling_profiles={"coding": coding_profile},
                 service_identity="coding-internal",
             )
 
@@ -227,6 +228,7 @@ class OperationPortTests(unittest.TestCase):
 
         self.assertTrue(configured["result"]["changed"])
         self.assertEqual(records[0][1].service, "coding-internal")
+        self.assertIs(records[0][1].sampling["coding"], coding_profile)
         self.assertEqual(tested["response"]["target"], "codex")
         self.assertEqual(tested["response"]["model"], "coding")
         self.assertTrue(removed["changed"])

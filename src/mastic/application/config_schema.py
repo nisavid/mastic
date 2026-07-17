@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
-import math
 from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping
-from urllib.parse import urlsplit
 
+from mastic.application.application_targets import SamplingProfile
 from mastic.domain.resources import (
     ActivationPolicy,
     InferenceService,
@@ -44,20 +43,8 @@ class ConfiguredRuntime:
     bundle_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ApplicationTargetSamplingSettings:
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    min_p: float | None = None
-    presence_penalty: float | None = None
-    repetition_penalty: float | None = None
-    max_tokens: int | None = None
-    enable_thinking: bool | None = None
-    preserve_thinking: bool | None = None
-    upstream_profile: str | None = None
-    source_url: str | None = None
-    source_revision: str | None = None
+# Compatibility name for callers of the supported-v1 configuration module.
+ApplicationTargetSamplingSettings = SamplingProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,138 +427,12 @@ def _application_targets(
                     "source_revision",
                 },
             )
-            temperature = values.get("temperature")
-            top_p = values.get("top_p")
-            top_k = values.get("top_k")
-            min_p = values.get("min_p")
-            presence_penalty = values.get("presence_penalty")
-            repetition_penalty = values.get("repetition_penalty")
-            max_tokens = values.get("max_tokens")
-            enable_thinking = values.get("enable_thinking")
-            preserve_thinking = values.get("preserve_thinking")
-            upstream_profile = values.get("upstream_profile")
-            source_url = values.get("source_url")
-            source_revision = values.get("source_revision")
-            numeric_values = {
-                "temperature": temperature,
-                "top_p": top_p,
-                "min_p": min_p,
-                "presence_penalty": presence_penalty,
-                "repetition_penalty": repetition_penalty,
-            }
-            if any(
-                value is not None
-                and type(value) in {int, float}
-                and not math.isfinite(float(value))
-                for value in numeric_values.values()
-            ):
+            try:
+                sampling[sampling_name] = SamplingProfile.from_mapping(values)
+            except ValueError as error:
                 raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} numeric values must be finite"
-                )
-            if temperature is not None and (
-                type(temperature) not in {int, float} or temperature < 0
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} temperature must be nonnegative"
-                )
-            if top_p is not None and (
-                type(top_p) not in {int, float} or not 0 < top_p <= 1
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} top_p must be in (0, 1]"
-                )
-            if top_k is not None and (type(top_k) is not int or top_k < 0):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} top_k must be a nonnegative integer"
-                )
-            if min_p is not None and (
-                type(min_p) not in {int, float} or not 0 <= min_p <= 1
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} min_p must be in [0, 1]"
-                )
-            if presence_penalty is not None and (
-                type(presence_penalty) not in {int, float}
-                or not -2 <= presence_penalty <= 2
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} presence_penalty must be in [-2, 2]"
-                )
-            if repetition_penalty is not None and (
-                type(repetition_penalty) not in {int, float} or repetition_penalty <= 0
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} repetition_penalty must be positive"
-                )
-            if max_tokens is not None and (
-                type(max_tokens) is not int or max_tokens <= 0
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} max_tokens must be positive"
-                )
-            if enable_thinking is not None and type(enable_thinking) is not bool:
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} enable_thinking must be boolean"
-                )
-            if preserve_thinking is not None and type(preserve_thinking) is not bool:
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} preserve_thinking must be boolean"
-                )
-            provenance = (upstream_profile, source_url, source_revision)
-            if any(value is not None for value in provenance) and not all(
-                value is not None for value in provenance
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} provenance must include upstream_profile, source_url, and source_revision"
-                )
-            if upstream_profile is not None and (
-                not isinstance(upstream_profile, str)
-                or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", upstream_profile)
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} upstream_profile is invalid"
-                )
-            if source_url is not None:
-                parsed_source = (
-                    urlsplit(source_url) if isinstance(source_url, str) else None
-                )
-                if (
-                    parsed_source is None
-                    or parsed_source.scheme != "https"
-                    or not parsed_source.hostname
-                    or parsed_source.username is not None
-                    or parsed_source.password is not None
-                ):
-                    raise ConfigSchemaError(
-                        f"Application Configuration Target {name!r} sampling profile {sampling_name!r} source_url must be HTTPS"
-                    )
-            if source_revision is not None and (
-                not isinstance(source_revision, str)
-                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source_revision)
-            ):
-                raise ConfigSchemaError(
-                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r} source_revision must be an exact commit SHA"
-                )
-            sampling[sampling_name] = ApplicationTargetSamplingSettings(
-                temperature=float(temperature) if temperature is not None else None,
-                top_p=float(top_p) if top_p is not None else None,
-                top_k=top_k,
-                min_p=float(min_p) if min_p is not None else None,
-                presence_penalty=(
-                    float(presence_penalty) if presence_penalty is not None else None
-                ),
-                repetition_penalty=(
-                    float(repetition_penalty)
-                    if repetition_penalty is not None
-                    else None
-                ),
-                max_tokens=max_tokens,
-                enable_thinking=enable_thinking,
-                preserve_thinking=preserve_thinking,
-                upstream_profile=upstream_profile,
-                source_url=source_url,
-                source_revision=source_revision,
-            )
+                    f"Application Configuration Target {name!r} sampling profile {sampling_name!r}: {error}"
+                ) from error
         required_profiles = (
             {"coding"}
             if kind == "codex"
