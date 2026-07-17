@@ -502,6 +502,22 @@ def create_gateway(
                 activity.end(service)
             raise
 
+        if is_responses and not _has_identity_content_encoding(upstream):
+            try:
+                await upstream.aclose()
+            except Exception:
+                pass
+            finally:
+                if activity is not None:
+                    activity.end(service)
+            return _error_response(
+                502,
+                "unsupported_upstream_response_encoding",
+                f"Inference Service {service!r} returned a compressed Responses body that MASTIC cannot adapt safely.",
+                action="Configure the Inference Service to return Content-Encoding: identity and retry.",
+                parameter="model",
+            )
+
         return _UpstreamStreamingResponse(
             upstream,
             responses_adapter=responses_adapter,
@@ -633,6 +649,13 @@ def _validated_upstream_origin(endpoint: str) -> str:
     if not address.is_loopback or port is None:
         raise ValueError("Upstream Endpoint must be a loopback HTTP origin.")
     return endpoint.rstrip("/")
+
+
+def _has_identity_content_encoding(upstream: httpx.Response) -> bool:
+    return upstream.headers.get("content-encoding", "").strip().lower() in {
+        "",
+        "identity",
+    }
 
 
 def _origin_is_allowed(origin: str | None) -> bool:

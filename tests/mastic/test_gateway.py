@@ -847,6 +847,46 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
+    def test_responses_rejects_gzip_before_decoding_and_releases_activity(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream = ChunkStream([b"compressed body must not be consumed"])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={
+                    "content-type": "application/json",
+                    "content-encoding": "gzip",
+                },
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "unsupported_upstream_response_encoding",
+        )
+        self.assertIn("Content-Encoding: identity", response.json()["error"]["action"])
+        self.assertEqual(stream.pulled, 0)
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
     def test_responses_sse_frame_limit_closes_upstream_and_releases_activity(
         self,
     ) -> None:
