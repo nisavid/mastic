@@ -11,7 +11,7 @@ from mastic.application.config_schema import validate_config
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.control_protocol import MAX_FRAME_BYTES
 from mastic.infrastructure.model_supply import (
-    CacheDeletionPlan,
+    CacheDeletionPreview,
     CacheInventory,
     CachedRevision,
     ModelAlias,
@@ -33,7 +33,7 @@ from mastic.infrastructure.runtime_supply import (
     RuntimeInstallation,
 )
 from mastic.infrastructure.supply_ports import (
-    CacheMovePlan,
+    CacheMovePreview,
     ExactRevisionModelSecurity,
     ModelSecurityPolicyError,
     ModelSupplyPort,
@@ -207,23 +207,23 @@ class FakeModelSupply:
         self.calls.append(("inventory",))
         return CacheInventory(self.revisions, "local-observed", ())
 
-    def plan_cache_deletion(
+    def preview_cache_deletion(
         self,
         commit_hashes: tuple[str, ...],
         *,
         installations: tuple[ModelInstallation, ...] = (),
-    ) -> CacheDeletionPlan:
-        self.calls.append(("plan_cache_deletion", commit_hashes, installations))
+    ) -> CacheDeletionPreview:
+        self.calls.append(("preview_cache_deletion", commit_hashes, installations))
         blocked = tuple(
             installation.installation_id
             for installation in installations
             if installation.revision.commit_sha in commit_hashes
         )
         if blocked:
-            return CacheDeletionPlan(False, commit_hashes, blocked, 0)
+            return CacheDeletionPreview(False, commit_hashes, blocked, 0)
         strategy = FakeDeletionStrategy()
         self.strategies.append(strategy)
-        return CacheDeletionPlan(
+        return CacheDeletionPreview(
             True,
             commit_hashes,
             (),
@@ -234,23 +234,23 @@ class FakeModelSupply:
 
 class FakeCacheMover:
     def __init__(self) -> None:
-        self.plans: list[CacheMovePlan] = []
-        self.executed: list[CacheMovePlan] = []
+        self.previews: list[CacheMovePreview] = []
+        self.executed: list[CacheMovePreview] = []
 
-    def plan(self, revision: CachedRevision, destination: Path) -> CacheMovePlan:
-        plan = CacheMovePlan(
+    def preview(self, revision: CachedRevision, destination: Path) -> CacheMovePreview:
+        preview = CacheMovePreview(
             revision_id=revision.revision_id,
             source=revision.snapshot_path,
             destination=destination,
             bytes_to_copy=revision.size_on_disk,
             steps=("copy", "verify", "publish"),
         )
-        self.plans.append(plan)
-        return plan
+        self.previews.append(preview)
+        return preview
 
-    def execute(self, plan: CacheMovePlan) -> Path:
-        self.executed.append(plan)
-        return plan.destination
+    def execute(self, preview: CacheMovePreview) -> Path:
+        self.executed.append(preview)
+        return preview.destination
 
 
 class FakeModelIntelligence:
@@ -345,7 +345,7 @@ port = 8766
         self.assertEqual(installed.capabilities, frozenset(result["capabilities"]))
         self.assertEqual(installed.bundle_id, result["bundle_id"])
         self.assertEqual(result["lock_sha256"], bundle.lock_sha256)
-        self.assertEqual(result["plan"]["operation"], "install")
+        self.assertEqual(result["preview"]["operation"], "install")
 
     def test_runtime_install_initializes_supported_v1_desired_state(self) -> None:
         store = ConfigStore(self.root / "fresh.toml", validate_config)
@@ -400,7 +400,7 @@ route = "coding"
         self.assertEqual(
             config.services["coding"].runtime_installation, "optiq-0.3-custom"
         )
-        self.assertEqual(result["plan"]["referenced_services"], ["coding"])
+        self.assertEqual(result["preview"]["referenced_services"], ["coding"])
 
     def test_runtime_update_honors_explicit_channel_contract(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
@@ -507,7 +507,7 @@ mtp = true
             "runtime.remove", {"resource": "optiq-old", "confirmed": True}
         )
 
-        self.assertTrue(result["plan"]["allowed"])
+        self.assertTrue(result["preview"]["allowed"])
         self.assertEqual(files.removed, [installation.root])
         self.assertNotIn("optiq-old", self.store.load().value.runtimes)
 
@@ -718,7 +718,7 @@ route = "coding"
             port.execute("model.repair", {"resource": "external"})
         self.assertTrue(snapshot.exists())
         self.assertEqual(
-            port.execute("model.cache.prune", {"confirmed": True})["plan"][
+            port.execute("model.cache.prune", {"confirmed": True})["preview"][
                 "revision_hashes"
             ],
             [],
@@ -1046,7 +1046,7 @@ route = "coding"
         result = port.execute(
             "model.cache.evict", {"resource": _SHA_A, "confirmed": True}
         )
-        self.assertTrue(result["plan"]["allowed"])
+        self.assertTrue(result["preview"]["allowed"])
         self.assertTrue(supply.strategies[-1].executed)
 
     def test_cache_prune_deletes_only_unreferenced_revisions(self) -> None:
@@ -1073,7 +1073,7 @@ route = "coding"
 
         result = port.execute("model.cache.prune", {"confirmed": True})
 
-        self.assertEqual(result["plan"]["revision_hashes"], [_SHA_B])
+        self.assertEqual(result["preview"]["revision_hashes"], [_SHA_B])
         self.assertTrue(supply.strategies[-1].executed)
 
     def test_cache_move_exposes_plan_and_confirms_source_cleanup(self) -> None:
@@ -1108,7 +1108,7 @@ route = "coding"
                 "confirmed": True,
             },
         )
-        self.assertEqual(result["plan"]["bytes_to_copy"], 17)
+        self.assertEqual(result["preview"]["bytes_to_copy"], 17)
         self.assertEqual(len(mover.executed), 1)
         self.assertTrue(mover.executed[0].cleanup_source)
 
@@ -1128,7 +1128,7 @@ route = "coding"
         destination = self.root / "destination"
         mover = VerifiedCacheMover()
 
-        published = mover.execute(mover.plan(revision, destination))
+        published = mover.execute(mover.preview(revision, destination))
 
         self.assertEqual(published, destination.resolve())
         self.assertEqual((published / "weights.bin").read_bytes(), b"exact model bytes")

@@ -193,7 +193,7 @@ class LocalOperationBackend:
     def _resolved_mutation_preview(
         self, request: OperationRequest, operation: Operation
     ) -> dict[str, object]:
-        """Resolve a confirmation-bound plan without crossing a mutation boundary."""
+        """Resolve a confirmation-bound preview without crossing a mutation boundary."""
 
         parameters = {
             key: _plain(value)

@@ -684,62 +684,52 @@ def create_gateway(
                 activity.end(service)
             raise
 
-        if is_responses and not _has_identity_content_encoding(upstream):
-            try:
-                await upstream.aclose()
-            except Exception:
-                pass
-            finally:
-                if activity is not None:
-                    activity.end(service)
-            return _error_response(
-                502,
-                "unsupported_upstream_response_encoding",
-                f"Inference Service {service!r} returned a compressed Responses body that MASTIC cannot adapt safely.",
-                action="Configure the Inference Service to return Content-Encoding: identity and retry.",
-                parameter="model",
-            )
+        ownership_transferred = False
+        try:
+            if is_responses and not _has_identity_content_encoding(upstream):
+                return _error_response(
+                    502,
+                    "unsupported_upstream_response_encoding",
+                    f"Inference Service {service!r} returned a compressed Responses body that MASTIC cannot adapt safely.",
+                    action="Configure the Inference Service to return Content-Encoding: identity and retry.",
+                    parameter="model",
+                )
 
-        response_headers = {
-            name: value
-            for name, value in upstream.headers.items()
-            if name.lower() in _RESPONSE_HEADER_ALLOWLIST
-            and (not is_responses or name.lower() != "content-encoding")
-        }
-        if is_responses:
-            assert responses_adapter is not None
-            content_type = (
-                upstream.headers.get("content-type", "")
-                .partition(";")[0]
-                .strip()
-                .lower()
-            )
-            if content_type == "text/event-stream":
-                try:
+            response_headers = {
+                name: value
+                for name, value in upstream.headers.items()
+                if name.lower() in _RESPONSE_HEADER_ALLOWLIST
+                and (not is_responses or name.lower() != "content-encoding")
+            }
+            if is_responses:
+                assert responses_adapter is not None
+                content_type = (
+                    upstream.headers.get("content-type", "")
+                    .partition(";")[0]
+                    .strip()
+                    .lower()
+                )
+                if content_type == "text/event-stream":
                     adapted_stream = await _prefetch_adapted_sse(
                         upstream,
                         responses_adapter,
                         reconstruction,
                         limit=max_response_adaptation_bytes,
                     )
-                except ResponseAdaptationTooLarge:
-                    await _close_upstream_and_release(
-                        upstream, activity, service, suppress_errors=True
+                    response = _UpstreamStreamingResponse(
+                        upstream,
+                        body=adapted_stream,
+                        on_close=(
+                            (lambda: activity.end(service))
+                            if activity is not None
+                            else None
+                        ),
+                        status_code=upstream.status_code,
+                        headers=response_headers,
                     )
-                    return _response_adaptation_error(max_response_adaptation_bytes)
-                return _UpstreamStreamingResponse(
-                    upstream,
-                    body=adapted_stream,
-                    on_close=(
-                        (lambda: activity.end(service))
-                        if activity is not None
-                        else None
-                    ),
-                    status_code=upstream.status_code,
-                    headers=response_headers,
-                )
+                    ownership_transferred = True
+                    return response
 
-            try:
                 adapted_body = await _adapt_non_sse_response(
                     upstream,
                     responses_adapter,
@@ -747,26 +737,38 @@ def create_gateway(
                     content_type=content_type,
                     limit=max_response_adaptation_bytes,
                 )
-            except ResponseAdaptationTooLarge:
-                await _close_upstream_and_release(
-                    upstream, activity, service, suppress_errors=True
+                return Response(
+                    adapted_body,
+                    status_code=upstream.status_code,
+                    headers=response_headers,
                 )
-                return _response_adaptation_error(max_response_adaptation_bytes)
-            await _close_upstream_and_release(
-                upstream, activity, service, suppress_errors=False
-            )
-            return Response(
-                adapted_body,
+
+            response = _UpstreamStreamingResponse(
+                upstream,
+                on_close=(
+                    (lambda: activity.end(service)) if activity is not None else None
+                ),
                 status_code=upstream.status_code,
                 headers=response_headers,
             )
-
-        return _UpstreamStreamingResponse(
-            upstream,
-            on_close=(lambda: activity.end(service)) if activity is not None else None,
-            status_code=upstream.status_code,
-            headers=response_headers,
-        )
+            ownership_transferred = True
+            return response
+        except ResponseAdaptationTooLarge:
+            return _response_adaptation_error(max_response_adaptation_bytes)
+        except (httpx.HTTPError, OSError):
+            return _error_response(
+                502,
+                "upstream_unavailable",
+                f"Inference Service {service!r} stopped while returning a response.",
+                action=f"Run mastic service inspect {service} and retry.",
+                parameter="model",
+                retryable=True,
+            )
+        finally:
+            if not ownership_transferred:
+                await _close_upstream_and_release(
+                    upstream, activity, service, suppress_errors=True
+                )
 
     return Starlette(
         routes=[

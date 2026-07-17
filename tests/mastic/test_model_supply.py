@@ -96,7 +96,7 @@ class FakeHub:
     def cache_inventory(self) -> CacheInventory:
         return self.inventory
 
-    def plan_cache_deletion(self, commit_hashes: tuple[str, ...]):
+    def preview_cache_deletion(self, commit_hashes: tuple[str, ...]):
         self.deletion_calls.append(commit_hashes)
         return self.deletion
 
@@ -226,25 +226,25 @@ class ModelCacheTests(unittest.TestCase):
                 revision="main",
             ).installation
 
-            plan = supply.plan_cache_deletion(
+            preview = supply.preview_cache_deletion(
                 (installation.revision.commit_sha,), installations=(installation,)
             )
 
-            self.assertFalse(plan.allowed)
-            self.assertEqual(plan.blocked_by, (installation.installation_id,))
+            self.assertFalse(preview.allowed)
+            self.assertEqual(preview.blocked_by, (installation.installation_id,))
             self.assertEqual(hub.deletion_calls, [])
 
-    def test_official_cache_deletion_plan_requires_explicit_approval(self) -> None:
+    def test_official_cache_deletion_preview_requires_explicit_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             hub = FakeHub(Path(directory))
-            plan = ModelSupply(hub).plan_cache_deletion(("abc123",))
+            preview = ModelSupply(hub).preview_cache_deletion(("abc123",))
 
-            self.assertTrue(plan.allowed)
-            self.assertEqual(plan.expected_freed_size, 900)
+            self.assertTrue(preview.allowed)
+            self.assertEqual(preview.expected_freed_size, 900)
             self.assertEqual(hub.deletion_calls, [("abc123",)])
             with self.assertRaisesRegex(PermissionError, "explicit approval"):
-                plan.execute()
-            plan.execute(approved=True)
+                preview.execute()
+            preview.execute(approved=True)
             self.assertTrue(hub.deletion.executed)
 
 
@@ -309,14 +309,14 @@ class HuggingFaceHubClientTests(unittest.TestCase):
                     "mlx-community/Qwen", "main", local_files_only=False
                 )
                 inventory = client.cache_inventory()
-                plan = client.plan_cache_deletion(("b" * 40,))
+                preview = client.preview_cache_deletion(("b" * 40,))
 
             self.assertEqual(records[0].repo_id, "mlx-community/Qwen")
             self.assertEqual(records[0].gated, "manual")
             self.assertEqual(resolved, "b" * 40)
             self.assertEqual(inventory.revisions[0].size_on_disk, 321)
             self.assertIsNone(inventory.revisions[0].complete)
-            self.assertIs(plan, deletion)
+            self.assertIs(preview, deletion)
             self.assertIn(("delete_revisions", ("b" * 40,)), calls)
 
 

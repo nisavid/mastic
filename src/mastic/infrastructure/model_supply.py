@@ -155,13 +155,13 @@ class ModelHub(Protocol):
 
     def cache_inventory(self) -> CacheInventory: ...
 
-    def plan_cache_deletion(
+    def preview_cache_deletion(
         self, commit_hashes: tuple[str, ...]
     ) -> HubDeletionStrategy: ...
 
 
 @dataclass(frozen=True)
-class CacheDeletionPlan:
+class CacheDeletionPreview:
     """Reference-aware wrapper around the Hub's official deletion strategy."""
 
     allowed: bool
@@ -174,7 +174,7 @@ class CacheDeletionPlan:
 
     def execute(self, *, approved: bool = False) -> None:
         if not self.allowed or self._strategy is None:
-            raise ModelSupplyError("cache deletion plan is blocked by references")
+            raise ModelSupplyError("cache deletion preview is blocked by references")
         if not approved:
             raise PermissionError("cache deletion requires explicit approval")
         self._strategy.execute()
@@ -323,12 +323,12 @@ class ModelSupply:
     def inventory(self) -> CacheInventory:
         return self._hub.cache_inventory()
 
-    def plan_cache_deletion(
+    def preview_cache_deletion(
         self,
         commit_hashes: tuple[str, ...],
         *,
         installations: tuple[ModelInstallation, ...] = (),
-    ) -> CacheDeletionPlan:
+    ) -> CacheDeletionPreview:
         requested = tuple(dict.fromkeys(commit_hashes))
         if not requested:
             raise ModelSupplyError("cache deletion requires at least one revision")
@@ -340,14 +340,14 @@ class ModelSupply:
             )
         )
         if blocked_by:
-            return CacheDeletionPlan(
+            return CacheDeletionPreview(
                 allowed=False,
                 revision_hashes=requested,
                 blocked_by=blocked_by,
                 expected_freed_size=0,
             )
-        strategy = self._hub.plan_cache_deletion(requested)
-        return CacheDeletionPlan(
+        strategy = self._hub.preview_cache_deletion(requested)
+        return CacheDeletionPreview(
             allowed=True,
             revision_hashes=requested,
             blocked_by=(),
@@ -482,7 +482,7 @@ class HuggingFaceHubClient:
             warnings=warnings,
         )
 
-    def plan_cache_deletion(
+    def preview_cache_deletion(
         self, commit_hashes: tuple[str, ...]
     ) -> HubDeletionStrategy:
         from huggingface_hub import scan_cache_dir
