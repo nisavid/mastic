@@ -222,6 +222,15 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("prefill at 4-7 requests", normalized)
         self.assertIn("8 permits", normalized)
 
+    def test_setup_help_explains_offline_completion_evidence_boundary(self) -> None:
+        result = self.runner.invoke(self.app, ["setup", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        output = " ".join(strip_ansi(result.output).replace("│", " ").split())
+        self.assertIn("Prevent network access", output)
+        self.assertIn("matching durable setup completion evidence", output)
+        self.assertIn("not inferred as ready", output)
+
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])
         self.assertEqual(machine.exit_code, 1)
