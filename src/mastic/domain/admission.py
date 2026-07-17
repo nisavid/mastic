@@ -16,7 +16,7 @@ class FitClass(StrEnum):
 class AdmissionDecision(StrEnum):
     START = "start"
     CONFIRM = "confirm"
-    TRANSITION_PLAN = "transition_plan"
+    TRANSITION_SEQUENCE = "transition_sequence"
 
 
 class PressureLevel(StrEnum):
@@ -28,7 +28,7 @@ class PressureLevel(StrEnum):
 class PressureAction(StrEnum):
     SHED_NEW_WORK = "shed_new_work"
     STOP_LRU_IDLE = "stop_lru_idle"
-    PRESENT_STOP_PLAN = "present_stop_plan"
+    PRESENT_STOP_SEQUENCE = "present_stop_sequence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +44,11 @@ class FitAssessment:
             return AdmissionDecision.START
         if self.classification in {FitClass.BORDERLINE, FitClass.UNKNOWN}:
             return AdmissionDecision.CONFIRM
-        return AdmissionDecision.TRANSITION_PLAN
+        return AdmissionDecision.TRANSITION_SEQUENCE
 
     def approve_transition(self, transitions: tuple[str, ...]) -> tuple[str, ...]:
         if self.classification is FitClass.NO_FIT and not transitions:
-            raise ValueError("no-fit admission requires a named transition plan")
+            raise ValueError("no-fit admission requires a named transition sequence")
         return transitions
 
 
@@ -64,7 +64,7 @@ class RunningService:
 class PressureResult:
     actions: tuple[PressureAction, ...]
     stop_services: tuple[str, ...] = ()
-    operator_stop_plan: tuple[str, ...] = ()
+    operator_stop_sequence: tuple[str, ...] = ()
 
 
 class PressurePolicy:
@@ -84,13 +84,13 @@ class PressurePolicy:
                 (PressureAction.SHED_NEW_WORK, PressureAction.STOP_LRU_IDLE),
                 tuple(item.name for item in idle_unpinned),
             )
-        plan = tuple(
+        sequence = tuple(
             item.name
             for item in sorted(
                 services, key=lambda item: (item.pinned, item.last_used_ns)
             )
         )
         return PressureResult(
-            (PressureAction.SHED_NEW_WORK, PressureAction.PRESENT_STOP_PLAN),
-            operator_stop_plan=plan,
+            (PressureAction.SHED_NEW_WORK, PressureAction.PRESENT_STOP_SEQUENCE),
+            operator_stop_sequence=sequence,
         )

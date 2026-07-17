@@ -5,6 +5,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+from huggingface_hub.errors import CacheNotFound
+
 from mastic.infrastructure.model_supply import (
     CacheInventory,
     CachedRevision,
@@ -249,6 +251,15 @@ class ModelCacheTests(unittest.TestCase):
 
 
 class HuggingFaceHubClientTests(unittest.TestCase):
+    def test_missing_cache_is_an_empty_observed_inventory(self) -> None:
+        with patch(
+            "huggingface_hub.scan_cache_dir",
+            side_effect=CacheNotFound("cache directory is absent", Path("/missing")),
+        ):
+            inventory = HuggingFaceHubClient().cache_inventory()
+
+        self.assertEqual(inventory, CacheInventory((), "local-observed", ()))
+
     def test_official_api_objects_are_normalized_behind_the_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / ("b" * 40)

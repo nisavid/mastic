@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from huggingface_hub.errors import CacheNotFound
+
 
 class ModelSupplyError(ValueError):
     """A model supply operation cannot satisfy its contract."""
@@ -455,7 +457,10 @@ class HuggingFaceHubClient:
     def cache_inventory(self) -> CacheInventory:
         from huggingface_hub import scan_cache_dir
 
-        cache_info = scan_cache_dir()
+        try:
+            cache_info = scan_cache_dir()
+        except CacheNotFound:
+            return CacheInventory((), "local-observed", ())
         warnings = tuple(str(warning) for warning in cache_info.warnings)
         revisions = []
         for repo in cache_info.repos:

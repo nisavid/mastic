@@ -507,7 +507,7 @@ class SupervisorTests(unittest.TestCase):
         result = self.supervisor.reconcile_pressure()
 
         self.assertEqual(result.stopped_services, ("coding",))
-        self.assertEqual(result.operator_stop_plan, ("memory", "pinned"))
+        self.assertEqual(result.operator_stop_sequence, ("memory", "pinned"))
         self.assertEqual(
             self.supervisor.service_status("pinned").state, ServiceRunState.READY
         )
