@@ -220,7 +220,9 @@ class MasticApp(App[None]):
                 yield Button("◆  Services", id="nav-services")
                 yield Button("↻  Operations", id="nav-operations")
                 yield Button("⌘  Commands", id="nav-commands")
-                yield Button("⇄  Application Configuration Targets", id="nav-clients")
+                yield Button(
+                    "⇄  Application Configuration Targets", id="nav-application-targets"
+                )
                 yield Button("⌁  Topology", id="nav-topology")
                 yield Button("⚙  Configuration", id="nav-configuration")
                 yield Button("✚  Doctor", id="nav-doctor")
@@ -685,7 +687,10 @@ class MasticApp(App[None]):
             "runtimes": ("Runtime Installations", "runtime.list"),
             "models": ("Models", "model.list"),
             "operations": ("Durable operations", "operation.list"),
-            "clients": ("Application Configuration Targets", "client.list"),
+            "application_targets": (
+                "Application Configuration Targets",
+                "application-target.list",
+            ),
             "configuration": ("Configuration", "config.show"),
             "doctor": ("Doctor", "doctor"),
         }

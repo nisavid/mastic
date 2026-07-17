@@ -301,7 +301,7 @@ port = 8766
 [models]
 [aliases]
 [services]
-[clients]
+[application_targets]
 """
         )
 
@@ -384,7 +384,7 @@ installation = "qwen"
 model_alias = "coding"
 runtime = "optiq-old"
 route = "coding"
-[clients]
+[application_targets]
 """
         )
         port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
@@ -471,7 +471,7 @@ runtime = "optiq-current"
 route = "coding"
 [services.coding.options]
 mtp = true
-[clients]
+[application_targets]
 '''
         )
         port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
@@ -534,7 +534,7 @@ installation = "qwen"
 model_alias = "coding"
 runtime = "optiq-old"
 route = "coding"
-[clients]
+[application_targets]
 """
         )
         port = RuntimeSupplyPort(
@@ -958,7 +958,7 @@ installation = "qwen-old"
 model_alias = "coding"
 runtime = "optiq"
 route = "coding"
-[clients]
+[application_targets]
 '''
         )
         compatibility = RuntimeCompatibility(

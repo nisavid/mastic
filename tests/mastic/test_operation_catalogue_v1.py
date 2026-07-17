@@ -32,7 +32,7 @@ class OperationCatalogueTests(unittest.TestCase):
             "service.start",
             "service.stop",
             "operation.inspect",
-            "client.configure",
+            "application-target.configure",
             "config.restore",
             "logs",
             "metrics",
@@ -57,8 +57,8 @@ class OperationCatalogueTests(unittest.TestCase):
             "model.trust",
             "service.create",
             "service.edit",
-            "client.configure",
-            "client.remove",
+            "application-target.configure",
+            "application-target.remove",
             "config.import",
             "config.restore",
         ):
@@ -114,7 +114,7 @@ class OperationCatalogueTests(unittest.TestCase):
         }
         self.assertEqual(required_options, {"model_alias", "runtime"})
         self.assertEqual(
-            self.catalogue["client.configure"].parameters[0].accepted,
+            self.catalogue["application-target.configure"].parameters[0].accepted,
             ("codex", "hindsight"),
         )
         rollback = self.catalogue["model.rollback"]
@@ -141,7 +141,7 @@ class OperationCatalogueTests(unittest.TestCase):
             for parameter in self.catalogue["setup"].parameters
         }
         self.assertEqual(setup["service_options"].value_type, "json")
-        self.assertEqual(setup["clients"].value_type, "json")
+        self.assertEqual(setup["application_targets"].value_type, "json")
         self.assertEqual(setup["activation"].accepted, ("manual", "supervisor"))
 
     def test_cli_and_tui_capabilities_are_derived_from_same_entries(self) -> None:

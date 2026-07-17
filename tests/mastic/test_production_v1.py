@@ -36,8 +36,8 @@ from mastic.infrastructure.production_host import (
     AbsoluteUvRunner,
     GatewayVerificationPort,
     OwnedStateRemover,
-    client_request,
-    coherent_client_context,
+    application_target_request,
+    coherent_application_target_context,
     configured_model_installations,
     default_sampling,
     resolve_uv,
@@ -118,11 +118,13 @@ class ProductionCompositionTests(unittest.TestCase):
             }
         )
 
-    def test_client_context_defaults_to_and_enforces_service_cap(self) -> None:
-        self.assertEqual(coherent_client_context(131_072, None), 131_072)
-        self.assertEqual(coherent_client_context(131_072, 131_072), 131_072)
+    def test_application_target_context_defaults_to_and_enforces_service_cap(
+        self,
+    ) -> None:
+        self.assertEqual(coherent_application_target_context(131_072, None), 131_072)
+        self.assertEqual(coherent_application_target_context(131_072, 131_072), 131_072)
         with self.assertRaisesRegex(ValueError, "must match"):
-            coherent_client_context(131_072, 196_608)
+            coherent_application_target_context(131_072, 196_608)
 
     def test_local_model_resolution_is_side_effect_free_and_stays_local(self) -> None:
         class Supply:
@@ -410,7 +412,9 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(guard.execute(request), {"edited": True})
         self.assertEqual(dispatcher.calls, [request])
 
-    def test_client_sampling_defaults_cover_coding_and_memory_operations(self) -> None:
+    def test_application_target_sampling_defaults_cover_coding_and_memory_operations(
+        self,
+    ) -> None:
         repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
         revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
         coding = default_sampling(repository, revision, "codex")["coding"]
@@ -686,7 +690,9 @@ class ProductionCompositionTests(unittest.TestCase):
                 )
             )
 
-    def test_recommended_setup_defaults_to_balanced_capacity_and_clients(self) -> None:
+    def test_recommended_setup_defaults_to_balanced_capacity_and_application_targets(
+        self,
+    ) -> None:
         preview = _setup_planner().preview(
             _setup_planner().plan(
                 SetupPreflight(
@@ -706,52 +712,56 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(preview.service_options["prompt_cache_bytes"], 2 * 1024**3)
         self.assertNotIn("temperature", preview.service_options)
         self.assertEqual(preview.projected_kv_bytes, 5_737_807_872)
-        self.assertEqual(preview.clients, ("codex", "hindsight"))
+        self.assertEqual(preview.application_targets, ("codex", "hindsight"))
         self.assertEqual(
-            preview.client_options["codex"]["sampling_profiles"]["coding"][
+            preview.application_target_options["codex"]["sampling_profiles"]["coding"][
                 "temperature"
             ],
             0.6,
         )
         self.assertEqual(
-            preview.client_options["codex"]["sampling_profiles"]["coding"]["top_k"],
+            preview.application_target_options["codex"]["sampling_profiles"]["coding"][
+                "top_k"
+            ],
             20,
         )
         self.assertTrue(
-            preview.client_options["codex"]["sampling_profiles"]["coding"][
+            preview.application_target_options["codex"]["sampling_profiles"]["coding"][
                 "enable_thinking"
             ]
         )
         self.assertEqual(
-            preview.client_options["codex"]["sampling_profiles"]["coding"][
+            preview.application_target_options["codex"]["sampling_profiles"]["coding"][
                 "upstream_profile"
             ],
             "precise-coding-thinking",
         )
         self.assertEqual(
-            preview.client_options["codex"]["sampling_profiles"]["coding"][
+            preview.application_target_options["codex"]["sampling_profiles"]["coding"][
                 "source_revision"
             ],
             "995ad96eacd98c81ed38be0c5b274b04031597b0",
         )
         self.assertEqual(
-            preview.client_options["hindsight"]["sampling_profiles"]["retain"][
-                "temperature"
-            ],
+            preview.application_target_options["hindsight"]["sampling_profiles"][
+                "retain"
+            ]["temperature"],
             0.7,
         )
         self.assertFalse(
-            preview.client_options["hindsight"]["sampling_profiles"]["retain"][
-                "enable_thinking"
-            ]
+            preview.application_target_options["hindsight"]["sampling_profiles"][
+                "retain"
+            ]["enable_thinking"]
         )
         self.assertEqual(
-            preview.client_options["hindsight"]["sampling_profiles"]["reflect"][
-                "temperature"
-            ],
+            preview.application_target_options["hindsight"]["sampling_profiles"][
+                "reflect"
+            ]["temperature"],
             1.0,
         )
-        self.assertEqual(preview.client_options["hindsight"]["max_concurrent"], 1)
+        self.assertEqual(
+            preview.application_target_options["hindsight"]["max_concurrent"], 1
+        )
 
     @patch("mastic.infrastructure.production_host.httpx.post")
     def test_gateway_canaries_use_each_application_target_wire_contract(
@@ -788,16 +798,16 @@ class ProductionCompositionTests(unittest.TestCase):
                     "request": "Respond with exactly: mastic ready",
                 },
             )
-            codex = client_request(
+            codex = application_target_request(
                 "codex",
-                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1",
+                "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1",
                 "coding",
                 {},
                 credential=credential,
             )
-            hindsight = client_request(
+            hindsight = application_target_request(
                 "hindsight",
-                "http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1",
+                "http://127.0.0.1:8766/application-targets/hindsight/profiles/retain/v1",
                 "coding",
                 {},
                 credential=credential,
@@ -810,8 +820,8 @@ class ProductionCompositionTests(unittest.TestCase):
             [call.args[0] for call in post.call_args_list],
             [
                 "http://127.0.0.1:8766/v1/chat/completions",
-                "http://127.0.0.1:8766/clients/codex/profiles/coding/v1/responses",
-                "http://127.0.0.1:8766/clients/hindsight/profiles/retain/v1/chat/completions",
+                "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1/responses",
+                "http://127.0.0.1:8766/application-targets/hindsight/profiles/retain/v1/chat/completions",
             ],
         )
         self.assertEqual(

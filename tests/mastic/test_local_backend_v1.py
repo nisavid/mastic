@@ -66,11 +66,11 @@ route = "chat"
 activation = "manual"
 pinned = false
 
-[clients.codex]
+[application_targets.codex]
 kind = "codex"
 service = "coding"
 
-[clients.codex.sampling.coding]
+[application_targets.codex.sampling.coding]
 temperature = 0.0
 """
 
@@ -224,7 +224,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             logs=ports.get("logs", _NeverCalled()),
             metrics=ports.get("metrics", _NeverCalled()),
             setup=ports.get("setup", _NeverCalled()),
-            clients=ports.get("clients", _NeverCalled()),
+            application_targets=ports.get("application_targets", _NeverCalled()),
             config_path=config_path,
             model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
             gateway_credential_path=ports.get("gateway_credential_path"),
@@ -247,7 +247,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_NeverCalled(),
                 metrics=_NeverCalled(),
                 setup=_NeverCalled(),
-                clients=_NeverCalled(),
+                application_targets=_NeverCalled(),
                 config_path=config_path,
             )
 
@@ -281,7 +281,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_NeverCalled(),
                 metrics=_NeverCalled(),
                 setup=_NeverCalled(),
-                clients=_NeverCalled(),
+                application_targets=_NeverCalled(),
                 config_path=config_path,
             )
 
@@ -320,10 +320,10 @@ class LocalOperationBackendTests(unittest.TestCase):
 
     def test_diagnostic_queries_have_distinct_user_facing_results(self) -> None:
         with TemporaryDirectory() as directory:
-            clients = _Port({"state": "healthy", "next_actions": []})
+            application_targets = _Port({"state": "healthy", "next_actions": []})
             backend, state = self._backend(
                 Path(directory),
-                clients=clients,
+                application_targets=application_targets,
                 gateway_credential_path=Path(directory) / "gateway-token",
             )
             state.put_snapshot(
@@ -379,14 +379,17 @@ class LocalOperationBackendTests(unittest.TestCase):
                 {issue["code"] for issue in doctor["issues"]},
                 {"gateway_drift", "service_unhealthy"},
             )
-            self.assertIn(("client.inspect", {"client": "codex"}), clients.calls)
+            self.assertIn(
+                ("application-target.inspect", {"application_target": "codex"}),
+                application_targets.calls,
+            )
             self.assertEqual(supervisor["operations"][0]["id"], "job-1")
             self.assertEqual(gateway_status["route_count"], 2)
             self.assertNotIn("routes", gateway_status)
             self.assertEqual(len(gateway_inspect["routes"]), 2)
             self.assertIn(
                 "Configure Application Configuration Targets with "
-                "mastic client configure",
+                "mastic application-target configure",
                 gateway_inspect["credential"]["instructions"],
             )
             self.assertEqual(
@@ -403,15 +406,15 @@ class LocalOperationBackendTests(unittest.TestCase):
                 "pinned = true\n\n[services.coding_internal.options]\nmax_context = 131072\n\n[services.chat]",
             )
             .replace(
-                '[clients.codex]\nkind = "codex"\nservice = "coding"',
-                '[clients.codex]\nkind = "codex"\nservice = "coding_internal"\ncontext_window = 196608',
+                '[application_targets.codex]\nkind = "codex"\nservice = "coding"',
+                '[application_targets.codex]\nkind = "codex"\nservice = "coding_internal"\ncontext_window = 196608',
             )
         )
         with TemporaryDirectory() as directory:
             backend, _state = self._backend(
                 Path(directory),
                 config=config,
-                clients=_Port({"state": "healthy", "next_actions": []}),
+                application_targets=_Port({"state": "healthy", "next_actions": []}),
             )
 
             doctor = backend.prepare(OperationRequest("doctor")).execute()
@@ -431,7 +434,9 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             with self.assertRaises(ApplicationError) as raised:
                 backend.prepare(
-                    OperationRequest("service.inspect", {"resource": "missing"})
+                    OperationRequest(
+                        "service.inspect", {"application_target": "missing"}
+                    )
                 ).execute()
 
             self.assertEqual(raised.exception.code, "resource_not_found")
@@ -442,7 +447,9 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             with self.assertRaises(ApplicationError) as raised:
                 backend.prepare(
-                    OperationRequest("client.inspect", {"resource": "missing"})
+                    OperationRequest(
+                        "application-target.inspect", {"application_target": "missing"}
+                    )
                 ).execute()
 
             self.assertEqual(raised.exception.code, "resource_not_found")
@@ -857,15 +864,19 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(model.calls, [])
             self.assertEqual(result["resource"]["run_id"], "run-2")
 
-    def test_client_probe_content_is_forwarded_but_never_persisted(self) -> None:
+    def test_application_target_probe_content_is_forwarded_but_never_persisted(
+        self,
+    ) -> None:
         with TemporaryDirectory() as directory:
-            clients = _Port({"response": "ephemeral"})
-            backend, state = self._backend(Path(directory), clients=clients)
+            application_targets = _Port({"response": "ephemeral"})
+            backend, state = self._backend(
+                Path(directory), application_targets=application_targets
+            )
 
             result = backend.prepare(
                 OperationRequest(
-                    "client.test",
-                    {"resource": "codex", "prompt": "say hello"},
+                    "application-target.test",
+                    {"application_target": "codex", "prompt": "say hello"},
                 )
             ).execute()
 
@@ -955,7 +966,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_Telemetry(),
                 metrics=_Telemetry(),
                 setup=_Port(),
-                clients=_Port(),
+                application_targets=_Port(),
             )
             state.put_operation({"id": "job-1", "state": "running"})
             for name in build_operation_catalogue():
@@ -975,7 +986,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_Telemetry(),
                 metrics=_Telemetry(),
                 setup=_Port(),
-                clients=_Port(),
+                application_targets=_Port(),
             )
             state.put_operation({"id": "job-1", "state": "running"})
             for name, operation in build_operation_catalogue().items():
@@ -1064,8 +1075,8 @@ class LocalOperationBackendTests(unittest.TestCase):
             return {"resource": "coding"}
         if name.startswith("operation."):
             return {"resource": "job-1"}
-        if name.startswith("client."):
-            return {"resource": "codex"}
+        if name.startswith("application-target."):
+            return {"application_target": "codex"}
         if name == "config.diff":
             return {"text": _CONFIG}
         if name == "config.import":

@@ -56,7 +56,7 @@ class GatewayRoute:
 
 @dataclass(frozen=True, slots=True)
 class GatewayRequestProfile:
-    """A client workload profile enforced before an upstream request."""
+    """An application-target workload profile enforced before an upstream request."""
 
     service: str
     parameters: Mapping[str, object]
@@ -346,7 +346,7 @@ def create_gateway(
                 403,
                 "origin_not_allowed",
                 "Browser requests must originate from a loopback HTTP origin.",
-                action="Use a native local client or a loopback-hosted application.",
+                action="Use a native local application or a loopback-hosted application.",
             )
         try:
             body = await _read_limited_body(request, max_request_bytes)
@@ -411,21 +411,21 @@ def create_gateway(
         is_responses = request.url.path.endswith("/responses")
         responses_adapter = response_adapter(service) if is_responses else None
         reconstruction: ReconstructionMap = {}
-        client_name = request.path_params.get("client")
+        application_target_name = request.path_params.get("application_target")
         profile_name = request.path_params.get("profile")
-        if client_name is not None and profile_name is not None:
+        if application_target_name is not None and profile_name is not None:
             profile = (
                 None
                 if profile_resolver is None
                 else await _await_if_needed(
-                    profile_resolver(str(client_name), str(profile_name))
+                    profile_resolver(str(application_target_name), str(profile_name))
                 )
             )
             if profile is None:
                 return _error_response(
                     404,
                     "profile_not_found",
-                    f"Application Configuration Target profile {client_name}/{profile_name} is not configured.",
+                    f"Application Configuration Target profile {application_target_name}/{profile_name} is not configured.",
                     action="Reconfigure the Application Configuration Target with MASTIC and retry.",
                     parameter="profile",
                 )
@@ -433,7 +433,7 @@ def create_gateway(
                 return _error_response(
                     400,
                     "profile_service_mismatch",
-                    f"Application Configuration Target profile {client_name}/{profile_name} targets {profile.service!r}, not {service!r}.",
+                    f"Application Configuration Target profile {application_target_name}/{profile_name} targets {profile.service!r}, not {service!r}.",
                     action=f"Set model to {profile.service!r} and retry.",
                     parameter="model",
                 )
@@ -563,17 +563,17 @@ def create_gateway(
             Route("/v1/chat/completions", proxy, methods=["POST"]),
             Route("/v1/responses", proxy, methods=["POST"]),
             Route(
-                "/clients/{client}/profiles/{profile}/v1/models",
+                "/application-targets/{application_target}/profiles/{profile}/v1/models",
                 models,
                 methods=["GET"],
             ),
             Route(
-                "/clients/{client}/profiles/{profile}/v1/chat/completions",
+                "/application-targets/{application_target}/profiles/{profile}/v1/chat/completions",
                 proxy,
                 methods=["POST"],
             ),
             Route(
-                "/clients/{client}/profiles/{profile}/v1/responses",
+                "/application-targets/{application_target}/profiles/{profile}/v1/responses",
                 proxy,
                 methods=["POST"],
             ),

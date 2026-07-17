@@ -84,7 +84,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_navigation_preserves_capability_and_changes_context(self) -> None:
         async with self.app.run_test(size=(140, 45)) as pilot:
-            targets = self.app.query_one("#nav-clients", Button)
+            targets = self.app.query_one("#nav-application-targets", Button)
             self.assertEqual(
                 str(targets.label),
                 "⇄  Application Configuration Targets",

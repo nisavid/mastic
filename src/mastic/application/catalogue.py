@@ -101,7 +101,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "check",
     ),
     "operation": ("list", "inspect"),
-    "client": ("list", "inspect", "configure", "test", "remove"),
+    "application-target": ("list", "inspect", "configure", "test", "remove"),
     "config": (
         "path",
         "show",
@@ -147,9 +147,9 @@ _QUERIES = frozenset(
         "service.check",
         "operation.list",
         "operation.inspect",
-        "client.list",
-        "client.inspect",
-        "client.test",
+        "application-target.list",
+        "application-target.inspect",
+        "application-target.test",
         "config.path",
         "config.show",
         "config.validate",
@@ -167,7 +167,7 @@ _NO_CONFIRM = frozenset(
         "service.start",
         "service.stop",
         "service.restart",
-        "client.test",
+        "application-target.test",
     }
 )
 
@@ -179,8 +179,8 @@ _LOCAL_MUTATIONS = frozenset(
         "model.trust",
         "service.create",
         "service.edit",
-        "client.configure",
-        "client.remove",
+        "application-target.configure",
+        "application-target.remove",
         "config.import",
         "config.restore",
     }
@@ -277,11 +277,11 @@ def _summary(name: str) -> str:
         "service.check": "Check one service's desired state, run, and Gateway route.",
         "operation.list": "List durable physical operations and their current status.",
         "operation.inspect": "Inspect one durable operation and its recorded events.",
-        "client.list": "List MASTIC-owned Application Configuration Targets.",
-        "client.inspect": "Inspect one owned Application Configuration Target and its sampling configuration.",
-        "client.configure": "Configure Codex or Hindsight as one Application Configuration Target.",
-        "client.test": "Send a bounded verification request through one configured Application Configuration Target.",
-        "client.remove": "Remove only the settings owned by one Application Configuration Target.",
+        "application-target.list": "List MASTIC-owned Application Configuration Targets.",
+        "application-target.inspect": "Inspect one owned Application Configuration Target and its sampling configuration.",
+        "application-target.configure": "Configure Codex or Hindsight as one Application Configuration Target.",
+        "application-target.test": "Send a bounded verification request through one configured Application Configuration Target.",
+        "application-target.remove": "Remove only the settings owned by one Application Configuration Target.",
         "config.path": "Show the active desired-state file path.",
         "config.show": "Show validated desired state without starting the Supervisor.",
         "config.validate": "Validate current desired state and report its revision.",
@@ -339,7 +339,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         "model": "Model repository, installation, alias, or exact revision; discover values with `mastic model search` or `model list`.",
         "service": "Inference Service name; discover values with `mastic service list`.",
         "operation": "Durable operation ID; discover values with `mastic operation list`.",
-        "client": "Application Configuration Target name; discover values with `mastic client list`.",
+        "application_target": "Application Configuration Target name; discover values with `mastic application-target list`.",
     }
     if name == "setup":
         return (
@@ -400,12 +400,12 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "Stable literal loopback Gateway URL, including /v1.",
             ),
             _option(
-                "clients",
+                "application_targets",
                 "JSON array of Application Configuration Targets to configure.",
                 value_type="json",
             ),
             _option(
-                "client_options",
+                "application_target_options",
                 "JSON object of per-target settings; Hindsight requires a profile.",
                 value_type="json",
             ),
@@ -649,10 +649,10 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         return (_argument("resource", resource_help["service"]),)
     if name.startswith("operation.") and name != "operation.list":
         return (_argument("resource", resource_help["operation"]),)
-    if name == "client.configure":
+    if name == "application-target.configure":
         return (
             _argument(
-                "client",
+                "application_target",
                 "Application Configuration Target name.",
                 accepted=("codex", "hindsight"),
             ),
@@ -684,13 +684,13 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 value_type="boolean",
             ),
         )
-    if name == "client.test":
+    if name == "application-target.test":
         return (
-            _argument("resource", resource_help["client"]),
+            _argument("application_target", resource_help["application_target"]),
             _option("profile", "Sampling profile to exercise."),
         )
-    if name.startswith("client.") and name != "client.list":
-        return (_argument("resource", resource_help["client"]),)
+    if name.startswith("application-target.") and name != "application-target.list":
+        return (_argument("application_target", resource_help["application_target"]),)
     if name == "config.import":
         return (
             _argument("source", "TOML file to validate and preview before import."),

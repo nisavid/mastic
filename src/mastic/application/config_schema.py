@@ -45,7 +45,7 @@ class ConfiguredRuntime:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientSamplingSettings:
+class ApplicationTargetSamplingSettings:
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -61,7 +61,7 @@ class ClientSamplingSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ClientSettings:
+class ApplicationTargetSettings:
     name: str
     kind: str
     service: str
@@ -69,7 +69,7 @@ class ClientSettings:
     context_window: int | None
     provider: str
     max_concurrent: int | None
-    sampling: Mapping[str, ClientSamplingSettings]
+    sampling: Mapping[str, ApplicationTargetSamplingSettings]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling", MappingProxyType(dict(self.sampling)))
@@ -83,7 +83,7 @@ class MasticConfig:
     models: Mapping[str, ModelInstallation]
     aliases: Mapping[str, ModelAlias]
     services: Mapping[str, InferenceService]
-    clients: Mapping[str, ClientSettings]
+    application_targets: Mapping[str, ApplicationTargetSettings]
 
 
 def validate_config(raw: Mapping[str, object]) -> MasticConfig:
@@ -101,7 +101,7 @@ def validate_config(raw: Mapping[str, object]) -> MasticConfig:
             "models",
             "aliases",
             "services",
-            "clients",
+            "application_targets",
         },
     )
     if raw.get("schema_version") != 1 or type(raw.get("schema_version")) is not int:
@@ -111,7 +111,9 @@ def validate_config(raw: Mapping[str, object]) -> MasticConfig:
     models = _models(_table(raw.get("models", {}), "models"))
     aliases = _aliases(_table(raw.get("aliases", {}), "aliases"), models)
     services = _services(_table(raw.get("services", {}), "services"), aliases, runtimes)
-    clients = _clients(_table(raw.get("clients", {}), "clients"), services)
+    application_targets = _application_targets(
+        _table(raw.get("application_targets", {}), "application_targets"), services
+    )
     return MasticConfig(
         schema_version=1,
         gateway=gateway,
@@ -119,7 +121,7 @@ def validate_config(raw: Mapping[str, object]) -> MasticConfig:
         models=MappingProxyType(models),
         aliases=MappingProxyType(aliases),
         services=MappingProxyType(services),
-        clients=MappingProxyType(clients),
+        application_targets=MappingProxyType(application_targets),
     )
 
 
@@ -321,9 +323,9 @@ def _services(
     return result
 
 
-def _clients(
+def _application_targets(
     raw: Mapping[str, object], services: Mapping[str, InferenceService]
-) -> dict[str, ClientSettings]:
+) -> dict[str, ApplicationTargetSettings]:
     result = {}
     for name, value in raw.items():
         table = _table(value, f"Application Configuration Target {name!r}")
@@ -399,7 +401,7 @@ def _clients(
             table.get("sampling", {}),
             f"Application Configuration Target {name!r} sampling",
         )
-        sampling: dict[str, ClientSamplingSettings] = {}
+        sampling: dict[str, ApplicationTargetSamplingSettings] = {}
         normalized: set[str] = set()
         for sampling_name, sampling_value in sampling_raw.items():
             if not isinstance(sampling_name, str) or not _safe_sampling_name(
@@ -550,7 +552,7 @@ def _clients(
                 raise ConfigSchemaError(
                     f"Application Configuration Target {name!r} sampling profile {sampling_name!r} source_revision must be an exact commit SHA"
                 )
-            sampling[sampling_name] = ClientSamplingSettings(
+            sampling[sampling_name] = ApplicationTargetSamplingSettings(
                 temperature=float(temperature) if temperature is not None else None,
                 top_p=float(top_p) if top_p is not None else None,
                 top_k=top_k,
@@ -590,7 +592,7 @@ def _clients(
                 raise ConfigSchemaError(
                     f"Application Configuration Target {name!r} sampling profile 'coding' contains values OptiQ Responses cannot represent"
                 )
-        result[name] = ClientSettings(
+        result[name] = ApplicationTargetSettings(
             name=name,
             kind=kind,
             service=service,

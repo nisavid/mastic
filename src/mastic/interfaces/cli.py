@@ -34,7 +34,7 @@ _GROUPS = (
     "model",
     "service",
     "operation",
-    "client",
+    "application-target",
     "config",
 )
 
@@ -380,6 +380,6 @@ def _group_help(group: str) -> str:
         "model": "Search, inspect, install, verify, and trust exact Model Revisions.",
         "service": "Create and control named Inference Services.",
         "operation": "Inspect durable physical operations and their recorded events.",
-        "client": "Configure and verify Application Configuration Targets.",
+        "application-target": "Configure and verify Application Configuration Targets.",
         "config": "Inspect, edit, validate, diff, and restore desired configuration.",
     }[group]

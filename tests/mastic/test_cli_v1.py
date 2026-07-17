@@ -67,6 +67,21 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("runtime", result.output)
         self.assertIn("model", result.output)
         self.assertIn("service", result.output)
+        self.assertIn("application-target", result.output)
+        self.assertNotIn("client", result.output)
+
+    def test_application_target_is_the_only_configuration_target_command(self) -> None:
+        canonical = self.runner.invoke(
+            self.app, ["application-target", "list", "--json"]
+        )
+        prohibited = self.runner.invoke(self.app, ["client", "list", "--json"])
+
+        self.assertEqual(canonical.exit_code, 0, canonical.output)
+        self.assertEqual(
+            self.dispatcher.requests[-1].name,
+            "application-target.list",
+        )
+        self.assertNotEqual(prohibited.exit_code, 0)
 
     def test_every_catalogue_operation_has_a_cli_help_surface(self) -> None:
         for name in build_operation_catalogue():
@@ -177,7 +192,7 @@ class CliV1Tests(unittest.TestCase):
                 "setup",
                 "--service-options",
                 '{"kv_config":"kv_config.json","mtp":true}',
-                "--clients",
+                "--application-targets",
                 '["codex","hindsight"]',
                 "--yes",
                 "--json",
@@ -189,7 +204,7 @@ class CliV1Tests(unittest.TestCase):
         parameters = self.dispatcher.requests[-1].parameters
         self.assertEqual(parameters["service_options"]["kv_config"], "kv_config.json")
         self.assertTrue(parameters["service_options"]["mtp"])
-        self.assertEqual(parameters["clients"], ["codex", "hindsight"])
+        self.assertEqual(parameters["application_targets"], ["codex", "hindsight"])
         self.assertEqual(parameters["plan_fingerprint"], "sha256:exact")
 
     def test_setup_help_explains_capacity_choices_and_concurrency(self) -> None:
@@ -200,9 +215,10 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("balanced", result.output)
         self.assertIn("long-context", result.output)
         self.assertIn("native-context", result.output)
-        self.assertIn("simultaneous inference requests", result.output)
-        self.assertIn("prefill at 4-7 requests", result.output)
-        self.assertIn("8 permits", result.output)
+        normalized = " ".join(result.output.replace("│", " ").split())
+        self.assertIn("simultaneous inference requests", normalized)
+        self.assertIn("prefill at 4-7 requests", normalized)
+        self.assertIn("8 permits", normalized)
 
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])

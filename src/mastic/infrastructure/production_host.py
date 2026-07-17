@@ -1,4 +1,4 @@
-"""Concrete host, client, setup, and filesystem adapters for production composition."""
+"""Concrete host, application-target, setup, and filesystem adapters for production composition."""
 
 from __future__ import annotations
 
@@ -18,17 +18,17 @@ import psutil
 import tomlkit
 
 from mastic.application.config_schema import (
-    ClientSamplingSettings,
-    ClientSettings,
+    ApplicationTargetSamplingSettings,
+    ApplicationTargetSettings,
     MasticConfig,
     validate_config,
 )
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import RemovalInventory, SetupPreflight
-from mastic.infrastructure.client_integrations import (
-    ClientConfiguration,
+from mastic.infrastructure.application_target_integrations import (
+    ApplicationTargetConfiguration,
     CodexModelMetadata,
-    LocalClientIntegrationFactory,
+    LocalApplicationTargetIntegrationFactory,
     SamplingProfile,
 )
 from mastic.infrastructure.config_store import ConfigStore
@@ -41,7 +41,7 @@ from mastic.infrastructure.model_supply import (
     ModelSupply,
 )
 from mastic.infrastructure.model_profiles import ModelProfileCatalogue
-from mastic.infrastructure.operation_ports import ClientOperationPort
+from mastic.infrastructure.operation_ports import ApplicationTargetOperationPort
 from mastic.infrastructure.paths_v1 import MasticPaths
 from mastic.infrastructure.state_store import OperationalStateStore
 
@@ -205,30 +205,30 @@ class GatewayVerificationPort:
         return {"ok": response.is_success, "text": str(text).strip()}
 
 
-def client_port(
+def application_target_port(
     home: Path,
     paths: MasticPaths,
     config_store: ConfigStore[MasticConfig],
     *,
     credential: GatewayCredential | None = None,
-) -> ClientOperationPort:
+) -> ApplicationTargetOperationPort:
     gateway_credential = credential or GatewayCredential(paths.gateway_credential)
-    factory = LocalClientIntegrationFactory(
+    factory = LocalApplicationTargetIntegrationFactory(
         codex_config_path=home / ".codex/config.toml",
         hindsight_profiles_dir=home / ".hindsight/profiles",
-        ownership_dir=paths.state_dir / "clients",
+        ownership_dir=paths.state_dir / "application-targets",
     )
 
-    def settings(name: str) -> ClientSettings | None:
+    def settings(name: str) -> ApplicationTargetSettings | None:
         if not config_store.exists:
             return None
-        return config_store.load().value.clients.get(name)
+        return config_store.load().value.application_targets.get(name)
 
     def configuration(
         name: str,
         parameters: Mapping[str, object],
-        stored: ClientSettings | None,
-    ) -> ClientConfiguration:
+        stored: ApplicationTargetSettings | None,
+    ) -> ApplicationTargetConfiguration:
         config = (
             config_store.load().value
             if config_store.exists
@@ -274,14 +274,14 @@ def client_port(
             if repository == "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
             else repository.rsplit("/", 1)[-1]
         )
-        context_window = coherent_client_context(
+        context_window = coherent_application_target_context(
             service.options.get("max_context"),
             parameters.get("context_window", stored.context_window if stored else None),
         )
         stored_codex_provider = stored.provider if stored and name == "codex" else None
         if stored_codex_provider in {None, "mastic-local"}:
             stored_codex_provider = "mlx-local"
-        return ClientConfiguration(
+        return ApplicationTargetConfiguration(
             gateway_endpoint=endpoint,
             service_name=str(service.route),
             context_window=context_window,
@@ -317,14 +317,16 @@ def client_port(
             ),
         )
 
-    def record(name: str, value: ClientSettings | None) -> None:
+    def record(name: str, value: ApplicationTargetSettings | None) -> None:
         if not config_store.exists:
             config_store.import_text("schema_version = 1\n")
 
         def edit(document) -> None:
-            clients = document.setdefault("clients", tomlkit.table())
+            application_targets = document.setdefault(
+                "application_targets", tomlkit.table()
+            )
             if value is None:
-                clients.pop(name, None)
+                application_targets.pop(name, None)
                 return
             table = tomlkit.table()
             table["kind"] = value.kind
@@ -345,14 +347,14 @@ def client_port(
                         settings_table[field.name] = item
                 sampling[profile] = settings_table
             table["sampling"] = sampling
-            clients[name] = table
+            application_targets[name] = table
 
         config_store.edit(edit)
 
-    return ClientOperationPort(
+    return ApplicationTargetOperationPort(
         factory,
         configuration,
-        request=lambda target, endpoint, route, payload: client_request(
+        request=lambda target, endpoint, route, payload: application_target_request(
             target,
             endpoint,
             route,
@@ -364,7 +366,7 @@ def client_port(
     )
 
 
-def coherent_client_context(
+def coherent_application_target_context(
     service_context: object, requested_context: object
 ) -> int | None:
     service_value = optional_int(service_context)
@@ -380,7 +382,7 @@ def coherent_client_context(
     return requested_value or service_value
 
 
-def client_request(
+def application_target_request(
     target: str,
     endpoint: str,
     route: str,
@@ -499,7 +501,7 @@ def removal_inventory(
     return RemovalInventory(
         running_services=running,
         registered=launchd.status().registered,
-        client_integrations=tuple(sorted(config.clients)),
+        application_target_integrations=tuple(sorted(config.application_targets)),
         product_owned_paths=owned,
         product_owned_bytes=sum(tree_size(Path(path)) for path in owned),
         shared_cache_paths=tuple(str(item.snapshot_path) for item in cache.revisions),
@@ -509,7 +511,7 @@ def removal_inventory(
 
 
 def sampling_profile(value: object) -> SamplingProfile:
-    if isinstance(value, ClientSamplingSettings):
+    if isinstance(value, ApplicationTargetSamplingSettings):
         return SamplingProfile(
             temperature=value.temperature,
             top_p=value.top_p,
@@ -542,7 +544,7 @@ def sampling_profile(value: object) -> SamplingProfile:
     )
 
 
-_CLIENT_PROFILE_BINDINGS = {
+_APPLICATION_TARGET_PROFILE_BINDINGS = {
     "codex": {"coding": "precise-coding-thinking"},
     "hindsight": {
         "verification": "non-thinking",
@@ -555,8 +557,8 @@ _CLIENT_PROFILE_BINDINGS = {
 
 def default_sampling(
     repository: str, revision: str, name: str
-) -> Mapping[str, ClientSamplingSettings]:
-    bindings = _CLIENT_PROFILE_BINDINGS.get(name)
+) -> Mapping[str, ApplicationTargetSamplingSettings]:
+    bindings = _APPLICATION_TARGET_PROFILE_BINDINGS.get(name)
     if bindings is None:
         raise ValueError(f"unsupported Application Configuration Target: {name}")
     catalogue = ModelProfileCatalogue.load_builtin()
@@ -566,7 +568,7 @@ def default_sampling(
             profile = catalogue.profile(repository, revision, profile_name)
         except KeyError:
             return {}
-        result[workload] = ClientSamplingSettings(
+        result[workload] = ApplicationTargetSamplingSettings(
             **dict(profile.parameters),
             upstream_profile=profile.name,
             source_url=profile.source_url,

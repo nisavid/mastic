@@ -2,16 +2,19 @@ import unittest
 from types import SimpleNamespace
 
 from mastic.application.dispatch import ApplicationError
-from mastic.application.config_schema import ClientSettings, ClientSamplingSettings
+from mastic.application.config_schema import (
+    ApplicationTargetSettings,
+    ApplicationTargetSamplingSettings,
+)
 from mastic.infrastructure.control_client import SupervisorUnavailableError
 from mastic.infrastructure.operation_ports import (
-    ClientOperationPort,
+    ApplicationTargetOperationPort,
     RemoteOperationPort,
     SupervisorOperationPort,
 )
-from mastic.infrastructure.client_integrations import (
-    ClientConfiguration,
-    ClientRemovalResult,
+from mastic.infrastructure.application_target_integrations import (
+    ApplicationTargetConfiguration,
+    ApplicationTargetRemovalResult,
     SamplingProfile,
 )
 
@@ -63,7 +66,7 @@ class FakeSupervisor:
         return {"service": resource, "state": "drained"}
 
 
-class FakeClientAdapter:
+class FakeApplicationTargetAdapter:
     def __init__(self) -> None:
         self.calls = []
 
@@ -152,20 +155,22 @@ class OperationPortTests(unittest.TestCase):
             [("start_service", "coding"), ("drain_service", "coding"), ("stop",)],
         )
 
-    def test_client_port_uses_one_preview_apply_test_remove_contract(self) -> None:
-        adapter = FakeClientAdapter()
+    def test_application_target_port_uses_one_preview_apply_test_remove_contract(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
         records = []
         persisted = {}
 
         def configuration(name, parameters, settings):
-            return ClientConfiguration(
+            return ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1",
                 "coding",
                 sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
                 service_identity="coding-internal",
             )
 
-        port = ClientOperationPort(
+        port = ApplicationTargetOperationPort(
             lambda operation, name, parameters, settings: adapter,
             configuration,
             request=lambda target, endpoint, model, sampling: {
@@ -183,10 +188,15 @@ class OperationPortTests(unittest.TestCase):
         )
 
         configured = port.execute(
-            "client.configure", {"client": "codex", "service": "coding"}
+            "application-target.configure",
+            {"application_target": "codex", "service": "coding"},
         )
-        tested = port.execute("client.test", {"resource": "codex"})
-        removed = port.execute("client.remove", {"resource": "codex"})
+        tested = port.execute(
+            "application-target.test", {"application_target": "codex"}
+        )
+        removed = port.execute(
+            "application-target.remove", {"application_target": "codex"}
+        )
 
         self.assertTrue(configured["result"]["changed"])
         self.assertEqual(records[0][1].service, "coding-internal")
@@ -201,7 +211,7 @@ class OperationPortTests(unittest.TestCase):
     def test_hindsight_profile_is_required_then_persisted_for_test_and_remove(
         self,
     ) -> None:
-        adapter = FakeClientAdapter()
+        adapter = FakeApplicationTargetAdapter()
         records = {}
         factory_calls = []
 
@@ -211,7 +221,7 @@ class OperationPortTests(unittest.TestCase):
 
         def configuration(name, parameters, settings):
             service = settings.service if settings else str(parameters["service"])
-            return ClientConfiguration(
+            return ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1",
                 service,
                 context_window=32768,
@@ -223,7 +233,7 @@ class OperationPortTests(unittest.TestCase):
                 },
             )
 
-        port = ClientOperationPort(
+        port = ApplicationTargetOperationPort(
             adapter_factory,
             configuration,
             request=lambda target, endpoint, model, sampling: {
@@ -241,40 +251,43 @@ class OperationPortTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ApplicationError, "profile"):
             port.execute(
-                "client.configure", {"client": "hindsight", "service": "memory"}
+                "application-target.configure",
+                {"application_target": "hindsight", "service": "memory"},
             )
 
         port.execute(
-            "client.configure",
+            "application-target.configure",
             {
-                "client": "hindsight",
+                "application_target": "hindsight",
                 "service": "memory",
                 "profile": "agent-memory",
             },
         )
         stored = records["hindsight"]
-        self.assertIsInstance(stored, ClientSettings)
+        self.assertIsInstance(stored, ApplicationTargetSettings)
         self.assertEqual(stored.profile, "agent-memory")
         self.assertEqual(stored.context_window, 32768)
         self.assertEqual(
-            stored.sampling["reflect"], ClientSamplingSettings(temperature=0.9)
+            stored.sampling["reflect"],
+            ApplicationTargetSamplingSettings(temperature=0.9),
         )
 
         tested = port.execute(
-            "client.test", {"resource": "hindsight", "profile": "retain"}
+            "application-target.test",
+            {"application_target": "hindsight", "profile": "retain"},
         )
-        port.execute("client.remove", {"resource": "hindsight"})
+        port.execute("application-target.remove", {"application_target": "hindsight"})
 
         self.assertEqual(tested["response"]["target"], "hindsight")
         self.assertEqual(factory_calls[1][3].profile, "agent-memory")
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
         self.assertNotIn("hindsight", records)
 
-    def test_extra_client_profiles_fail_before_external_apply(self) -> None:
-        adapter = FakeClientAdapter()
-        port = ClientOperationPort(
+    def test_extra_application_target_profiles_fail_before_external_apply(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        port = ApplicationTargetOperationPort(
             lambda operation, name, parameters, settings: adapter,
-            lambda name, parameters, settings: ClientConfiguration(
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1",
                 "coding",
                 sampling_profiles={
@@ -286,12 +299,15 @@ class OperationPortTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ApplicationError, "requires sampling profiles"):
-            port.execute("client.configure", {"client": "codex", "service": "coding"})
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "coding"},
+            )
 
         self.assertEqual(adapter.calls, [])
 
     def test_hindsight_profile_cannot_change_without_precise_removal(self) -> None:
-        stored = ClientSettings(
+        stored = ApplicationTargetSettings(
             name="hindsight",
             kind="hindsight",
             service="memory",
@@ -301,9 +317,11 @@ class OperationPortTests(unittest.TestCase):
             max_concurrent=1,
             sampling={},
         )
-        port = ClientOperationPort(
-            lambda operation, name, parameters, settings: FakeClientAdapter(),
-            lambda name, parameters, settings: ClientConfiguration(
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: (
+                FakeApplicationTargetAdapter()
+            ),
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1", "memory"
             ),
             request=lambda target, endpoint, model, sampling: {},
@@ -312,16 +330,16 @@ class OperationPortTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ApplicationError, "[Rr]emove"):
             port.execute(
-                "client.configure",
+                "application-target.configure",
                 {
-                    "client": "hindsight",
+                    "application_target": "hindsight",
                     "service": "memory",
                     "profile": "second",
                 },
             )
 
     def test_partial_precise_removal_retains_desired_state_identity(self) -> None:
-        stored = ClientSettings(
+        stored = ApplicationTargetSettings(
             name="codex",
             kind="codex",
             service="coding",
@@ -331,16 +349,16 @@ class OperationPortTests(unittest.TestCase):
             max_concurrent=None,
             sampling={},
         )
-        adapter = FakeClientAdapter()
-        adapter.remove = lambda: ClientRemovalResult(
+        adapter = FakeApplicationTargetAdapter()
+        adapter.remove = lambda: ApplicationTargetRemovalResult(
             changed=True,
             changes=(),
             skipped_paths=(("model",),),
         )
         recorded = []
-        port = ClientOperationPort(
+        port = ApplicationTargetOperationPort(
             lambda operation, name, parameters, settings: adapter,
-            lambda name, parameters, settings: ClientConfiguration(
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
                 "http://127.0.0.1:8766/v1", "coding"
             ),
             request=lambda target, endpoint, model, sampling: {},
@@ -348,7 +366,9 @@ class OperationPortTests(unittest.TestCase):
             record=lambda name, value: recorded.append((name, value)),
         )
 
-        result = port.execute("client.remove", {"resource": "codex"})
+        result = port.execute(
+            "application-target.remove", {"application_target": "codex"}
+        )
 
         self.assertTrue(result["desired_state_retained"])
         self.assertEqual(result["skipped_paths"], [["model"]])
