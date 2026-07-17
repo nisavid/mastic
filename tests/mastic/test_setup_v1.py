@@ -250,7 +250,9 @@ class SetupV1Tests(unittest.TestCase):
             },
         )
 
-    def test_service_identity_and_options_are_exact_immutable_preview_inputs(self) -> None:
+    def test_service_identity_and_options_are_exact_immutable_preview_inputs(
+        self,
+    ) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
         options = {
             "kv_config": "kv_config.json",
