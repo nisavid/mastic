@@ -2,6 +2,14 @@
 
 Research date: 2026-07-16
 
+This is a frozen pre-migration research record. It compares candidate gateways
+and lifecycle projects before MASTIC selected its in-process Gateway and
+Responses adapter. Its recommendations are historical evidence, not the
+current implementation plan. For current contracts, start with
+[`CONTEXT.md`](../../CONTEXT.md), [`PRODUCT.md`](../../PRODUCT.md),
+[`DESIGN.md`](../../DESIGN.md), and the
+[architecture explanation](../explanation/architecture.md).
+
 ## Question
 
 Which existing projects should a unified, host-aware inference product reuse for
