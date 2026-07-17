@@ -35,7 +35,7 @@ Codex app-server is a different boundary from model inference: it is a JSON-RPC 
 
 Adjacent boundary: task `019f5eb4-f85f-7d42-9b07-7da3044f41b1` owns ChatGPT login/feature gating, the disposable copied-app route, sandboxing, retained evidence, and native GUI validation. This research neither duplicates nor supersedes that work; it only records the public provider and app-server contracts it can rely on.
 
-The current `codex-ns-proxy` repository seam already demonstrates the narrow adaptation problem: an authenticated loopback Responses gateway with strict inbound/upstream credential separation, optional namespace flatten/reconstruction, bounded `previous_response_id` mapping, SSE behavior, and fail-closed limits. That is evidence about the existing seam, not authorization to extract, rename, or broaden it. [Repository README at the inspected checkpoint](https://github.com/nisavid/agents/blob/d7a4b62bc835012873aca95f2463b1e4e8c02c00/tooling/codex-ns-proxy/README.md)
+The current `responses-adapter` repository seam already demonstrates the narrow adaptation problem: an authenticated loopback Responses gateway with strict inbound/upstream credential separation, optional namespace flatten/reconstruction, bounded `previous_response_id` mapping, SSE behavior, and fail-closed limits. That is evidence about the existing seam, not authorization to extract, rename, or broaden it. [Repository README at the inspected checkpoint](https://github.com/nisavid/agents/blob/d7a4b62bc835012873aca95f2463b1e4e8c02c00/tooling/responses-adapter/README.md)
 
 ## Claude Code
 
