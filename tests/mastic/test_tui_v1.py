@@ -228,7 +228,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
         finally:
             gate.set()
 
-    async def test_confirmed_mutation_shows_exact_plan_before_dispatch(self) -> None:
+    async def test_confirmed_mutation_shows_exact_preview_before_dispatch(self) -> None:
         async with self.app.run_test(size=(120, 45)) as pilot:
             await self.app.open_operation("model.install")
             self.app.query_one(
@@ -242,13 +242,13 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(self.dispatcher.requests, [])
             self.assertEqual(self.dispatcher.previews[-1].name, "model.install")
-            plan = str(self.app.query_one("#view-body", Static).content)
-            self.assertIn("Resolved mutation preview", plan)
-            self.assertIn("Resolved backend preview", plan)
-            self.assertIn("model.install", plan)
-            self.assertIn("mlx-community/Qwen3-4B-4bit", plan)
-            self.assertIn("revision: abc123", plan)
-            self.assertIn("offline: False", plan)
+            preview = str(self.app.query_one("#view-body", Static).content)
+            self.assertIn("Resolved mutation preview", preview)
+            self.assertIn("Resolved backend preview", preview)
+            self.assertIn("model.install", preview)
+            self.assertIn("mlx-community/Qwen3-4B-4bit", preview)
+            self.assertIn("revision: abc123", preview)
+            self.assertIn("offline: False", preview)
             self.assertEqual(self.app.focused.id, "operation-confirm")
 
             self.app.query_one("#operation-confirm").press()

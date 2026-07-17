@@ -46,7 +46,9 @@ class AdmissionPolicyTests(unittest.TestCase):
         self.assertEqual(result.stop_services, ("chat",))
         self.assertNotIn("coding", result.stop_services)
 
-    def test_only_pinned_or_busy_services_produces_explicit_stop_plan(self) -> None:
+    def test_only_pinned_or_busy_services_produces_explicit_stop_sequence(
+        self,
+    ) -> None:
         services = (
             RunningService("coding", pinned=True, busy=False, last_used_ns=1),
             RunningService("vision", pinned=False, busy=True, last_used_ns=2),

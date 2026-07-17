@@ -402,7 +402,7 @@ class RuntimeManagerTests(unittest.TestCase):
             self.assertEqual(installation.root, root.resolve())
 
 
-class RuntimeChangePlannerTests(unittest.TestCase):
+class RuntimeChangeResolverTests(unittest.TestCase):
     def test_remove_is_blocked_while_services_reference_installation(self) -> None:
         installation = RuntimeInstallation(
             installation_id="optiq-old",

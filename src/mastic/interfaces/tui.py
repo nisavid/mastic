@@ -501,7 +501,7 @@ class MasticApp(App[None]):
             dict(preview.value), indent=2, sort_keys=True, default=str
         )
         self.query_one("#view-body", Static).update(
-            self._mutation_plan(operation, parameters)
+            self._mutation_preview(operation, parameters)
             + f"\n\nResolved backend preview\n{resolved}"
         )
         self.query_one("#operation-submit", Button).styles.display = "none"
@@ -525,8 +525,8 @@ class MasticApp(App[None]):
         self.pending_parameters = None
         self.query_one("#view-body", Static).update(
             f"No changes made.\n\n{operation.summary}\n\n"
-            "The editable inputs are preserved. Review them, then preview the "
-            "resolved preview again."
+            "The editable inputs are preserved. Review them, then resolve a fresh "
+            "preview."
         )
         self.query_one("#operation-submit", Button).styles.display = "block"
         self.query_one("#operation-confirm", Button).styles.display = "none"
@@ -587,7 +587,9 @@ class MasticApp(App[None]):
             )
 
     @staticmethod
-    def _mutation_plan(operation: Operation, parameters: Mapping[str, object]) -> str:
+    def _mutation_preview(
+        operation: Operation, parameters: Mapping[str, object]
+    ) -> str:
         rows = []
         for parameter in operation.parameters:
             value = parameters.get(
