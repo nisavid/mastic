@@ -355,7 +355,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "offline",
-                "Use only installed definitions, local evidence, and cached bytes.",
+                "Prevent network access. Only matching durable setup completion evidence satisfies a step; installed runtime and cached model bytes are not inferred as ready.",
                 value_type="boolean",
             ),
             _option("runtime_name", "Runtime Definition name."),
