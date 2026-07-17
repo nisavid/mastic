@@ -90,7 +90,7 @@ RemovalInventoryProvider = Callable[[], RemovalInventory]
 
 
 class SetupOperationPort:
-    """Preview and apply one exact, resumable supported-v1 setup plan."""
+    """Preview and apply one exact, resumable Plan."""
 
     def __init__(
         self,
@@ -171,7 +171,7 @@ class SetupOperationPort:
                 "setup_interrupted",
                 str(error),
                 next_actions=(
-                    "rerun the same exact setup plan to resume",
+                    "rerun the same exact Plan to resume",
                     "mastic operation list",
                 ),
             ) from error
