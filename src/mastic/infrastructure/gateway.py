@@ -18,6 +18,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from mastic.infrastructure.responses_adapter import (
+    CodexNamespaceAdapter,
+    ReconstructionMap,
+    TransformationError,
+)
+
 RouteState = Literal["ready", "stopped", "unavailable"]
 _REQUEST_HEADER_ALLOWLIST = frozenset(
     {"accept", "content-type", "user-agent", "x-request-id"}
@@ -75,6 +81,8 @@ class _UpstreamStreamingResponse(StreamingResponse):
         self,
         upstream: httpx.Response,
         *,
+        responses_adapter: CodexNamespaceAdapter | None = None,
+        reconstruction: ReconstructionMap | None = None,
         on_close: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -82,12 +90,20 @@ class _UpstreamStreamingResponse(StreamingResponse):
         self._on_close = on_close
         content_type = upstream.headers.get("content-type", "").partition(";")[0]
         content_encoding = upstream.headers.get("content-encoding", "identity")
-        body = (
-            _iter_sse_until_terminal(upstream)
-            if content_type.strip().lower() == "text/event-stream"
-            and content_encoding.strip().lower() in {"", "identity"}
-            else upstream.aiter_raw()
-        )
+        if responses_adapter is not None:
+            body = _iter_adapted_responses(
+                upstream,
+                responses_adapter,
+                reconstruction or {},
+                content_type=content_type.strip().lower(),
+            )
+        else:
+            body = (
+                _iter_sse_until_terminal(upstream)
+                if content_type.strip().lower() == "text/event-stream"
+                and content_encoding.strip().lower() in {"", "identity"}
+                else upstream.aiter_raw()
+            )
         super().__init__(body, **kwargs)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
@@ -119,6 +135,61 @@ async def _iter_sse_until_terminal(
                 return
         if len(pending) > _SSE_INSPECTION_LIMIT:
             del pending[:-_SSE_INSPECTION_LIMIT]
+
+
+async def _iter_adapted_responses(
+    upstream: httpx.Response,
+    adapter: CodexNamespaceAdapter,
+    reconstruction: ReconstructionMap,
+    *,
+    content_type: str,
+) -> AsyncIterator[bytes]:
+    if content_type != "text/event-stream":
+        raw = b"".join([chunk async for chunk in upstream.aiter_bytes()])
+        if "json" not in content_type or not raw:
+            yield raw
+            return
+        try:
+            original = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            yield raw
+            return
+        transformed = adapter.transform_response(original, reconstruction)
+        yield (
+            raw
+            if transformed == original
+            else json.dumps(transformed, separators=(",", ":")).encode()
+        )
+        return
+
+    pending = bytearray()
+    async for chunk in upstream.aiter_bytes():
+        pending.extend(chunk)
+        while True:
+            frame = _pop_sse_frame(pending)
+            if frame is None:
+                break
+            transformed = adapter.transform_sse_frame(frame, reconstruction)
+            yield transformed
+            if _is_terminal_sse_event(frame):
+                return
+    if pending:
+        yield bytes(pending)
+
+
+def _pop_sse_frame(pending: bytearray) -> bytes | None:
+    boundaries = tuple(
+        (index, separator)
+        for separator in (b"\r\n\r\n", b"\n\n", b"\r\r")
+        if (index := pending.find(separator)) >= 0
+    )
+    if not boundaries:
+        return None
+    index, separator = min(boundaries, key=lambda item: item[0])
+    end = index + len(separator)
+    frame = bytes(pending[:end])
+    del pending[:end]
+    return frame
 
 
 def _pop_sse_event(pending: bytearray) -> bytes | None:
@@ -203,6 +274,7 @@ def create_gateway(
             trust_env=False,
         )
     )
+    responses_adapters: dict[str, CodexNamespaceAdapter] = {}
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Mapping[str, Any]]:
@@ -309,6 +381,13 @@ def create_gateway(
                 parameter="model",
                 retryable=True,
             )
+        is_responses = request.url.path.endswith("/responses")
+        responses_adapter = (
+            responses_adapters.setdefault(service, CodexNamespaceAdapter())
+            if is_responses
+            else None
+        )
+        reconstruction: ReconstructionMap = {}
         client_name = request.path_params.get("client")
         profile_name = request.path_params.get("profile")
         if client_name is not None and profile_name is not None:
@@ -338,9 +417,20 @@ def create_gateway(
             payload = _apply_request_profile(
                 payload,
                 profile.parameters,
-                responses=request.url.path.endswith("/responses"),
+                responses=is_responses,
             )
-            body = json.dumps(payload, separators=(",", ":")).encode()
+        if is_responses:
+            assert responses_adapter is not None
+            try:
+                payload, reconstruction = responses_adapter.transform_request(payload)
+            except TransformationError as error:
+                return _error_response(
+                    400,
+                    "invalid_namespace",
+                    str(error),
+                    action="Correct the Responses namespace tools or continuation and retry.",
+                )
+        body = json.dumps(payload, separators=(",", ":")).encode()
         try:
             origin = _validated_upstream_origin(route.endpoint)
         except ValueError:
@@ -372,7 +462,8 @@ def create_gateway(
                 name: value
                 for name, value in request.headers.items()
                 if name.lower() in _REQUEST_HEADER_ALLOWLIST
-            },
+            }
+            | ({"accept-encoding": "identity"} if is_responses else {}),
             params=request.query_params,
         )
         try:
@@ -398,12 +489,15 @@ def create_gateway(
 
         return _UpstreamStreamingResponse(
             upstream,
+            responses_adapter=responses_adapter,
+            reconstruction=reconstruction,
             on_close=(lambda: activity.end(service)) if activity is not None else None,
             status_code=upstream.status_code,
             headers={
                 name: value
                 for name, value in upstream.headers.items()
                 if name.lower() in _RESPONSE_HEADER_ALLOWLIST
+                and (not is_responses or name.lower() != "content-encoding")
             },
         )
 

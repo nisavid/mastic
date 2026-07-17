@@ -250,6 +250,142 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn("authorization", upstream.requests[0].headers)
         self.assertEqual(json.loads(upstream.requests[0].content)["model"], "coding")
 
+    def test_responses_adapts_codex_namespaces_without_changing_chat(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.extend(
+            [
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"chat-1","name":"math__add"}']),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream(
+                        [
+                            b'{"id":"resp-1","output":[{"type":"function_call",',
+                            b'"name":"math__add","arguments":"{}"}]}',
+                        ]
+                    ),
+                ),
+            ]
+        )
+        app = create_gateway(resolver, client_factory=lambda: upstream)
+        namespaced_tool = {
+            "type": "namespace",
+            "name": "math",
+            "description": "Math tools",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "add",
+                    "description": "Add two numbers",
+                    "parameters": {},
+                }
+            ],
+        }
+
+        with TestClient(app) as client:
+            chat = client.post(
+                "/v1/chat/completions",
+                json={"model": "coding", "messages": [], "tools": [namespaced_tool]},
+            )
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "input": [], "tools": [namespaced_tool]},
+            )
+
+        self.assertEqual(chat.json(), {"id": "chat-1", "name": "math__add"})
+        self.assertEqual(
+            json.loads(upstream.requests[0].content)["tools"], [namespaced_tool]
+        )
+        forwarded = json.loads(upstream.requests[1].content)
+        self.assertEqual(forwarded["tools"][0]["name"], "math__add")
+        self.assertEqual(
+            forwarded["tools"][0]["description"],
+            "[math] Math tools\n\nAdd two numbers",
+        )
+        self.assertEqual(
+            response.json()["output"][0],
+            {
+                "type": "function_call",
+                "namespace": "math",
+                "name": "add",
+                "arguments": "{}",
+            },
+        )
+
+    def test_responses_continuation_reuses_the_exact_namespace_mapping(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.extend(
+            [
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream([b'{"id":"resp-1","output":[]}']),
+                ),
+                httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    stream=ChunkStream(
+                        [
+                            b'{"id":"resp-2","output":[{"type":"function_call",',
+                            b'"name":"math__add","arguments":"{}"}]}',
+                        ]
+                    ),
+                ),
+            ]
+        )
+        app = create_gateway(resolver, client_factory=lambda: upstream)
+
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/responses",
+                json={
+                    "model": "coding",
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "math",
+                            "tools": [
+                                {"type": "function", "name": "add", "parameters": {}}
+                            ],
+                        }
+                    ],
+                },
+            )
+            continued = client.post(
+                "/v1/responses",
+                json={
+                    "model": "coding",
+                    "previous_response_id": "resp-1",
+                    "input": [],
+                },
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(
+            continued.json()["output"][0],
+            {
+                "type": "function_call",
+                "namespace": "math",
+                "name": "add",
+                "arguments": "{}",
+            },
+        )
+        self.assertEqual(
+            json.loads(upstream.requests[1].content)["previous_response_id"],
+            "resp-1",
+        )
+
     def test_profiled_endpoints_enforce_supported_generation_parameters(self) -> None:
         resolver = FakeResolver(
             [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
@@ -501,6 +637,68 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(stream.closed)
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_stream_reconstructs_namespaces_and_preserves_other_frames(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        stream_bytes = (
+            b"event: response.output_item.added\n"
+            b'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"math__add","arguments":"{}"}}\n\n'
+            b"event: response.output_text.delta\n"
+            b'data:  {"type":"response.output_text.delta","delta":"hello"}\n\n'
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}\n\n'
+        )
+        stream = ChunkStream(
+            [stream_bytes[:51], stream_bytes[51:173], stream_bytes[173:]]
+        )
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        app = create_gateway(resolver, client_factory=lambda: upstream)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "coding",
+                    "stream": True,
+                    "input": [],
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "math",
+                            "tools": [{"type": "function", "name": "add"}],
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        frames = response.content.split(b"\n\n")
+        added = json.loads(frames[0].split(b"data: ", 1)[1])
+        self.assertEqual(
+            added["item"],
+            {
+                "type": "function_call",
+                "namespace": "math",
+                "name": "add",
+                "arguments": "{}",
+            },
+        )
+        self.assertIn(
+            b'data:  {"type":"response.output_text.delta","delta":"hello"}',
+            response.content,
+        )
+        self.assertTrue(stream.closed)
 
     def test_stream_close_failure_still_releases_activity(self) -> None:
         resolver = FakeResolver(
