@@ -1,8 +1,8 @@
 # How to validate a target-Mac deployment
 
 Use this guide after installing or updating MASTIC on a compatible Mac. It
-checks the installed entry points, inactive lifecycle, managed clients, one
-configured service, and clean shutdown.
+checks the installed entry points, inactive lifecycle, Application
+Configuration Targets, one configured service, and clean shutdown.
 
 ## Verify the installed control surface
 
@@ -28,7 +28,7 @@ mastic supervisor stop
 After `stop` completes, run `mastic status` again. Reading status must not
 reactivate `masticd`.
 
-## Verify managed client metadata
+## Verify Application Configuration Target metadata
 
 After configuring Codex, run:
 
@@ -59,7 +59,8 @@ With the service running, verify:
 - the exact Runtime Installation and Model Revision;
 - the resolved launch arguments;
 - the stable Gateway route and `/v1/models` entry;
-- one bounded completion or Responses request through the managed client;
+- one bounded completion or Responses request through the Application
+  Configuration Target;
 - the correlated logs and metrics;
 - a clean service stop.
 

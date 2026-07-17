@@ -154,7 +154,7 @@ and revision/runtime-scoped trust grants.
 
 ## Deployment validation
 
-A deployment is complete only after the installed control surface, explicit
-lifecycle, managed Application Configuration Targets, one application-native
+Deployment readiness is established only after the installed control surface,
+explicit lifecycle, Application Configuration Targets, one application-native
 request, and clean shutdown have been verified on the target Mac. Follow
 [Validate a target-Mac deployment](../how-to/validate-deployment.md).

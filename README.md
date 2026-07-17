@@ -12,9 +12,9 @@ MASTIC stands for **Modular, Adaptive, System-Tailored Inference Connector**.
 
 ## What MASTIC gives you
 
-- **A plan before a mutation.** Review the exact runtime, model, service,
-  gateway, client settings, ownership, and recovery steps before anything
-  changes.
+- **A Plan before a mutation.** Review the exact runtime, model, service,
+  gateway, Application Configuration Targets, ownership, and recovery steps
+  before anything changes.
 - **Exact local components.** Runtime installations and model revisions are
   recorded, verified, and kept distinct from shared cache bytes.
 - **One stable gateway.** Named inference services remain behind an
@@ -29,12 +29,16 @@ MASTIC stands for **Modular, Adaptive, System-Tailored Inference Connector**.
 
 ## Compatibility and project status
 
-MASTIC is an early, source-installed project. The first supported vertical
-targets macOS on Apple silicon with Python 3.11 or newer. It manages MLX-LM,
-MLX-VLM, and OptiQ runtime definitions and integrates with Codex and Hindsight.
-The current recommended profile requires at least 48 GiB of unified memory and
-24 GiB of free disk; other exact selections use the expert planning path and do
-not inherit that profile's validation evidence.
+MASTIC is an early, source-installed project. Its first development target is
+macOS on Apple silicon with Python 3.11 or newer. It manages MLX-LM, MLX-VLM,
+and OptiQ runtime definitions and configures Codex and Hindsight as Application
+Configuration Targets. The current recommended profile targets Macs with at
+least 48 GiB of unified memory and 24 GiB of free disk. Other exact selections
+use the exact-selection path and carry only the evidence collected for them.
+
+The repository validates the control plane and each managed Gateway contract.
+A clean-host, application-native Codex and Hindsight canary on the recommended
+target remains pending, so this development target is not yet a support claim.
 
 The current milestone is deliberately narrow. MASTIC is not yet a general
 adapter platform, remote inference host, multi-user service, or cross-platform
@@ -58,12 +62,12 @@ Open the guided setup:
 mastic setup
 ```
 
-MASTIC inspects the host, builds a complete plan, and asks for confirmation
+MASTIC inspects the host, builds a complete Plan, and asks for confirmation
 before applying it. Model and runtime downloads can be substantial; review the
-selected revisions, projected resources, client targets, and owned paths in
-that plan before continuing.
+selected revisions, projected resources, Application Configuration Targets,
+and owned paths in that Plan before continuing.
 
-To learn the workflow without applying a plan, follow
+To learn the workflow without applying a Plan, follow
 [Plan your first local inference service](docs/tutorials/first-plan.md).
 
 ## Operate an existing stack
