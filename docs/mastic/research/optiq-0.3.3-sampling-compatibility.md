@@ -11,7 +11,7 @@ model-developer profiles and their provenance.
 ## Runtime provenance
 
 The tested bundle lock at
-`tools/mastic/src/mastic/runtime_definitions/locks/optiq.lock` pins
+`src/mastic/runtime_definitions/locks/optiq.lock` pins
 `mlx-optiq==0.3.3` and `mlx-lm==0.31.3` exactly.
 
 - Published OptiQ source artifact: `mlx_optiq-0.3.3.tar.gz`, SHA-256
