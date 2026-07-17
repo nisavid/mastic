@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from mastic.infrastructure.responses_adapter import (
+    DELIMITER,
     CodexNamespaceAdapter,
     ReconstructionMap,
     TransformationError,
@@ -166,11 +167,12 @@ async def _iter_adapted_responses(
             yield raw
             return
         transformed = adapter.transform_response(original, reconstruction)
-        yield (
+        encoded = (
             raw
             if transformed == original
             else json.dumps(transformed, separators=(",", ":")).encode()
         )
+        yield _bounded_response_adaptation(encoded, limit)
         return
 
     pending = bytearray()
@@ -183,13 +185,19 @@ async def _iter_adapted_responses(
             if len(frame) > limit:
                 raise ResponseAdaptationTooLarge(limit)
             transformed = adapter.transform_sse_frame(frame, reconstruction)
-            yield transformed
+            yield _bounded_response_adaptation(transformed, limit)
             if _is_terminal_sse_event(frame):
                 return
         if len(pending) > limit:
             raise ResponseAdaptationTooLarge(limit)
     if pending:
         yield bytes(pending)
+
+
+def _bounded_response_adaptation(output: bytes, limit: int) -> bytes:
+    if len(output) > limit:
+        raise ResponseAdaptationTooLarge(limit)
+    return output
 
 
 def _pop_sse_message(pending: bytearray, *, include_separator: bool) -> bytes | None:
@@ -437,7 +445,15 @@ def create_gateway(
         if is_responses:
             assert responses_adapter is not None
             try:
+                _enforce_responses_transform_budget(payload, max_request_bytes)
                 payload, reconstruction = responses_adapter.transform_request(payload)
+            except RequestTooLarge:
+                return _error_response(
+                    413,
+                    "request_too_large",
+                    f"The request exceeds the {max_request_bytes}-byte Gateway limit.",
+                    action="Reduce the request size and retry.",
+                )
             except TransformationError as error:
                 return _error_response(
                     400,
@@ -445,7 +461,15 @@ def create_gateway(
                     str(error),
                     action="Correct the Responses namespace tools or continuation and retry.",
                 )
-        body = json.dumps(payload, separators=(",", ":")).encode()
+        try:
+            body = _encode_limited_json(payload, max_request_bytes)
+        except RequestTooLarge:
+            return _error_response(
+                413,
+                "request_too_large",
+                f"The request exceeds the {max_request_bytes}-byte Gateway limit.",
+                action="Reduce the request size and retry.",
+            )
         try:
             origin = _validated_upstream_origin(route.endpoint)
         except ValueError:
@@ -627,6 +651,67 @@ async def _read_limited_body(request: Request, limit: int) -> bytes:
             raise RequestTooLarge
         body.extend(chunk)
     return bytes(body)
+
+
+def _encode_limited_json(payload: Any, limit: int) -> bytes:
+    body = bytearray()
+    encoder = json.JSONEncoder(separators=(",", ":"))
+    for chunk in encoder.iterencode(payload):
+        encoded = chunk.encode()
+        if len(body) + len(encoded) > limit:
+            raise RequestTooLarge
+        body.extend(encoded)
+    return bytes(body)
+
+
+def _enforce_responses_transform_budget(payload: dict[str, Any], limit: int) -> None:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return
+
+    namespaces: list[tuple[str, str, list[Any]]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "namespace":
+            continue
+        namespace = tool.get("name")
+        description = tool.get("description", "")
+        children = tool.get("tools")
+        if (
+            not isinstance(namespace, str)
+            or not namespace
+            or not isinstance(description, str)
+            or not isinstance(children, list)
+            or any(
+                not isinstance(child, dict)
+                or child.get("type") != "function"
+                or not isinstance(child.get("name"), str)
+                or not child.get("name")
+                or not isinstance(child.get("description", ""), str)
+                for child in children
+            )
+        ):
+            return
+        namespaces.append((namespace, description, children))
+
+    transformed_string_bytes = 0
+    for namespace, namespace_description, children in namespaces:
+        namespace_bytes = len(namespace.encode())
+        namespace_description_bytes = len(namespace_description.encode())
+        for child in children:
+            child_name = child["name"]
+            child_description = child.get("description", "")
+            transformed_string_bytes += (
+                namespace_bytes + len(DELIMITER) + len(child_name.encode())
+            )
+            if namespace_description:
+                transformed_string_bytes += (
+                    namespace_bytes
+                    + namespace_description_bytes
+                    + len(child_description.encode())
+                    + (5 if child_description else 3)
+                )
+            if transformed_string_bytes > limit:
+                raise RequestTooLarge
 
 
 def _validated_upstream_origin(endpoint: str) -> str:
