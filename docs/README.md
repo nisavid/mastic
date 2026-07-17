@@ -8,8 +8,8 @@ Start here when you are new to the project and want a safe first encounter
 with its planning workflow.
 
 - [Plan your first local inference service](tutorials/first-plan.md) — install
-  MASTIC, inspect an empty system, and review a complete plan without applying
-  it.
+  MASTIC, inspect an empty system, and review a resolved setup preview without
+  applying it.
 
 ## Complete an operational task
 
