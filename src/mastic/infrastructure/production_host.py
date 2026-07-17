@@ -375,7 +375,7 @@ def coherent_client_context(
         and requested_value != service_value
     ):
         raise ValueError(
-            "client context_window must match the selected service max_context"
+            "Application Configuration Target context_window must match the selected service max_context"
         )
     return requested_value or service_value
 
