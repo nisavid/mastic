@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import ipaddress
 import json
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ _RESPONSE_HEADER_ALLOWLIST = frozenset(
     {"cache-control", "content-encoding", "content-type", "x-request-id"}
 )
 DEFAULT_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_RESPONSE_ADAPTATION_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_RESPONSE_ADAPTERS = 64
 DEFAULT_UPSTREAM_RESPONSE_TIMEOUT = 30.0
 _SSE_INSPECTION_LIMIT = 1024 * 1024
 _TERMINAL_RESPONSE_EVENTS = frozenset(
@@ -83,6 +86,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
         *,
         responses_adapter: CodexNamespaceAdapter | None = None,
         reconstruction: ReconstructionMap | None = None,
+        max_response_adaptation_bytes: int = DEFAULT_MAX_RESPONSE_ADAPTATION_BYTES,
         on_close: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -96,6 +100,7 @@ class _UpstreamStreamingResponse(StreamingResponse):
                 responses_adapter,
                 reconstruction or {},
                 content_type=content_type.strip().lower(),
+                limit=max_response_adaptation_bytes,
             )
         else:
             body = (
@@ -128,7 +133,7 @@ async def _iter_sse_until_terminal(
         yield chunk
         pending.extend(chunk)
         while True:
-            event = _pop_sse_event(pending)
+            event = _pop_sse_message(pending, include_separator=False)
             if event is None:
                 break
             if _is_terminal_sse_event(event):
@@ -143,9 +148,15 @@ async def _iter_adapted_responses(
     reconstruction: ReconstructionMap,
     *,
     content_type: str,
+    limit: int,
 ) -> AsyncIterator[bytes]:
     if content_type != "text/event-stream":
-        raw = b"".join([chunk async for chunk in upstream.aiter_bytes()])
+        body = bytearray()
+        async for chunk in upstream.aiter_bytes():
+            if len(body) + len(chunk) > limit:
+                raise ResponseAdaptationTooLarge(limit)
+            body.extend(chunk)
+        raw = bytes(body)
         if "json" not in content_type or not raw:
             yield raw
             return
@@ -166,18 +177,22 @@ async def _iter_adapted_responses(
     async for chunk in upstream.aiter_bytes():
         pending.extend(chunk)
         while True:
-            frame = _pop_sse_frame(pending)
+            frame = _pop_sse_message(pending, include_separator=True)
             if frame is None:
                 break
+            if len(frame) > limit:
+                raise ResponseAdaptationTooLarge(limit)
             transformed = adapter.transform_sse_frame(frame, reconstruction)
             yield transformed
             if _is_terminal_sse_event(frame):
                 return
+        if len(pending) > limit:
+            raise ResponseAdaptationTooLarge(limit)
     if pending:
         yield bytes(pending)
 
 
-def _pop_sse_frame(pending: bytearray) -> bytes | None:
+def _pop_sse_message(pending: bytearray, *, include_separator: bool) -> bytes | None:
     boundaries = tuple(
         (index, separator)
         for separator in (b"\r\n\r\n", b"\n\n", b"\r\r")
@@ -187,23 +202,9 @@ def _pop_sse_frame(pending: bytearray) -> bytes | None:
         return None
     index, separator = min(boundaries, key=lambda item: item[0])
     end = index + len(separator)
-    frame = bytes(pending[:end])
+    message = bytes(pending[: end if include_separator else index])
     del pending[:end]
-    return frame
-
-
-def _pop_sse_event(pending: bytearray) -> bytes | None:
-    boundaries = tuple(
-        (index, separator)
-        for separator in (b"\r\n\r\n", b"\n\n", b"\r\r")
-        if (index := pending.find(separator)) >= 0
-    )
-    if not boundaries:
-        return None
-    index, separator = min(boundaries, key=lambda item: item[0])
-    event = bytes(pending[:index])
-    del pending[: index + len(separator)]
-    return event
+    return message
 
 
 def _is_terminal_sse_event(event: bytes) -> bool:
@@ -252,6 +253,8 @@ def create_gateway(
     bind_host: str = "127.0.0.1",
     client_factory: Callable[[], Any] | None = None,
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+    max_response_adaptation_bytes: int = DEFAULT_MAX_RESPONSE_ADAPTATION_BYTES,
+    max_response_adapters: int = DEFAULT_MAX_RESPONSE_ADAPTERS,
     upstream_response_timeout: float = DEFAULT_UPSTREAM_RESPONSE_TIMEOUT,
     activity: GatewayActivity | None = None,
     authenticate: Callable[[str | None], bool] | None = None,
@@ -261,7 +264,12 @@ def create_gateway(
     """Build the ASGI Gateway using injected route and HTTP client boundaries."""
 
     validate_loopback_bind(bind_host)
-    if max_request_bytes <= 0 or upstream_response_timeout <= 0:
+    if (
+        max_request_bytes <= 0
+        or max_response_adaptation_bytes <= 0
+        or max_response_adapters <= 0
+        or upstream_response_timeout <= 0
+    ):
         raise ValueError("Gateway request limits must be positive.")
     make_client = client_factory or (
         lambda: httpx.AsyncClient(
@@ -274,7 +282,18 @@ def create_gateway(
             trust_env=False,
         )
     )
-    responses_adapters: dict[str, CodexNamespaceAdapter] = {}
+    responses_adapters: OrderedDict[str, CodexNamespaceAdapter] = OrderedDict()
+
+    def response_adapter(service: str) -> CodexNamespaceAdapter:
+        adapter = responses_adapters.get(service)
+        if adapter is None:
+            adapter = CodexNamespaceAdapter()
+            responses_adapters[service] = adapter
+            if len(responses_adapters) > max_response_adapters:
+                responses_adapters.popitem(last=False)
+        else:
+            responses_adapters.move_to_end(service)
+        return adapter
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[Mapping[str, Any]]:
@@ -382,11 +401,7 @@ def create_gateway(
                 retryable=True,
             )
         is_responses = request.url.path.endswith("/responses")
-        responses_adapter = (
-            responses_adapters.setdefault(service, CodexNamespaceAdapter())
-            if is_responses
-            else None
-        )
+        responses_adapter = response_adapter(service) if is_responses else None
         reconstruction: ReconstructionMap = {}
         client_name = request.path_params.get("client")
         profile_name = request.path_params.get("profile")
@@ -491,6 +506,7 @@ def create_gateway(
             upstream,
             responses_adapter=responses_adapter,
             reconstruction=reconstruction,
+            max_response_adaptation_bytes=max_response_adaptation_bytes,
             on_close=(lambda: activity.end(service)) if activity is not None else None,
             status_code=upstream.status_code,
             headers={
@@ -572,6 +588,13 @@ def _apply_request_profile(
 
 class RequestTooLarge(ValueError):
     """The Gateway request exceeded its configured body limit."""
+
+
+class ResponseAdaptationTooLarge(RuntimeError):
+    """A Responses body exceeded the memory allowed for safe adaptation."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"response adaptation exceeded the {limit}-byte limit")
 
 
 async def _read_limited_body(request: Request, limit: int) -> bytes:
