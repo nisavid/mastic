@@ -847,6 +847,64 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
+    def test_responses_json_limit_rejects_namespace_reconstruction_expansion(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        body = (
+            b'{"id":"resp-1","output":[{"type":"function_call",'
+            b'"name":"math__add","arguments":"{}"}]}'
+        )
+        stream = ChunkStream([body])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=len(body),
+        )
+
+        with self.assertRaises(Exception) as raised:
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "coding",
+                        "input": [],
+                        "tools": [
+                            {
+                                "type": "namespace",
+                                "name": "math",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "add",
+                                        "parameters": {},
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+
+        self.assertIn(
+            f"response adaptation exceeded the {len(body)}-byte limit",
+            repr(raised.exception),
+        )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
     def test_responses_rejects_gzip_before_decoding_and_releases_activity(
         self,
     ) -> None:
@@ -919,6 +977,65 @@ class GatewayTests(unittest.TestCase):
 
         self.assertIn(
             "response adaptation exceeded the 16-byte limit",
+            repr(raised.exception),
+        )
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
+        self.assertEqual(activity.active["coding"], 0)
+
+    def test_responses_sse_limit_rejects_namespace_reconstruction_expansion(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        frame = (
+            b'data: {"type":"response.output_item.added","item":'
+            b'{"type":"function_call","name":"math__add","arguments":"{}"}}\n\n'
+        )
+        stream = ChunkStream([frame])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            activity=activity,
+            max_response_adaptation_bytes=len(frame),
+        )
+
+        with self.assertRaises(Exception) as raised:
+            with TestClient(app) as client:
+                client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "coding",
+                        "stream": True,
+                        "input": [],
+                        "tools": [
+                            {
+                                "type": "namespace",
+                                "name": "math",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "add",
+                                        "parameters": {},
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+
+        self.assertIn(
+            f"response adaptation exceeded the {len(frame)}-byte limit",
             repr(raised.exception),
         )
         self.assertTrue(stream.closed)
@@ -1071,6 +1188,51 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 413)
         self.assertEqual(response.json()["error"]["code"], "request_too_large")
+        self.assertEqual(upstream.requests, [])
+
+    def test_responses_namespace_expansion_respects_request_limit(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FakeUpstreamClient()
+        payload = {
+            "model": "coding",
+            "input": [],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "n",
+                    "description": "d" * 100,
+                    "tools": [
+                        {"type": "function", "name": "a"},
+                        {"type": "function", "name": "b"},
+                        {"type": "function", "name": "c"},
+                        {"type": "function", "name": "d"},
+                    ],
+                }
+            ],
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.assertLessEqual(len(body), 384)
+        app = create_gateway(
+            resolver,
+            client_factory=lambda: upstream,
+            max_request_bytes=384,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                content=body,
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["error"]["code"], "request_too_large")
+        self.assertEqual(
+            response.json()["error"]["message"],
+            "The request exceeds the 384-byte Gateway limit.",
+        )
         self.assertEqual(upstream.requests, [])
 
     def test_proxy_requires_json_and_rejects_non_loopback_browser_origins(self) -> None:
