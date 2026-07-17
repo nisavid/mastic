@@ -10,7 +10,7 @@ and lifecycle.
 
 | Entry point | Contract |
 | --- | --- |
-| `mastic` | Human and machine CLI. No arguments open the TUI. |
+| `mastic` | Human and machine CLI; invoking it with no arguments opens the TUI. |
 | `masticd` | Foreground per-user Supervisor used by launchd. |
 | `python -m mastic.entrypoints daemon` | Private stable target used by MASTIC's generated LaunchAgent. |
 
@@ -109,7 +109,7 @@ The deployment owner must not author or mutate:
 - model cache contents;
 - Codex provider or model-catalog settings and Hindsight settings that MASTIC owns;
 - SQLite operational state or the control socket;
-- live Service Runs or Gateway state outside the mastic interface.
+- live Service Runs or Gateway state outside the `mastic` interface.
 
 This keeps `chezmoi apply` idempotent and prevents two systems from competing
 over the same desired state.
