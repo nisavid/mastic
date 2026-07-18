@@ -28,11 +28,11 @@ These observations must succeed without starting the Supervisor. Confirm that
 ```sh
 mastic supervisor start
 mastic supervisor status
-mastic supervisor stop
 ```
 
-After `stop` completes, run `mastic status` again. Reading status must not
-reactivate `masticd`.
+Leave the Supervisor running for the Gateway and service checks below. The
+final section stops the complete stack and verifies that reading status does
+not reactivate `masticd`.
 
 ## Verify Application Configuration Target metadata
 
@@ -87,6 +87,8 @@ mastic gateway routes
 mastic service logs SERVICE_NAME
 mastic service metrics SERVICE_NAME
 mastic service stop SERVICE_NAME
+mastic supervisor stop
+mastic status
 ```
 
 `service inspect` must show the intended model, runtime, resolved launch
@@ -94,7 +96,9 @@ arguments, and Gateway route. `service check` must pass while the service is
 healthy. Runtime inspection and model verification must identify the exact
 installed artifacts. The Gateway route list must contain the service, and its
 logs and metrics must correlate with that service's run. The final command must
-drain and stop the service without stopping the Gateway.
+report the Supervisor as stopped. `service stop` first demonstrates a clean
+service drain; `supervisor stop` then stops the Gateway and Supervisor, and the
+status observation must not reactivate either one.
 
 ## Keep application-native validation as a readiness gate
 
