@@ -410,11 +410,6 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 value_type="json",
             ),
             _option(
-                "sampling_profiles",
-                "JSON object of per-target or per-operation sampling profiles.",
-                value_type="json",
-            ),
-            _option(
                 "context_window",
                 "Application target and inference context window.",
                 value_type="integer",

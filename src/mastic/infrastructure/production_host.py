@@ -269,8 +269,8 @@ def application_target_port(
                 raise ValueError("sampling_profiles must be an object")
         else:
             raw_sampling = stored.sampling if stored is not None else {}
-        if not raw_sampling:
-            raw_sampling = default_sampling(repository, revision, name)
+            if not raw_sampling:
+                raw_sampling = default_sampling(repository, revision, name)
         sampling = {
             str(profile): sampling_profile(value)
             for profile, value in raw_sampling.items()

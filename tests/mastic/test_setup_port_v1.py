@@ -77,10 +77,6 @@ def selection(*, revision="2" * 40, trust=()):
         gateway_endpoint="http://127.0.0.1:8766/v1",
         application_targets=("codex", "hindsight"),
         application_target_options={"hindsight": {"profile": "default"}},
-        sampling_profiles={
-            "coding": {"temperature": 0.0, "top_p": 0.95},
-            "reflect": {"temperature": 0.9, "top_p": 0.95},
-        },
         context_window=32768,
     )
 
