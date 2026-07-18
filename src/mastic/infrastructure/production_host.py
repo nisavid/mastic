@@ -263,8 +263,11 @@ def application_target_port(
         model = config.models[alias.installation_name]
         repository = model.revision.repository
         revision = model.revision.revision
-        raw_sampling = parameters.get("sampling_profiles")
-        if not isinstance(raw_sampling, Mapping):
+        if "sampling_profiles" in parameters:
+            raw_sampling = parameters["sampling_profiles"]
+            if not isinstance(raw_sampling, Mapping):
+                raise ValueError("sampling_profiles must be an object")
+        else:
             raw_sampling = stored.sampling if stored is not None else {}
         if not raw_sampling:
             raw_sampling = default_sampling(repository, revision, name)

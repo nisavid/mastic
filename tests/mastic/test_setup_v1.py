@@ -146,6 +146,59 @@ class SetupV1Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     invalid.validate_exact()
 
+    def test_exact_selection_rejects_invalid_target_option_shapes(self) -> None:
+        base = _selection(service="coding", revision="3" * 40)
+        cases = (
+            (
+                replace(base, context_window=True),
+                "context_window must be a positive integer",
+            ),
+            (
+                replace(
+                    base,
+                    application_target_options={
+                        "hindsight": {"profile": 7},
+                    },
+                ),
+                "Hindsight profile must be",
+            ),
+            (
+                replace(
+                    base,
+                    application_targets=("codex",),
+                    application_target_options={"codex": {"context_window": True}},
+                ),
+                "application_target_options.codex.context_window must be a positive integer",
+            ),
+            (
+                replace(
+                    base,
+                    application_targets=("codex",),
+                    application_target_options={"codex": {"sampling_profiles": 7}},
+                ),
+                "application_target_options.codex.sampling_profiles must be an object",
+            ),
+            (
+                replace(
+                    base,
+                    application_targets=("codex",),
+                    application_target_options={
+                        "codex": {
+                            "sampling_profiles": {
+                                "coding": {"temprature": 0.6},
+                            }
+                        }
+                    },
+                ),
+                "unknown sampling profile fields: temprature",
+            ),
+        )
+
+        for invalid, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    invalid.validate_exact()
+
     def test_exact_selection_is_not_overwritten_by_default_capacity(self) -> None:
         resolver = SetupResolver(
             (self.compact,),
