@@ -12,8 +12,11 @@ import tomlkit
 
 from mastic.application.catalogue import Operation, OperationKind
 from mastic.application.config_schema import MasticConfig, validate_config
-from mastic.application.dispatch import ApplicationError, OperationRequest
-from mastic.application.manager import PreparedOperation
+from mastic.application.dispatch import (
+    ApplicationError,
+    OperationRequest,
+    PreparedOperation,
+)
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.model_supply import (
     ModelInstallation as SuppliedModelInstallation,

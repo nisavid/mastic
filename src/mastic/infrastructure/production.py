@@ -486,7 +486,7 @@ def compose_local(
         application.dispatcher, launchd, paths.control_socket
     )
     public_application = ApplicationComposition(
-        dispatcher=guarded,  # type: ignore[arg-type]
+        dispatcher=guarded,
         catalogue=application.catalogue,
         config_store=application.config_store,
         state_store=application.state_store,

@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from inspect import Parameter as SignatureParameter
 from inspect import Signature
-from typing import Annotated, Protocol
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -15,15 +15,9 @@ from rich.pretty import Pretty
 from mastic.application.catalogue import Operation, Parameter, ParameterKind
 from mastic.application.dispatch import (
     ApplicationError,
+    OperationDispatch,
     OperationRequest,
-    OperationResult,
 )
-
-
-class Dispatcher(Protocol):
-    def preview(self, request: OperationRequest) -> OperationResult: ...
-
-    def execute(self, request: OperationRequest) -> OperationResult: ...
 
 
 _ROOT_COMMANDS = ("setup", "remove", "status", "check", "doctor", "logs", "metrics")
@@ -40,7 +34,7 @@ _GROUPS = (
 
 
 def build_cli(
-    dispatcher: Dispatcher,
+    dispatcher: OperationDispatch,
     catalogue: Mapping[str, Operation],
     *,
     tui_launcher: Callable[[], int],
@@ -106,7 +100,7 @@ def _add_command(
     app: typer.Typer,
     command_name: str,
     operation: Operation,
-    dispatcher: Dispatcher,
+    dispatcher: OperationDispatch,
 ) -> None:
     help_text = operation.summary
     if operation.name == "status":
@@ -302,7 +296,7 @@ def _coerce_parameters(
 
 
 def _invoke(
-    dispatcher: Dispatcher,
+    dispatcher: OperationDispatch,
     operation: str,
     parameters: Mapping[str, object],
     *,

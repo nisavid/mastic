@@ -7,8 +7,12 @@ from typing import Protocol
 
 from mastic.application.catalogue import Operation, build_operation_catalogue
 from mastic.application.config_schema import MasticConfig, validate_config
-from mastic.application.dispatch import OperationDispatcher, SupervisorActivator
-from mastic.application.manager import ApplicationManager
+from mastic.application.dispatch import (
+    OperationDispatch,
+    OperationDispatcher,
+    SupervisorActivator,
+)
+from mastic.application.status import SnapshotProvider
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.host_integration import (
     LocalSnapshotProvider,
@@ -29,11 +33,11 @@ class OperationPort(Protocol):
 class ApplicationComposition:
     """The one dispatcher and local state shared by CLI and TUI surfaces."""
 
-    dispatcher: OperationDispatcher
+    dispatcher: OperationDispatch
     catalogue: dict[str, Operation]
     config_store: ConfigStore[MasticConfig]
     state_store: OperationalStateStore
-    snapshots: LocalSnapshotProvider
+    snapshots: SnapshotProvider
     paths: MasticPaths
 
 
@@ -60,7 +64,6 @@ def compose_application(
     state = state_store or OperationalStateStore(paths.state_db)
     runtimes = runtime_catalogue or RuntimeCatalogue.load_builtin()
     catalogue = dict(build_operation_catalogue())
-    dispatcher = OperationDispatcher(catalogue, activator)
     backend = LocalOperationBackend(
         catalogue=catalogue,
         config_store=config,
@@ -77,7 +80,7 @@ def compose_application(
         gateway_credential_path=paths.gateway_credential,
         model_intelligence=model_intelligence,
     )
-    ApplicationManager(catalogue, backend).register(dispatcher)
+    dispatcher = OperationDispatcher(catalogue, activator, backend)
     return ApplicationComposition(
         dispatcher=dispatcher,
         catalogue=catalogue,

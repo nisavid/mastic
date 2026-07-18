@@ -6,11 +6,12 @@ from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
 from mastic.application.catalogue import build_operation_catalogue
 from mastic.application.dispatch import ApplicationError, OperationResult
-from mastic.interfaces.tui import (
-    MasticApp,
+from mastic.application.status import (
+    GatewaySnapshot,
     ServiceSnapshot,
-    TuiSnapshot,
+    StatusSnapshot,
 )
+from mastic.interfaces.tui import MasticApp
 
 
 class _Dispatcher:
@@ -44,10 +45,13 @@ class _Dispatcher:
 
 
 class _Snapshots:
-    def snapshot(self) -> TuiSnapshot:
-        return TuiSnapshot(
+    def __init__(self, gateway: GatewaySnapshot | None = None) -> None:
+        self.gateway = gateway or GatewaySnapshot("ready", "127.0.0.1", 8766)
+
+    def snapshot(self) -> StatusSnapshot:
+        return StatusSnapshot(
             supervisor="running",
-            gateway="ready · 127.0.0.1:8766/v1",
+            gateway=self.gateway,
             services=(
                 ServiceSnapshot(
                     name="coding",
@@ -81,6 +85,18 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("coding", body)
             self.assertIn("Pinned", body)
             self.assertIn("blocked", body.lower())
+
+    async def test_machine_state_formats_structured_gateway_status(self) -> None:
+        async with self.app.run_test(size=(140, 45)):
+            state = str(self.app.query_one("#machine-state", Static).content)
+            self.assertIn("Gateway ready · 127.0.0.1:8766", state)
+
+            self.app.snapshots = _Snapshots(GatewaySnapshot("stopped"))
+            self.app.show_view("home")
+
+            state = str(self.app.query_one("#machine-state", Static).content)
+            self.assertIn("Gateway stopped", state)
+            self.assertNotIn("None", state)
 
     async def test_navigation_preserves_capability_and_changes_context(self) -> None:
         async with self.app.run_test(size=(140, 45)) as pilot:

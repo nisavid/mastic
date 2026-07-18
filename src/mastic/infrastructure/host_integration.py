@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.dispatch import OperationRequest
-from mastic.interfaces.tui import ServiceSnapshot, TuiSnapshot
+from mastic.application.status import GatewaySnapshot, ServiceSnapshot, StatusSnapshot
 
 
 _RESOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -79,7 +79,7 @@ class LocalSnapshotProvider:
     def __init__(self, dispatcher: StatusDispatcher) -> None:
         self._dispatcher = dispatcher
 
-    def snapshot(self) -> TuiSnapshot:
+    def snapshot(self) -> StatusSnapshot:
         result = self._dispatcher.execute(OperationRequest("status"))
         value = result.value
         supervisor = _mapping(value.get("supervisor"))
@@ -90,20 +90,19 @@ class LocalSnapshotProvider:
         host = str(gateway.get("host", "127.0.0.1"))
         port = gateway.get("port")
         gateway_state = str(gateway.get("state", "stopped"))
-        gateway_text = (
-            f"{gateway_state} · {host}:{port}"
-            if isinstance(port, int)
-            else gateway_state
-        )
         operations = _sequence(value.get("operations"))
         active = sum(
             1
             for item in operations
             if _mapping(item).get("status") in {"queued", "running", "resuming"}
         )
-        return TuiSnapshot(
+        return StatusSnapshot(
             supervisor=str(supervisor.get("state", "stopped")),
-            gateway=gateway_text,
+            gateway=GatewaySnapshot(
+                state=gateway_state,
+                host=host,
+                port=port if isinstance(port, int) else None,
+            ),
             services=services,
             active_operations=active,
             pressure=str(value.get("pressure", supervisor.get("pressure", "unknown"))),
