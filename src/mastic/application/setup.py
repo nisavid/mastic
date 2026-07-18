@@ -18,6 +18,11 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from mastic.application.application_targets import (
+    SamplingProfile,
+    validate_application_target_sampling_profiles,
+)
+from mastic.application.config_schema import validate_hindsight_profile_name
 from mastic.domain.resources import ActivationPolicy, ResourceName
 
 
@@ -200,6 +205,32 @@ class ExactSetupSelection:
                 raise ValueError(
                     f"application_target_options.{application_target}.max_concurrent must be a positive integer"
                 )
+            if application_target == "hindsight" and "profile" in options:
+                validate_hindsight_profile_name(options["profile"])
+            application_target_context = options.get("context_window")
+            if application_target_context is not None and (
+                type(application_target_context) is not int
+                or application_target_context <= 0
+            ):
+                raise ValueError(
+                    f"application_target_options.{application_target}.context_window must be a positive integer"
+                )
+            raw_sampling = options.get("sampling_profiles")
+            if raw_sampling is not None:
+                if not isinstance(raw_sampling, Mapping):
+                    raise ValueError(
+                        f"application_target_options.{application_target}.sampling_profiles must be an object"
+                    )
+                sampling: dict[str, SamplingProfile] = {}
+                for profile_name, raw_profile in raw_sampling.items():
+                    if not isinstance(raw_profile, Mapping):
+                        raise ValueError(
+                            f"application_target_options.{application_target}.sampling_profiles.{profile_name} must be an object"
+                        )
+                    sampling[profile_name] = SamplingProfile.from_mapping(raw_profile)
+                validate_application_target_sampling_profiles(
+                    application_target, sampling
+                )
         if (
             "hindsight" in self.application_targets
             and not self.application_target_options.get("hindsight", {}).get("profile")
@@ -212,6 +243,10 @@ class ExactSetupSelection:
             type(max_context) is not int or max_context <= 0
         ):
             raise ValueError("service_options.max_context must be a positive integer")
+        if self.context_window is not None and (
+            type(self.context_window) is not int or self.context_window <= 0
+        ):
+            raise ValueError("context_window must be a positive integer")
         if (
             self.context_window is not None
             and max_context is not None
@@ -221,13 +256,6 @@ class ExactSetupSelection:
         if max_context is not None:
             for application_target, options in self.application_target_options.items():
                 application_target_context = options.get("context_window")
-                if application_target_context is not None and (
-                    type(application_target_context) is not int
-                    or application_target_context <= 0
-                ):
-                    raise ValueError(
-                        f"application_target_options.{application_target}.context_window must be a positive integer"
-                    )
                 if (
                     application_target_context is not None
                     and application_target_context > max_context
