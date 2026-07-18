@@ -170,18 +170,35 @@ class ExactSetupSelection:
                 + ", ".join(unselected_options)
             )
         allowed_application_target_options = {
-            "profile",
-            "provider",
-            "max_concurrent",
-            "sampling_profiles",
-            "context_window",
+            "codex": {"provider", "sampling_profiles", "context_window"},
+            "hindsight": {
+                "profile",
+                "provider",
+                "max_concurrent",
+                "sampling_profiles",
+                "context_window",
+            },
         }
         for application_target, options in self.application_target_options.items():
-            unknown = sorted(set(options) - allowed_application_target_options)
+            unknown = sorted(
+                set(options) - allowed_application_target_options[application_target]
+            )
             if unknown:
                 raise ValueError(
                     f"application_target_options.{application_target} has unknown fields: "
                     + ", ".join(unknown)
+                )
+            provider = options.get("provider")
+            if provider is not None and (type(provider) is not str or not provider):
+                raise ValueError(
+                    f"application_target_options.{application_target}.provider must be a nonempty string"
+                )
+            max_concurrent = options.get("max_concurrent")
+            if max_concurrent is not None and (
+                type(max_concurrent) is not int or max_concurrent <= 0
+            ):
+                raise ValueError(
+                    f"application_target_options.{application_target}.max_concurrent must be a positive integer"
                 )
         if (
             "hindsight" in self.application_targets
