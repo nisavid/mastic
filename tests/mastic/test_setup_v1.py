@@ -113,6 +113,39 @@ class SetupV1Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "context_window.*max_context"):
             invalid.validate_exact()
 
+    def test_application_target_options_reject_values_that_would_be_coerced(
+        self,
+    ) -> None:
+        base = _selection(service="coding", revision="3" * 40)
+        cases = (
+            (
+                {"codex": {"provider": 7}},
+                "application_target_options.codex.provider must be a nonempty string",
+            ),
+            (
+                {"hindsight": {"profile": "default", "provider": 7}},
+                "application_target_options.hindsight.provider must be a nonempty string",
+            ),
+            (
+                {"hindsight": {"profile": "default", "max_concurrent": 1.9}},
+                "application_target_options.hindsight.max_concurrent must be a positive integer",
+            ),
+            (
+                {"hindsight": {"profile": "default", "max_concurrent": True}},
+                "application_target_options.hindsight.max_concurrent must be a positive integer",
+            ),
+        )
+
+        for options, message in cases:
+            with self.subTest(options=options):
+                invalid = replace(
+                    base,
+                    application_targets=tuple(options),
+                    application_target_options=options,
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    invalid.validate_exact()
+
     def test_exact_selection_is_not_overwritten_by_default_capacity(self) -> None:
         resolver = SetupResolver(
             (self.compact,),

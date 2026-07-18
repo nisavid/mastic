@@ -42,7 +42,9 @@ class CodexTargetOptions:
     model: CodexModelMetadata | None = None
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.provider_id):
+        if type(self.provider_id) is not str or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", self.provider_id
+        ):
             raise ValueError("Codex provider ID must be a TOML-safe identifier")
 
 
@@ -52,9 +54,9 @@ class HindsightTargetOptions:
     max_concurrent: int = 1
 
     def __post_init__(self) -> None:
-        if not self.provider:
+        if type(self.provider) is not str or not self.provider:
             raise ValueError("Hindsight provider is required")
-        if self.max_concurrent <= 0:
+        if type(self.max_concurrent) is not int or self.max_concurrent <= 0:
             raise ValueError("Hindsight max_concurrent must be positive")
 
 

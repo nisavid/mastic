@@ -292,7 +292,9 @@ def application_target_port(
             sampling_profiles=sampling,
             target=(
                 CodexTargetOptions(
-                    provider_id=str(parameters.get("provider", stored_codex_provider)),
+                    provider_id=_application_target_provider(
+                        parameters.get("provider", stored_codex_provider), "Codex"
+                    ),
                     model=CodexModelMetadata(
                         slug=str(service.route),
                         display_name=display_name,
@@ -301,15 +303,16 @@ def application_target_port(
                 )
                 if name == "codex"
                 else HindsightTargetOptions(
-                    provider=str(
+                    provider=_application_target_provider(
                         parameters.get(
                             "provider",
                             stored.provider
                             if stored and name == "hindsight"
                             else "openai",
-                        )
+                        ),
+                        "Hindsight",
                     ),
-                    max_concurrent=int(
+                    max_concurrent=_application_target_max_concurrent(
                         parameters.get(
                             "max_concurrent",
                             stored.max_concurrent
@@ -373,6 +376,18 @@ def application_target_port(
             paths.state_dir / "application-targets" / f"{name}.transition.lock"
         ),
     )
+
+
+def _application_target_provider(value: object, target: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{target} provider must be a nonempty string")
+    return value
+
+
+def _application_target_max_concurrent(value: object) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError("Hindsight max_concurrent must be a positive integer")
+    return value
 
 
 def coherent_application_target_context(
