@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
 
-from .catalogue import Operation, OperationKind
+from .catalogue import Operation, OperationKind, SupervisorRequirement
 
 
 class SupervisorActivator(Protocol):
@@ -37,6 +36,19 @@ class OperationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedOperation:
+    """A validated operation preview ready to cross a mutation boundary."""
+
+    requires_supervisor: bool
+    execute: Callable[[], Mapping[str, object]]
+    events: tuple[Mapping[str, object], ...] = ()
+
+
+class OperationBackend(Protocol):
+    def prepare(self, request: OperationRequest) -> PreparedOperation: ...
+
+
+@dataclass(frozen=True, slots=True)
 class OperationResult:
     operation: str
     value: Mapping[str, object]
@@ -53,46 +65,24 @@ class OperationResult:
         )
 
 
-@dataclass(slots=True)
-class _Execution:
-    request: OperationRequest
-    activated: bool = False
+class OperationDispatch(Protocol):
+    def preview(self, request: OperationRequest) -> OperationResult: ...
 
-
-Handler = Callable[[OperationRequest], OperationResult]
+    def execute(self, request: OperationRequest) -> OperationResult: ...
 
 
 class OperationDispatcher:
-    """Enforce catalogue availability and Supervisor activation policy."""
+    """Prepare and dispatch catalogue operations through shared policy."""
 
     def __init__(
         self,
         catalogue: Mapping[str, Operation],
         activator: SupervisorActivator,
+        backend: OperationBackend,
     ) -> None:
         self._catalogue = catalogue
         self._activator = activator
-        self._handlers: dict[str, Handler] = {}
-        self._preview_handlers: dict[str, Handler] = {}
-        self._execution: ContextVar[_Execution | None] = ContextVar(
-            "mastic_operation_execution", default=None
-        )
-
-    def register(self, name: str, handler: Handler) -> None:
-        if name not in self._catalogue:
-            raise ApplicationError("unknown_operation", f"unknown operation: {name}")
-        if name in self._handlers:
-            raise ValueError(f"operation already registered: {name}")
-        self._handlers[name] = handler
-
-    def register_preview(self, name: str, handler: Handler) -> None:
-        """Register a side-effect-free resolved-preview handler."""
-
-        if name not in self._catalogue:
-            raise ApplicationError("unknown_operation", f"unknown operation: {name}")
-        if name in self._preview_handlers:
-            raise ValueError(f"operation preview already registered: {name}")
-        self._preview_handlers[name] = handler
+        self._backend = backend
 
     def preview(self, request: OperationRequest) -> OperationResult:
         """Resolve an operation preview without activating or executing it."""
@@ -101,53 +91,71 @@ class OperationDispatcher:
             raise ApplicationError(
                 "unknown_operation", f"unknown operation: {request.name}"
             )
-        handler = self._preview_handlers.get(request.name)
-        if handler is None:
-            raise ApplicationError(
-                "preview_unavailable",
-                f"{request.name} cannot be previewed in this installation",
-            )
-        result = handler(request)
-        if result.operation != request.name:
-            raise ValueError("preview handler returned a result for another operation")
-        return result
+        operation = self._catalogue[request.name]
+        prepared = self._backend.prepare(request)
+        preview_events = tuple(dict(event) for event in prepared.events)
+        identity = next(
+            (
+                event["preview_fingerprint"]
+                for event in reversed(preview_events)
+                if isinstance(event.get("preview_fingerprint"), str)
+            ),
+            None,
+        )
+        value = {
+            "schema_version": 1,
+            "operation": request.name,
+            "state": "review_required",
+            "confirmation_required": operation.confirmation,
+            "requires_supervisor": prepared.requires_supervisor,
+            "preview": preview_events,
+        }
+        if identity is not None:
+            value["preview_fingerprint"] = identity
+        return OperationResult(request.name, value, events=prepared.events)
 
     def execute(self, request: OperationRequest) -> OperationResult:
         if request.name not in self._catalogue:
             raise ApplicationError(
                 "unknown_operation", f"unknown operation: {request.name}"
             )
-        handler = self._handlers.get(request.name)
-        if handler is None:
+        operation = self._catalogue[request.name]
+        prepared = self._backend.prepare(request)
+        if operation.confirmation and request.parameters.get("confirmed") is not True:
             raise ApplicationError(
-                "operation_unavailable",
-                f"{request.name} is not available in this installation",
-                next_actions=("run mastic doctor", "inspect mastic --help"),
+                "confirmation_required",
+                f"{request.name} requires review and explicit confirmation",
+                next_actions=(
+                    f"mastic {request.name.replace('.', ' ')} --help",
+                    "rerun with --yes after reviewing the resolved preview",
+                ),
             )
-        execution = _Execution(request)
-        token = self._execution.set(execution)
+        activated = False
+        if prepared.requires_supervisor:
+            if operation.kind is OperationKind.QUERY:
+                raise ApplicationError(
+                    "activation_forbidden",
+                    f"read-only operation {request.name} cannot start the Supervisor",
+                )
+            if operation.supervisor is not SupervisorRequirement.NEVER_START:
+                self._activator.activate()
+                activated = True
         try:
-            result = handler(request)
-        finally:
-            self._execution.reset(token)
-        if result.operation != request.name:
-            raise ValueError("handler returned a result for another operation")
-        return replace(result, supervisor_started=execution.activated)
-
-    def require_supervisor(self, request: OperationRequest) -> None:
-        operation = self._catalogue.get(request.name)
-        if operation is None:
+            value = prepared.execute()
+        except ApplicationError:
+            raise
+        except Exception as error:
             raise ApplicationError(
-                "unknown_operation", f"unknown operation: {request.name}"
-            )
-        if operation.kind is OperationKind.QUERY:
-            raise ApplicationError(
-                "activation_forbidden",
-                f"read-only operation {request.name} cannot start the Supervisor",
-            )
-        execution = self._execution.get()
-        if execution is None or execution.request is not request:
-            raise RuntimeError("Supervisor activation must occur inside dispatch")
-        if not execution.activated:
-            self._activator.activate()
-            execution.activated = True
+                "operation_failed",
+                f"{request.name} failed: {error}",
+                next_actions=(
+                    "mastic doctor",
+                    f"mastic {request.name.replace('.', ' ')} --help",
+                ),
+            ) from error
+        return OperationResult(
+            request.name,
+            value,
+            events=prepared.events,
+            supervisor_started=activated,
+        )

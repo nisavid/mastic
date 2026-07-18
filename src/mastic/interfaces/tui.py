@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from functools import partial
-from typing import Protocol
 
 from textual import events, work
 from textual.app import App, ComposeResult
@@ -16,33 +14,15 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Footer, Input, Label, Select, Static
 
 from mastic.application.catalogue import Operation, ParameterKind
-from mastic.application.dispatch import ApplicationError, OperationRequest
-
-from .cli import Dispatcher
-
-
-@dataclass(frozen=True, slots=True)
-class ServiceSnapshot:
-    name: str
-    state: str
-    model: str
-    runtime: str
-    route: str | None = None
-    pinned: bool = False
-    detail: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class TuiSnapshot:
-    supervisor: str
-    gateway: str
-    services: tuple[ServiceSnapshot, ...] = ()
-    active_operations: int = 0
-    pressure: str = "unknown"
-
-
-class SnapshotProvider(Protocol):
-    def snapshot(self) -> TuiSnapshot: ...
+from mastic.application.dispatch import (
+    ApplicationError,
+    OperationDispatch,
+    OperationRequest,
+)
+from mastic.application.status import (
+    SnapshotProvider,
+    StatusSnapshot,
+)
 
 
 class OperationCommands(Provider):
@@ -190,7 +170,7 @@ class MasticApp(App[None]):
 
     def __init__(
         self,
-        dispatcher: Dispatcher,
+        dispatcher: OperationDispatch,
         catalogue: Mapping[str, Operation],
         snapshots: SnapshotProvider,
     ) -> None:
@@ -443,10 +423,11 @@ class MasticApp(App[None]):
         self.query_one("#operation-form", Vertical).styles.display = "none"
         self.query_one("#workspace-actions", Horizontal).styles.display = "block"
         snapshot = self.snapshots.snapshot()
+        gateway = self._gateway_label(snapshot)
         self.current_view = name
         self.query_one("#machine-state", Static).update(
             f"{self._state_mark(snapshot.supervisor)} Supervisor {snapshot.supervisor}   "
-            f"{self._state_mark(snapshot.gateway)} Gateway {snapshot.gateway}   "
+            f"{self._state_mark(snapshot.gateway.state)} Gateway {gateway}   "
             f"◆ Pressure {snapshot.pressure}   ↻ {snapshot.active_operations} active"
         )
         title, body = self._content(name, snapshot)
@@ -609,7 +590,7 @@ class MasticApp(App[None]):
             "to return to the editable inputs."
         )
 
-    def _content(self, name: str, snapshot: TuiSnapshot) -> tuple[str, str]:
+    def _content(self, name: str, snapshot: StatusSnapshot) -> tuple[str, str]:
         if name == "home":
             services = self._service_rows(snapshot)
             empty = (
@@ -711,7 +692,14 @@ class MasticApp(App[None]):
         return name.replace("-", " ").title(), "No data."
 
     @staticmethod
-    def _service_rows(snapshot: TuiSnapshot) -> str:
+    def _gateway_label(snapshot: StatusSnapshot) -> str:
+        gateway = snapshot.gateway
+        if gateway.host is None or gateway.port is None:
+            return gateway.state
+        return f"{gateway.state} · {gateway.host}:{gateway.port}"
+
+    @staticmethod
+    def _service_rows(snapshot: StatusSnapshot) -> str:
         return "\n".join(
             f"{'📌 Pinned' if item.pinned else 'Unpinned'}  {item.name:<16} "
             f"{item.state.upper():<10}  {item.model} · {item.runtime}"
@@ -720,7 +708,7 @@ class MasticApp(App[None]):
         )
 
     @staticmethod
-    def _inspector(snapshot: TuiSnapshot) -> str:
+    def _inspector(snapshot: StatusSnapshot) -> str:
         if not snapshot.services:
             return (
                 "SELECTED\n\nNo service selected.\n\n"

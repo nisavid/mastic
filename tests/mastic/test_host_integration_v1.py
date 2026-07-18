@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from mastic.application.dispatch import OperationResult
+from mastic.application.status import StatusSnapshot
 from mastic.infrastructure.host_integration import (
     LaunchdSupervisorActivator,
     LocalSnapshotProvider,
@@ -115,9 +116,12 @@ class HostIntegrationTests(unittest.TestCase):
 
         snapshot = LocalSnapshotProvider(dispatcher).snapshot()
 
+        self.assertIsInstance(snapshot, StatusSnapshot)
         self.assertEqual(dispatcher.requests[0].name, "status")
         self.assertEqual(snapshot.supervisor, "running")
-        self.assertIn("127.0.0.1:8766", snapshot.gateway)
+        self.assertEqual(snapshot.gateway.state, "ready")
+        self.assertEqual(snapshot.gateway.host, "127.0.0.1")
+        self.assertEqual(snapshot.gateway.port, 8766)
         self.assertEqual(snapshot.pressure, "warning")
         self.assertEqual(snapshot.active_operations, 1)
         self.assertEqual(snapshot.services[0].runtime, "optiq@0.3.3")
