@@ -32,10 +32,6 @@ def _selection(*, service: str, revision: str) -> ExactSetupSelection:
         gateway_endpoint="http://127.0.0.1:8766/v1",
         application_targets=("codex", "hindsight"),
         application_target_options={"hindsight": {"profile": "default"}},
-        sampling_profiles={
-            "coding": {"temperature": 0.0, "top_p": 0.95},
-            "memory-reflect": {"temperature": 0.9, "top_p": 0.95},
-        },
         service_options={"kv_config": "kv_config.json", "mtp": True},
     )
 
@@ -264,7 +260,6 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(
             preview.application_target_options["hindsight"]["profile"], "default"
         )
-        self.assertEqual(preview.sampling_profiles["coding"]["temperature"], 0.0)
 
     def test_guided_setup_never_falls_back_to_an_oversized_profile(self) -> None:
         undersized = SetupPreflight(

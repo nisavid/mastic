@@ -319,7 +319,6 @@ class SetupOperationPort:
                 "application_target_options": _plain(
                     preview.application_target_options
                 ),
-                "sampling_profiles": _plain(preview.sampling_profiles),
                 "context_window": preview.context_window,
             },
             "preflight": _plain(resolved.preflight),
@@ -420,7 +419,6 @@ class SetupOperationPort:
                         # the application target owner resolves its public Gateway route.
                         "service": selection.service_name,
                         "endpoint": selection.gateway_endpoint,
-                        "sampling_profiles": selection.sampling_profiles,
                         "context_window": selection.context_window,
                         **options,
                         "confirmed": True,
@@ -563,7 +561,6 @@ def _selection(
                 "gateway_endpoint",
                 "application_targets",
                 "application_target_options",
-                "sampling_profiles",
                 "context_window",
             }
         }
@@ -594,9 +591,6 @@ def _selection(
         if "application_targets" in overrides
         else baseline.application_targets
     )
-    sampling = overrides.get("sampling_profiles", baseline.sampling_profiles)
-    if not isinstance(sampling, Mapping):
-        raise ApplicationError("invalid_setup", "sampling_profiles must be an object")
     application_target_options = overrides.get(
         "application_target_options", baseline.application_target_options
     )
@@ -645,7 +639,6 @@ def _selection(
         ),
         application_targets=application_targets,
         application_target_options=application_target_options,  # type: ignore[arg-type]
-        sampling_profiles=sampling,  # type: ignore[arg-type]
         context_window=_optional_int(
             overrides.get("context_window", baseline.context_window)
         ),
@@ -671,7 +664,6 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
             "gateway_endpoint",
             "application_targets",
             "application_target_options",
-            "sampling_profiles",
             "context_window",
         }
         for key in parameters
@@ -798,7 +790,6 @@ def _selection_value(selection: ExactSetupSelection) -> Mapping[str, object]:
         "gateway_endpoint": selection.gateway_endpoint,
         "application_targets": selection.application_targets,
         "application_target_options": selection.application_target_options,
-        "sampling_profiles": selection.sampling_profiles,
         "context_window": selection.context_window,
     }
 

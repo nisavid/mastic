@@ -94,7 +94,6 @@ class ExactSetupSelection:
     application_target_options: Mapping[str, Mapping[str, object]] = field(
         default_factory=dict
     )
-    sampling_profiles: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     context_window: int | None = None
 
     def __post_init__(self) -> None:
@@ -114,16 +113,6 @@ class ExactSetupSelection:
                         settings, f"application_target_options.{name}"
                     )
                     for name, settings in self.application_target_options.items()
-                }
-            ),
-        )
-        object.__setattr__(
-            self,
-            "sampling_profiles",
-            MappingProxyType(
-                {
-                    str(name): MappingProxyType(dict(settings))
-                    for name, settings in self.sampling_profiles.items()
                 }
             ),
         )
@@ -369,7 +358,6 @@ class SetupPreview:
     gateway_endpoint: str
     application_targets: tuple[str, ...]
     application_target_options: Mapping[str, Mapping[str, object]]
-    sampling_profiles: Mapping[str, Mapping[str, object]]
     context_window: int | None
     steps: tuple[MutationStep, ...]
     offline_note: str
@@ -568,7 +556,6 @@ class SetupResolver:
             gateway_endpoint=selection.gateway_endpoint,
             application_targets=selection.application_targets,
             application_target_options=selection.application_target_options,
-            sampling_profiles=selection.sampling_profiles,
             context_window=selection.context_window,
             steps=resolved.steps,
             offline_note=(
@@ -834,7 +821,6 @@ class SetupResolver:
                     "service": selection.service_name,
                     "route": selection.service_route,
                     "endpoint": selection.gateway_endpoint,
-                    "sampling_profiles": selection.sampling_profiles,
                 },
                 False,
             ),
