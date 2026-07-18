@@ -828,14 +828,14 @@ function buildUpdateDirective(localVersion, latestVersion) {
 // Read the unified config's top-level `updateCheck` (local overrides shared).
 // Inlined rather than importing hook-lib so the boot path stays lightweight.
 function updateCheckDisabledByConfig(cwd = process.cwd()) {
-  let value;
+  let disabled = false;
   for (const name of ['config.json', 'config.local.json']) {
     try {
       const raw = JSON.parse(fs.readFileSync(path.join(cwd, '.impeccable', name), 'utf-8'));
-      if (raw && typeof raw === 'object' && typeof raw.updateCheck === 'boolean') value = raw.updateCheck;
+      if (raw && typeof raw === 'object' && raw.updateCheck === false) disabled = true;
     } catch { /* missing or malformed: ignore */ }
   }
-  return value === false;
+  return disabled;
 }
 
 async function computeUpdateDirective(now = Date.now()) {
