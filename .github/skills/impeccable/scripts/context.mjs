@@ -825,7 +825,8 @@ function buildUpdateDirective(localVersion, latestVersion) {
  * the user's home dir) and re-surfaces a given version at most once per week so
  * the agent never nags. Opt out entirely with IMPECCABLE_NO_UPDATE_CHECK=1.
  */
-// Read the unified config's top-level `updateCheck` (local overrides shared).
+// Either shared or local `false` disables checks; local config cannot re-enable
+// a repository-level disablement.
 // Inlined rather than importing hook-lib so the boot path stays lightweight.
 function updateCheckDisabledByConfig(cwd = process.cwd()) {
   let disabled = false;
