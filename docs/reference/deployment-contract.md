@@ -151,10 +151,14 @@ service in response to traffic. Runtime processes are launched from exact
 owned installations with validated argv, capabilities, cached model identity,
 and revision/runtime-scoped trust grants.
 
-## Deployment validation
+## Deployment prerequisite validation
 
-Deployment Readiness is established only after the installed control surface,
-explicit lifecycle, Application Configuration Targets, application-native
-requests from both Codex and a disposable Hindsight instance, and clean
-shutdown have been verified on the target Mac. Follow
-[Validate a target-Mac deployment](../how-to/validate-deployment.md).
+The installed control surface, explicit lifecycle, Application Configuration
+Targets, managed Gateway checks, and clean shutdown can be verified on the
+target Mac by following
+[Validate deployment prerequisites](../how-to/validate-deployment.md).
+
+These prerequisite checks do not establish Deployment Readiness. Full
+readiness remains blocked until a separate procedure can safely exercise
+application-native requests from both Codex and a disposable Hindsight
+instance.
