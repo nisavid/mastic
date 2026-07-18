@@ -18,9 +18,10 @@ Use these guides when MASTIC is installed and you have a concrete goal.
 - [Inspect and diagnose a local stack](how-to/inspect-and-diagnose.md) — move
   from a system overview to health checks, diagnosis, logs, and durable
   operation evidence.
-- [Validate a target-Mac deployment](how-to/validate-deployment.md) — verify
+- [Validate deployment prerequisites](how-to/validate-deployment.md) — verify
   entry points, inactive launchd registration, Application Configuration
-  Target metadata, managed Gateway contracts, and clean shutdown.
+  Target metadata, managed Gateway contracts, and clean shutdown without
+  claiming application-native readiness.
 
 ## Look up exact behavior
 

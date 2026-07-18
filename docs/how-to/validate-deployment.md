@@ -1,8 +1,10 @@
-# How to validate a target-Mac deployment
+# How to validate deployment prerequisites
 
 Use this guide after installing or updating MASTIC on a compatible Mac. It
 checks the installed entry points, inactive lifecycle, Application
-Configuration Targets, one configured service, and clean shutdown.
+Configuration Targets, one configured service, and clean shutdown. The current
+milestone cannot establish Deployment Readiness because repeatable
+application-native Codex and Hindsight checks are not yet available.
 
 ## Verify the installed control surface
 
@@ -67,14 +69,26 @@ application-target Readiness `Unverified`.
 
 ## Verify one configured service
 
-With the service running, verify:
+With the service running, inspect it and use the exact Runtime Installation and
+Model Installation identities reported in the result:
 
-- the exact Runtime Installation and Model Revision;
-- the resolved launch arguments;
-- the stable Gateway route and `/v1/models` entry;
-- both managed Gateway contract checks;
-- the correlated logs and metrics;
-- a clean service stop.
+```sh
+mastic service inspect SERVICE_NAME
+mastic service check SERVICE_NAME
+mastic runtime inspect RUNTIME_INSTALLATION
+mastic model verify MODEL_INSTALLATION
+mastic gateway routes
+mastic service logs SERVICE_NAME
+mastic service metrics SERVICE_NAME
+mastic service stop SERVICE_NAME
+```
+
+`service inspect` must show the intended model, runtime, resolved launch
+arguments, and Gateway route. `service check` must pass while the service is
+healthy. Runtime inspection and model verification must identify the exact
+installed artifacts. The Gateway route list must contain the service, and its
+logs and metrics must correlate with that service's run. The final command must
+drain and stop the service without stopping the Gateway.
 
 ## Keep application-native validation as a readiness gate
 
