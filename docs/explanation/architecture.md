@@ -196,7 +196,7 @@ Tests exercise externally meaningful boundaries:
 3. public TOML load and save behavior;
 4. exact runtime argv against fake executables;
 5. loopback Gateway HTTP and streaming behavior;
-6. in-process Textual flows and the pure screen-state model.
+6. in-process Textual TUI flows and the pure screen-state model.
 
 Unit tests may support these seams, but private helper structure is not a
 compatibility contract.
