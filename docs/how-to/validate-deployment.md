@@ -6,6 +6,10 @@ Configuration Targets, one configured service, and clean shutdown. The current
 milestone cannot establish Deployment Readiness because repeatable
 application-native Codex and Hindsight checks are not yet available.
 
+Use an inactive test stack or a maintenance window. If `mastic status` reports
+a running Supervisor, Gateway, or service that must remain available, stop here
+and reschedule these checks; the lifecycle steps deliberately stop the stack.
+
 ## Verify the installed control surface
 
 ```sh
@@ -17,7 +21,7 @@ mastic setup --help
 ```
 
 These observations must succeed without starting the Supervisor. Confirm that
-`status` still reports the Supervisor as stopped unless it was already running.
+`status` still reports the Supervisor as stopped.
 
 ## Verify explicit lifecycle control
 
@@ -59,13 +63,15 @@ claiming unrelated profile fields.
 Run the target-specific contract checks:
 
 ```sh
+mastic service start SERVICE_NAME
 mastic application-target test codex --profile coding
 mastic application-target test hindsight --profile retain
 ```
 
 These checks exercise the managed Codex Responses and Hindsight Chat
 Completions paths. They do not invoke either application and therefore leave
-application-target Readiness `Unverified`.
+application-target Readiness `Unverified`. Leave the selected service running
+for the next section.
 
 ## Verify one configured service
 
