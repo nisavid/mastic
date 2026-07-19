@@ -6,14 +6,16 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from mastic.application.dispatch import ApplicationError
+from mastic.infrastructure import application_supply, application_target_persistence
 from mastic.infrastructure.application_supply import ApplicationSupply
-from mastic.infrastructure import application_supply
 
 HINDSIGHT_API_LAUNCHERS = (
     "hindsight-admin",
@@ -24,6 +26,115 @@ HINDSIGHT_API_LAUNCHERS = (
 
 
 class ApplicationSupplyTests(unittest.TestCase):
+    def test_install_and_remove_transactions_serialize_across_store_instances(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            codex = home / ".local/bin/codex"
+            codex.parent.mkdir(parents=True)
+            codex.write_bytes(b"owned codex")
+            tool_dir = root / "data/application-tools"
+            api_root = tool_dir / "hindsight-api"
+            api_root.mkdir(parents=True)
+            bin_dir = root / "data/application-bin"
+            bin_dir.mkdir(parents=True)
+            api_launchers = {name: bin_dir / name for name in HINDSIGHT_API_LAUNCHERS}
+            for name, path in api_launchers.items():
+                path.write_bytes(f"owned {name}".encode())
+            state = root / "state"
+            state.mkdir()
+            (state / "application-installations.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "complete",
+                        "applications": {
+                            "codex": {
+                                "version": "0.144.1",
+                                "provenance": "installed",
+                                "ownership": "mastic",
+                                "path": str(codex),
+                                "sha256": hashlib.sha256(b"owned codex").hexdigest(),
+                            },
+                            "hindsight": {
+                                "version": "0.8.4",
+                                "provenance": "installed",
+                                "ownership": "mixed",
+                                "cli_path": str(home / ".local/bin/hindsight"),
+                                "cli_ownership": "third-party",
+                                "api_ownership": "mastic",
+                                "api_tool_root": str(api_root),
+                                "api_bin_paths": {
+                                    name: str(path)
+                                    for name, path in api_launchers.items()
+                                },
+                                "api_bin_sha256": {
+                                    name: hashlib.sha256(
+                                        f"owned {name}".encode()
+                                    ).hexdigest()
+                                    for name in api_launchers
+                                },
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            uninstall_started = threading.Event()
+            finish_uninstall = threading.Event()
+
+            def blocking_uninstall(command, **_kwargs):
+                uninstall_started.set()
+                if not finish_uninstall.wait(2):
+                    raise TimeoutError("concurrent removal did not complete")
+                shutil.rmtree(api_root)
+                for path in api_launchers.values():
+                    path.unlink()
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            hindsight_supply = ApplicationSupply(
+                home,
+                root / "data/bootstrap-artifacts/application-targets-v1",
+                state,
+                uv_executable=root / "data/bootstrap-uv/uv",
+                application_tool_dir=tool_dir,
+                application_bin_dir=bin_dir,
+                run_command=blocking_uninstall,
+            )
+            codex_supply = ApplicationSupply(
+                home,
+                root / "data/bootstrap-artifacts/application-targets-v1",
+                state,
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                hindsight_removal = pool.submit(
+                    hindsight_supply.execute,
+                    "application.remove",
+                    {"applications": ("hindsight",), "confirmed": True},
+                )
+                self.assertTrue(uninstall_started.wait(1))
+                codex_removal = pool.submit(
+                    codex_supply.execute,
+                    "application.remove",
+                    {"applications": ("codex",), "confirmed": True},
+                )
+                try:
+                    self.assertFalse(codex_removal.done())
+                    self.assertTrue(codex.exists())
+                finally:
+                    finish_uninstall.set()
+                hindsight_removal.result(timeout=2)
+                codex_removal.result(timeout=2)
+
+            self.assertFalse(codex.exists())
+            journal = json.loads(
+                (state / "application-installations.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(journal["applications"], {})
+            self.assertEqual(journal["removed_applications"], ["codex", "hindsight"])
+
     def test_hindsight_api_adoption_requires_the_exact_site_package_set(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -528,19 +639,21 @@ class ApplicationSupplyTests(unittest.TestCase):
             replace = os.replace
             failed = False
 
-            def fail_after_unlink(source, destination):
+            def fail_after_unlink(source, destination, **kwargs):
                 nonlocal failed
-                if (
-                    not failed
-                    and Path(destination) == journal_path
-                    and not executable.exists()
-                ):
+                destination_matches = Path(destination) in {
+                    journal_path,
+                    Path(journal_path.name),
+                }
+                if not failed and destination_matches and not executable.exists():
                     failed = True
                     raise OSError("simulated journal replacement failure")
-                return replace(source, destination)
+                return replace(source, destination, **kwargs)
 
             with patch.object(
-                application_supply.os, "replace", side_effect=fail_after_unlink
+                application_target_persistence.os,
+                "replace",
+                side_effect=fail_after_unlink,
             ):
                 with self.assertRaises(OSError):
                     supply.execute(
@@ -554,6 +667,7 @@ class ApplicationSupplyTests(unittest.TestCase):
             self.assertEqual(
                 pending["applications"]["codex"]["removal_state"], "pending"
             )
+            self.assertEqual(list(state.glob(".*.tmp")), [])
 
             removed = supply.execute(
                 "application.remove",
