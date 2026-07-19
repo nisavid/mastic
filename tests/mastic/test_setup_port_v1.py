@@ -470,6 +470,18 @@ class SetupOperationPortTests(unittest.TestCase):
                 },
             ),
             "application_targets": ("codex", "hindsight"),
+            "performance_binding": {
+                "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
+                "application_versions": {
+                    "codex": "0.144.1",
+                    "hindsight": "0.8.4",
+                },
+                "platform": "darwin",
+                "machine": "arm64",
+                "memory_bytes": 96 * GIB,
+                "macos_major": 26,
+                "service": "coding",
+            },
         }
         evidence = FakeEvidenceStore()
         for target in ("codex", "hindsight"):
@@ -554,6 +566,18 @@ class SetupOperationPortTests(unittest.TestCase):
             "plan_identity": "a" * 64,
             "steps": ({"id": "application.canary.codex", "fingerprint": "codex-v1"},),
             "application_targets": ("codex",),
+            "performance_binding": {
+                "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
+                "application_versions": {
+                    "codex": "0.144.1",
+                    "hindsight": "0.8.4",
+                },
+                "platform": "darwin",
+                "machine": "arm64",
+                "memory_bytes": 96 * GIB,
+                "macos_major": 26,
+                "service": "coding",
+            },
         }
         evidence = FakeEvidenceStore()
         evidence.record(
@@ -629,6 +653,18 @@ class SetupOperationPortTests(unittest.TestCase):
             "plan_identity": "a" * 64,
             "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
             "application_targets": ("codex",),
+            "performance_binding": {
+                "selection_sha256": "a" * 64,
+                "application_versions": {
+                    "codex": "0.144.1",
+                    "hindsight": "0.8.4",
+                },
+                "platform": "darwin",
+                "machine": "arm64",
+                "memory_bytes": 96 * GIB,
+                "macos_major": 26,
+                "service": "coding",
+            },
         }
         evidence = FakeEvidenceStore()
         evidence.items["setup"] = [
@@ -763,8 +799,55 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(matching["readiness"], "ready")
         self.assertEqual(wrong_service["completion"], "partial")
         self.assertEqual(wrong_service["readiness"], "unverified")
-        self.assertEqual(wrong_plan["completion"], "partial")
+        self.assertEqual(wrong_plan["completion"], "complete")
         self.assertEqual(wrong_plan["readiness"], "unverified")
+
+    def test_durable_skipped_canary_requires_a_structurally_valid_plan_binding(
+        self,
+    ) -> None:
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "application_targets": ("codex",),
+        }
+        evidence = FakeEvidenceStore()
+        evidence.items["setup"] = [
+            SetupEvidence(
+                "application.canary.codex",
+                "canary-v1",
+                StepState.SKIPPED,
+                "",
+            )
+        ]
+        profile = validated_performance_profile(plan_sha256="c" * 64)
+
+        missing = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+        plans.plan["performance_binding"] = {
+            "selection_sha256": "not-a-digest",
+            "application_versions": {
+                "codex": "0.144.1",
+                "hindsight": "0.8.4",
+            },
+            "platform": "darwin",
+            "machine": "arm64",
+            "memory_bytes": 96 * GIB,
+            "macos_major": 26,
+            "service": "coding",
+        }
+        malformed = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+        plans.plan["performance_binding"] = {
+            **plans.plan["performance_binding"],
+            "selection_sha256": "d" * 64,
+        }
+        exact_alternate_plan = DurableSetupOutcomeProvider(
+            plans, evidence, profile
+        ).outcome()
+
+        self.assertEqual(missing["completion"], "partial")
+        self.assertEqual(malformed["completion"], "partial")
+        self.assertEqual(exact_alternate_plan["completion"], "complete")
+        self.assertEqual(exact_alternate_plan["readiness"], "unverified")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1791,6 +1874,64 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(configured["runtime"], "optiq-0.3.3-tested")
         self.assertEqual(len(self.runtime.calls), 2)
+
+    def test_resume_reexecutes_only_invalid_dependency_material(self) -> None:
+        port = self.port()
+        preview = port.preview({})
+        completed = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        self.assertEqual(completed["completion"], "complete")
+
+        cases = (
+            ("runtime.install", "{", self.runtime),
+            (
+                "model.install",
+                json.dumps({"result": {"revision": "wrong"}}),
+                self.model,
+            ),
+        )
+        for step_id, detail, owner in cases:
+            with self.subTest(step_id=step_id):
+                index, evidence = next(
+                    (index, item)
+                    for index, item in enumerate(self.evidence.items["setup"])
+                    if item.step_id == step_id and item.state is StepState.COMPLETE
+                )
+                self.evidence.items["setup"][index] = replace(evidence, detail=detail)
+                owner.calls.clear()
+                self.application_targets.calls.clear()
+                self.verifier.calls.clear()
+
+                resumed = port.preview({})
+                producer = next(
+                    step for step in resumed["steps"] if step["id"] == step_id
+                )
+                self.assertEqual(producer["state"], "ready")
+
+                repaired = port.execute(
+                    "setup",
+                    {
+                        "confirmed": True,
+                        "preview_fingerprint": resumed["preview_fingerprint"],
+                    },
+                )
+
+                self.assertEqual(repaired["completion"], "complete")
+                self.assertEqual([call[0] for call in owner.calls], [step_id])
+                self.assertEqual(
+                    [
+                        call
+                        for call in self.application_targets.calls
+                        if call[0] == "application-target.test"
+                    ],
+                    [],
+                )
+                self.assertEqual(self.verifier.calls, [])
 
     def test_offline_missing_artifacts_block_before_any_owner_runs(self):
         port = self.port()

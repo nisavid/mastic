@@ -10,6 +10,7 @@ from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_canaries import (
     NativeApplicationTargetCanary,
     _bounded_file_command,
+    application_canary_evidence_sha256,
 )
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
@@ -55,7 +56,9 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
                 result = canary.run(
                     "codex",
                     ApplicationTargetConfiguration(
-                        "http://127.0.0.1:8766/v1", "coding"
+                        "http://127.0.0.1:8766/v1",
+                        "public-route",
+                        service_identity="coding-internal",
                     ),
                     _settings("codex"),
                     profile="coding",
@@ -89,6 +92,16 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
         self.assertEqual(result["phases"], ["codex.exec", "responses.exact"])
         self.assertTrue(result["exact_contract"])
         self.assertEqual(result["duration_seconds"], 1.25)
+        self.assertEqual(
+            result["evidence_sha256"],
+            application_canary_evidence_sha256(
+                target="codex",
+                profile="coding",
+                service="coding-internal",
+                phases=("codex.exec", "responses.exact"),
+                exact_contract=True,
+            ),
+        )
         self.assertNotIn("response", result)
 
     def test_hindsight_uses_managed_env_with_disposable_home_and_state(self) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.application_targets import (
+    APPLICATION_CANARY_CONTRACTS,
     ApplicationTargetDriftOutcome,
     ApplicationTargetDriftIntent,
     validate_application_target_sampling_profiles,
@@ -317,10 +318,8 @@ class ApplicationTargetOperationPort:
             return {"preview": _plain(preview), "result": _plain(result)}
         if operation == "application-target.test":
             assert stored is not None
-            profile = str(
-                parameters.get("profile")
-                or ("retain" if name == "hindsight" else "coding")
-            )
+            contract = APPLICATION_CANARY_CONTRACTS[name]
+            profile = str(parameters.get("profile") or contract.profile)
             try:
                 inspection = adapter.inspect()
                 if (
