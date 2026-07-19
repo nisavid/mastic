@@ -40,6 +40,31 @@ class ApplicationCanaryResult:
     evidence_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationCanaryContract:
+    """The exact profile and phases owned by one native canary."""
+
+    profile: str
+    phases: tuple[str, ...]
+
+
+APPLICATION_CANARY_CONTRACTS: Mapping[str, ApplicationCanaryContract] = {
+    "codex": ApplicationCanaryContract(
+        profile="coding",
+        phases=("codex.exec", "responses.exact"),
+    ),
+    "hindsight": ApplicationCanaryContract(
+        profile="retain",
+        phases=(
+            "hindsight.start",
+            "bank.create",
+            "memory.retain",
+            "memory.reflect",
+        ),
+    ),
+}
+
+
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 ProcessSpawner = Callable[..., subprocess.Popen[bytes]]
 ExecutableResolver = Callable[[str], Path]
@@ -78,24 +103,22 @@ class NativeApplicationTargetCanary:
         profile: str,
     ) -> Mapping[str, object]:
         started = self._monotonic()
-        if target == "codex":
-            if profile != "coding":
-                raise _canary_error(
-                    "application_target_canary_unsupported",
-                    f"Codex has no native {profile!r} canary",
-                )
-            phases = self._run_codex()
-        elif target == "hindsight":
-            if profile != "retain":
-                raise _canary_error(
-                    "application_target_canary_unsupported",
-                    f"Hindsight has no bounded native {profile!r} canary",
-                )
-            phases = self._run_hindsight(settings)
-        else:
+        contract = APPLICATION_CANARY_CONTRACTS.get(target)
+        if contract is None:
             raise ApplicationError(
                 "invalid_parameter", f"unsupported application canary: {target}"
             )
+        if profile != contract.profile:
+            qualifier = "bounded native" if target == "hindsight" else "native"
+            raise _canary_error(
+                "application_target_canary_unsupported",
+                f"{target.title()} has no {qualifier} {profile!r} canary",
+            )
+        if target == "codex":
+            self._run_codex()
+        else:
+            self._run_hindsight(settings)
+        phases = contract.phases
         duration = max(0.0, self._monotonic() - started)
         evidence = application_canary_evidence_sha256(
             target=target,
@@ -108,7 +131,7 @@ class NativeApplicationTargetCanary:
             ApplicationCanaryResult(target, phases, True, duration, evidence)
         )
 
-    def _run_codex(self) -> tuple[str, ...]:
+    def _run_codex(self) -> None:
         codex = self._available("codex")
         with tempfile.TemporaryDirectory(prefix="mastic-codex-canary-") as raw:
             root = Path(raw)
@@ -177,9 +200,8 @@ class NativeApplicationTargetCanary:
                     "application_target_canary_failed",
                     "Codex did not return the exact application canary response",
                 )
-        return ("codex.exec", "responses.exact")
 
-    def _run_hindsight(self, settings: ApplicationTargetSettings) -> tuple[str, ...]:
+    def _run_hindsight(self, settings: ApplicationTargetSettings) -> None:
         if not settings.profile:
             raise _canary_error(
                 "application_target_canary_failed",
@@ -313,7 +335,6 @@ class NativeApplicationTargetCanary:
                 ) from error
             finally:
                 self._stop_process(process)
-        return ("hindsight.start", "bank.create", "memory.retain", "memory.reflect")
 
     def _await_hindsight(
         self,
