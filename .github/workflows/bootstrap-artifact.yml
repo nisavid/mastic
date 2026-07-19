@@ -39,7 +39,9 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          uv build --wheel
+          uv build --wheel \
+            --build-constraints packaging/build-backend.lock \
+            --require-hashes
           wheels=(dist/mastic-*-py3-none-any.whl(N))
           (( ${#wheels} == 1 ))
           version=${${wheels[1]:t}#mastic-}
