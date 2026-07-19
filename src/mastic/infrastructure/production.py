@@ -132,8 +132,28 @@ class _ReentrantPrivateFileLock:
                     self._local.depth = 0
 
 
-def _setup_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
-    """Place the setup/removal lock outside every path removed by that workflow."""
+class _OrderedTransition:
+    """Acquire lifecycle before removal/composition coordination."""
+
+    def __init__(
+        self,
+        first: Callable[[], AbstractContextManager[None]],
+        second: Callable[[], AbstractContextManager[None]],
+    ) -> None:
+        self._first = first
+        self._second = second
+
+    @contextmanager
+    def __call__(self) -> Iterator[None]:
+        with self._first():
+            with self._second():
+                yield
+
+
+def _external_transition(
+    paths: MasticPaths, filename: str
+) -> _ReentrantPrivateFileLock:
+    """Place a coordination lock outside every product-owned removable path."""
 
     owned = tuple(
         path.expanduser().absolute()
@@ -141,14 +161,40 @@ def _setup_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
     )
     parent = paths.state_dir.expanduser().absolute().parent
     while True:
-        candidate = parent / ".mastic-locks" / "setup-removal.lock"
+        candidate = parent / ".mastic-locks" / filename
         if not any(
             candidate == path or candidate.is_relative_to(path) for path in owned
         ):
             return _ReentrantPrivateFileLock(candidate)
         if parent == parent.parent:
-            raise ValueError("setup transition lock must be outside removable paths")
+            raise ValueError("transition lock must be outside removable paths")
         parent = parent.parent
+
+
+def _setup_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
+    """Serialize setup, removal, and public mutation lifecycles."""
+
+    return _external_transition(paths, "setup-removal.lock")
+
+
+def _composition_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
+    """Keep product path creation outside an active removal."""
+
+    return _external_transition(paths, "composition-removal.lock")
+
+
+def _removal_transition(
+    paths: MasticPaths,
+    *,
+    setup_transition: Callable[[], AbstractContextManager[None]] | None = None,
+    composition_transition: Callable[[], AbstractContextManager[None]] | None = None,
+) -> _OrderedTransition:
+    """Exclude setup/mutations first, then path composition, during removal."""
+
+    return _OrderedTransition(
+        setup_transition or _setup_transition(paths),
+        composition_transition or _composition_transition(paths),
+    )
 
 
 LAUNCHD_LABEL = "io.nisavid.masticd"
@@ -504,12 +550,18 @@ def compose_local(
     resolved_home = (home or Path.home()).expanduser().resolve()
     resolved_paths = paths or resolve_paths(home=resolved_home)
     setup_transition = _setup_transition(resolved_paths)
-    with setup_transition():
+    composition_transition = _composition_transition(resolved_paths)
+    with composition_transition():
         return _compose_local_locked(
             paths=resolved_paths,
             resolved_home=resolved_home,
             executable=executable,
             setup_transition=setup_transition,
+            removal_transition=_removal_transition(
+                resolved_paths,
+                setup_transition=setup_transition,
+                composition_transition=composition_transition,
+            ),
         )
 
 
@@ -519,6 +571,7 @@ def _compose_local_locked(
     resolved_home: Path,
     executable: Path | None,
     setup_transition: _ReentrantPrivateFileLock,
+    removal_transition: _OrderedTransition,
 ) -> ProductionApplication:
     """Build the local graph while state removal cannot cross composition."""
 
@@ -597,6 +650,7 @@ def _compose_local_locked(
             application_inventory=applications.inventory(),
         ),
         transition=setup_transition,
+        removal_transition=removal_transition,
         plan_store=setup_plans,
     )
     application = compose_application(
@@ -683,8 +737,7 @@ def compose_daemon(
 
     resolved_home = (home or Path.home()).expanduser().resolve()
     resolved_paths = paths or resolve_paths(home=resolved_home)
-    setup_transition = _setup_transition(resolved_paths)
-    with setup_transition():
+    with _composition_transition(resolved_paths)():
         return _compose_daemon_locked(
             paths=resolved_paths,
             resolved_home=resolved_home,

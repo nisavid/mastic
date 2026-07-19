@@ -36,6 +36,7 @@ from mastic.infrastructure.production import (
     _LocalModelSupply,
     _SetupSupervisorOwner,
     _sampling_matches_service_model,
+    _removal_transition,
     _setup_resolver,
     _setup_transition,
     compose_daemon,
@@ -182,6 +183,49 @@ class ProductionCompositionTests(unittest.TestCase):
 
             self.assertGreaterEqual(prepare.call_count, 1)
 
+    def test_local_read_composition_remains_available_during_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with _setup_transition(paths)():
+                    composition = pool.submit(
+                        compose_local,
+                        paths=paths,
+                        home=home,
+                        executable=Path("/usr/bin/python3"),
+                    )
+                    production = composition.result(timeout=2)
+
+            self.assertIsNotNone(production.application)
+
+    def test_daemon_composition_can_activate_during_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with _setup_transition(paths)():
+                    composition = pool.submit(
+                        compose_daemon,
+                        paths=paths,
+                        home=home,
+                    )
+                    daemon = composition.result(timeout=2)
+
+            self.assertIsInstance(daemon, DaemonService)
+
     def test_local_composition_waits_for_removal_before_recreating_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -191,7 +235,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 root / "config", root / "state", root / "data", root / "logs"
             )
             paths.prepare()
-            transition = _setup_transition(paths)
+            transition = _removal_transition(paths)
             prepare_started = threading.Event()
             original_prepare = MasticPaths.prepare
 
@@ -259,7 +303,7 @@ class ProductionCompositionTests(unittest.TestCase):
                     "preview_fingerprint": preview.value["preview_fingerprint"],
                 },
             )
-            transition = _setup_transition(paths)
+            transition = _removal_transition(paths)
             execution_started = threading.Event()
             execution_finished = threading.Event()
 
@@ -342,7 +386,7 @@ class ProductionCompositionTests(unittest.TestCase):
             outside = root / "outside"
             outside.mkdir(mode=0o700)
 
-            with _setup_transition(paths)():
+            with _removal_transition(paths)():
                 shutil.rmtree(paths.config_dir)
                 paths.config_dir.symlink_to(outside, target_is_directory=True)
 
@@ -844,7 +888,7 @@ route = "coding"
                 root / "config", root / "state", root / "data", root / "logs"
             )
             paths.prepare()
-            transition = _setup_transition(paths)
+            transition = _removal_transition(paths)
             prepare_started = threading.Event()
             original_prepare = MasticPaths.prepare
 

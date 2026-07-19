@@ -235,6 +235,7 @@ class SetupOperationPort:
         removal_inventory: RemovalInventoryProvider,
         performance_profile: Mapping[str, object] | None = None,
         transition: Callable[[], AbstractContextManager[None]] | None = None,
+        removal_transition: Callable[[], AbstractContextManager[None]] | None = None,
         plan_store: SetupPlanStore | None = None,
     ) -> None:
         self._resolver = resolver
@@ -249,6 +250,7 @@ class SetupOperationPort:
         self._evidence = evidence
         self._removal_inventory = removal_inventory
         self._transition = transition or nullcontext
+        self._removal_transition = removal_transition or self._transition
         self._plan_store = plan_store
         selected_profile = (
             PHASE1_HOST_PERFORMANCE_PROFILE
@@ -419,7 +421,7 @@ class SetupOperationPort:
         if parameters.get("confirmed") is True and parameters.get(
             "preview_fingerprint"
         ):
-            with self._transition():
+            with self._removal_transition():
                 return self._remove(parameters)
         return self._remove(parameters)
 

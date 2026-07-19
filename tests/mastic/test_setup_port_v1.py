@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -253,6 +254,7 @@ class SetupOperationPortTests(unittest.TestCase):
         evidence=None,
         inventory=None,
         transition=None,
+        removal_transition=None,
         plan_store=None,
     ):
         return SetupOperationPort(
@@ -279,6 +281,7 @@ class SetupOperationPortTests(unittest.TestCase):
             removal_inventory=lambda: inventory or self.inventory,
             performance_profile=performance_profile,
             transition=transition,
+            removal_transition=removal_transition,
             plan_store=plan_store,
         )
 
@@ -1350,6 +1353,50 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(state_remove[1]["paths"], self.inventory.product_owned_paths)
         self.assertNotIn(self.inventory.shared_cache_paths[0], state_remove[1]["paths"])
+
+    def test_setup_and_removal_use_their_distinct_coordination_boundaries(self):
+        events = []
+
+        @contextmanager
+        def setup_transition():
+            events.append("setup-enter")
+            try:
+                yield
+            finally:
+                events.append("setup-exit")
+
+        @contextmanager
+        def removal_transition():
+            events.append("removal-enter")
+            try:
+                yield
+            finally:
+                events.append("removal-exit")
+
+        port = self.port(
+            transition=setup_transition,
+            removal_transition=removal_transition,
+        )
+        setup_preview = port.preview({})
+        port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": setup_preview["preview_fingerprint"],
+            },
+        )
+        removal_preview = port.preview_removal()
+        port.remove(
+            {
+                "confirmed": True,
+                "preview_fingerprint": removal_preview["preview_fingerprint"],
+            }
+        )
+
+        self.assertEqual(
+            events,
+            ["setup-enter", "setup-exit", "removal-enter", "removal-exit"],
+        )
 
     def test_supported_removal_workflows_serialize_application_and_state_removal(
         self,
