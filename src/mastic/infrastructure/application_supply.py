@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mastic.application.dispatch import ApplicationError
+from mastic.infrastructure.application_target_persistence import _write_private
+from mastic.infrastructure.config_store import private_file_lock
 
 
 _VERSIONS = {"codex": "0.144.1", "hindsight": "0.8.4"}
@@ -103,15 +105,20 @@ class ApplicationSupply:
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
-        if operation == "application.remove":
-            return self._remove(parameters)
-        if operation != "application.install":
+        if operation not in {"application.install", "application.remove"}:
             raise ApplicationError("operation_unavailable", operation)
         if parameters.get("confirmed") is not True:
+            action = "installation" if operation == "application.install" else "removal"
             raise ApplicationError(
                 "confirmation_required",
-                "application installation requires confirmation",
+                f"application {action} requires confirmation",
             )
+        with private_file_lock(self._state / ".application-installations.lock"):
+            if operation == "application.remove":
+                return self._remove(parameters)
+            return self._install(parameters)
+
+    def _install(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         targets = _targets(parameters.get("application_targets", ()))
         artifacts = self._verified_artifacts(targets)
         journal = self._load_journal()
@@ -344,10 +351,6 @@ class ApplicationSupply:
         return {"owned": owned, "retained": retained}
 
     def _remove(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
-        if parameters.get("confirmed") is not True:
-            raise ApplicationError(
-                "confirmation_required", "application removal requires confirmation"
-            )
         requested = _targets(parameters.get("applications", ()))
         journal = self._load_journal()
         applications = journal.get("applications", {})
@@ -853,12 +856,8 @@ class ApplicationSupply:
         return value
 
     def _write_journal(self, value: Mapping[str, object]) -> None:
-        self._state.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self._state / "application-installations.json"
-        temporary = path.with_name(f".{path.name}.mastic-{os.getpid()}")
-        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.chmod(0o600)
-        os.replace(temporary, path)
+        _write_private(path, (json.dumps(value, sort_keys=True) + "\n").encode())
 
 
 def _targets(value: object) -> tuple[str, ...]:

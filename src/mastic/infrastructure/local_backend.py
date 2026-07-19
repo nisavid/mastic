@@ -150,7 +150,7 @@ class LocalOperationBackend:
                 "unknown_operation", f"unknown operation: {request.name}"
             )
         _validate_parameter_types(operation, request.parameters)
-        _validate_required_model_parameters(request)
+        _validate_required_parameters(operation, request)
         self._validate_request(request)
         if operation.kind is OperationKind.QUERY:
             return PreparedOperation(False, lambda: self._query(request))
@@ -1530,17 +1530,17 @@ def _validate_parameter_types(
                 )
 
 
-def _validate_required_model_parameters(request: OperationRequest) -> None:
-    required = {
-        "model.install": ("repository",),
-        "model.adopt": ("repository", "revision", "path"),
-        "model.update": ("resource", "revision"),
-    }.get(request.name, ())
-    for name in required:
-        if name not in request.parameters or request.parameters[name] is None:
+def _validate_required_parameters(
+    operation: Operation, request: OperationRequest
+) -> None:
+    for parameter in operation.parameters:
+        if parameter.required and (
+            parameter.name not in request.parameters
+            or request.parameters[parameter.name] is None
+        ):
             raise ApplicationError(
                 "invalid_parameter",
-                f"{name} is required for {request.name}",
+                f"{parameter.name} is required for {request.name}",
             )
 
 

@@ -508,9 +508,7 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             with self.assertRaises(ApplicationError) as raised:
                 backend.prepare(
-                    OperationRequest(
-                        "service.inspect", {"application_target": "missing"}
-                    )
+                    OperationRequest("service.inspect", {"resource": "missing"})
                 ).execute()
 
             self.assertEqual(raised.exception.code, "resource_not_found")
@@ -680,7 +678,9 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(install[1]["repo_id"], "mlx-community/Qwen-OptiQ")
             self.assertEqual(install[1]["revision"], "b" * 40)
 
-    def test_model_mutations_reject_missing_required_parameters(self) -> None:
+    def test_backend_rejects_missing_catalogue_required_parameters(
+        self,
+    ) -> None:
         with TemporaryDirectory() as directory:
             backend, _ = self._backend(
                 Path(directory),
@@ -688,22 +688,56 @@ class LocalOperationBackendTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
             )
             invalid = (
-                OperationRequest("model.install", {}),
-                OperationRequest(
-                    "model.adopt",
-                    {"repository": "owner/model", "revision": "a" * 40},
+                (OperationRequest("runtime.adopt", {"runtime": "optiq"}), "path"),
+                (OperationRequest("model.install", {}), "repository"),
+                (
+                    OperationRequest(
+                        "model.adopt",
+                        {"repository": "owner/model", "revision": "a" * 40},
+                    ),
+                    "path",
                 ),
-                OperationRequest("model.update", {"revision": "main"}),
-                OperationRequest("model.update", {"resource": "coding"}),
+                (OperationRequest("model.update", {"revision": "main"}), "resource"),
+                (OperationRequest("model.update", {"resource": "coding"}), "revision"),
+                (
+                    OperationRequest("model.rollback", {"resource": "coding"}),
+                    "target",
+                ),
+                (
+                    OperationRequest("model.trust", {"resource": "coding"}),
+                    "runtime",
+                ),
+                (
+                    OperationRequest(
+                        "model.trust",
+                        {"resource": "coding", "runtime": "optiq-0.2.18"},
+                    ),
+                    "accepted_risks",
+                ),
+                (
+                    OperationRequest("service.create", {"service": "new"}),
+                    "model_alias",
+                ),
+                (
+                    OperationRequest(
+                        "service.create",
+                        {"service": "new", "model_alias": "coding"},
+                    ),
+                    "runtime",
+                ),
             )
 
-            for request in invalid:
+            for request, missing in invalid:
                 with (
                     self.subTest(request=request),
                     self.assertRaises(ApplicationError) as raised,
                 ):
                     backend.prepare(request)
                 self.assertEqual(raised.exception.code, "invalid_parameter")
+                self.assertEqual(
+                    raised.exception.message,
+                    f"{missing} is required for {request.name}",
+                )
 
     def test_model_adopt_binds_execution_to_previewed_snapshot_fingerprint(
         self,
@@ -1151,7 +1185,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             )
 
             result = backend.prepare(
-                OperationRequest("model.inspect", {"resource": "coding"})
+                OperationRequest("model.inspect", {"repository": "coding"})
             ).execute()
 
             self.assertEqual(
@@ -1359,9 +1393,10 @@ class LocalOperationBackendTests(unittest.TestCase):
                 if operation.kind is not OperationKind.MUTATION:
                     continue
                 with self.subTest(operation=name):
-                    prepared = backend.prepare(
-                        OperationRequest(name, self._parameters(name))
-                    )
+                    parameters = self._parameters(name)
+                    if name == "config.import":
+                        parameters = {"source": str(Path(directory) / "config.toml")}
+                    prepared = backend.prepare(OperationRequest(name, parameters))
                     self.assertEqual(
                         prepared.requires_supervisor, name in supervisor_backed
                     )
@@ -1379,20 +1414,41 @@ class LocalOperationBackendTests(unittest.TestCase):
     @staticmethod
     def _parameters(name):
         if name.startswith("runtime."):
-            if name in {"runtime.install", "runtime.adopt", "runtime.available"}:
+            if name == "runtime.adopt":
+                return {"runtime": "optiq", "path": "/tmp/external-runtime"}
+            if name in {"runtime.install", "runtime.available"}:
                 return {"runtime": "optiq"}
+            if name == "runtime.rollback":
+                return {
+                    "resource": "optiq-0.2.18",
+                    "target": "optiq-0.2.18",
+                }
             return {"resource": "optiq-0.2.18"}
         if name == "model.search":
             return {"query": "Qwen"}
         if name.startswith("model.cache."):
             return {"resource": _ModelSupply.revision_id}
         if name.startswith("model."):
-            return {
+            parameters = {
                 "resource": "qwen",
                 "alias": "coding",
                 "repository": "mlx-community/Qwen-OptiQ",
                 "revision": "a" * 40,
                 "path": "/tmp/external-model",
+            }
+            if name == "model.rollback":
+                parameters["target"] = "qwen"
+            if name == "model.trust":
+                parameters.update(
+                    runtime="optiq-0.2.18",
+                    accepted_risks=[],
+                )
+            return parameters
+        if name == "service.create":
+            return {
+                "service": "new",
+                "model_alias": "coding",
+                "runtime": "optiq-0.2.18",
             }
         if name.startswith("service."):
             return {"resource": "coding"}
@@ -1401,8 +1457,6 @@ class LocalOperationBackendTests(unittest.TestCase):
         if name.startswith("application-target."):
             return {"application_target": "codex"}
         if name == "config.diff":
-            return {"text": _CONFIG}
-        if name == "config.import":
             return {"text": _CONFIG}
         if name == "config.restore":
             return {"revision": "a" * 64}
