@@ -27,7 +27,7 @@ mastic = "mastic.entrypoints:cli_main"
 masticd = "mastic.entrypoints:daemon_main"
 
 [dependency-groups]
-dev = ["pyrefly==1.1.1"]
+dev = ["pyrefly==1.1.1", "ruff==0.15.22"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mastic"]
