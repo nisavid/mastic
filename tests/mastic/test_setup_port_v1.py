@@ -638,13 +638,12 @@ class SetupOperationPortTests(unittest.TestCase):
             "ready",
         )
         self.assertEqual(outcome_for("b" * 64)["readiness"], "unverified")
-        self.assertEqual(
-            outcome_for(
-                "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d",
-                state=StepState.SKIPPED,
-            )["readiness"],
-            "unverified",
+        skipped = outcome_for(
+            "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d",
+            state=StepState.SKIPPED,
         )
+        self.assertEqual(skipped["completion"], "partial")
+        self.assertEqual(skipped["readiness"], "unverified")
         self.assertEqual(inspections.calls, [])
 
     def test_durable_canary_recomputes_the_persisted_performance_band(self):
@@ -1371,6 +1370,54 @@ class SetupOperationPortTests(unittest.TestCase):
         resumed = port.preview({"selection": exact})
 
         self.assertEqual(resumed["readiness"], "unverified")
+
+        self.verifier.calls.clear()
+        repaired = port.execute(
+            "setup",
+            {
+                "selection": exact,
+                "confirmed": True,
+                "preview_fingerprint": resumed["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(repaired["readiness"], "ready")
+        self.assertEqual([call[0] for call in self.verifier.calls], ["verify.request"])
+
+    def test_resumed_preview_rejects_unauthorized_skipped_gateway_evidence(
+        self,
+    ) -> None:
+        exact = replace(
+            selection(), application_targets=(), application_target_options={}
+        )
+        port = self.port()
+        preview = port.preview({"selection": exact})
+        port.execute(
+            "setup",
+            {
+                "selection": exact,
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        index, verification = next(
+            (index, item)
+            for index, item in enumerate(self.evidence.items["setup"])
+            if item.step_id == "verify.request"
+        )
+        self.evidence.items["setup"][index] = replace(
+            verification,
+            state=StepState.SKIPPED,
+            detail="",
+        )
+
+        resumed = port.preview({"selection": exact})
+        verification_step = next(
+            step for step in resumed["steps"] if step["id"] == "verify.request"
+        )
+
+        self.assertEqual(verification_step["state"], "ready")
+        self.assertEqual(resumed["completion"], "partial")
 
         self.verifier.calls.clear()
         repaired = port.execute(
