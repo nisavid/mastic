@@ -40,6 +40,13 @@ from mastic.application.setup import (
 
 
 _GIB = 1024**3
+_APPLICATION_CANARY_CONTRACTS = {
+    "codex": ("coding", ("codex.exec", "responses.exact")),
+    "hindsight": (
+        "retain",
+        ("hindsight.start", "bank.create", "memory.retain", "memory.reflect"),
+    ),
+}
 PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
     "id": PHASE1_PERFORMANCE_PROFILE_ID,
     "version": PHASE1_PERFORMANCE_PROFILE_VERSION,
@@ -380,7 +387,11 @@ class SetupOperationPort:
                 }
             )
 
-        prior = tuple(self._evidence.load("setup"))
+        prior = _reusable_setup_evidence(
+            resolved,
+            tuple(self._evidence.load("setup")),
+            self._performance_profile,
+        )
         material = _restore_material(prior)
         results: dict[str, object] = {}
 
@@ -564,7 +575,13 @@ class SetupOperationPort:
                 noninteractive=_boolean(parameters, "noninteractive"),
                 confirmed=parameters.get("confirmed") is True,
             )
-            return self._resolver.resolve(facts, request, evidence=prior)
+            resolved = self._resolver.resolve(facts, request, evidence=prior)
+            reusable = _reusable_setup_evidence(
+                resolved, prior, self._performance_profile
+            )
+            if reusable != prior:
+                resolved = self._resolver.resolve(facts, request, evidence=reusable)
+            return resolved
         except NoValidatedFitError:
             raise
         except ValueError as error:
@@ -1058,12 +1075,12 @@ def _validate_application_install_result(
     installed = result.get("applications")
     if not isinstance(installed, Mapping):
         raise RuntimeError("application installer returned no exact application set")
-    versions = {"codex": "0.144.1", "hindsight": "0.8.4"}
     for target in selection.application_targets:
         item = installed.get(target)
-        if not isinstance(item, Mapping) or item.get("version") != versions[target]:
+        expected_version = PHASE1_APPLICATION_VERSIONS[target]
+        if not isinstance(item, Mapping) or item.get("version") != expected_version:
             raise RuntimeError(
-                f"application installer did not return exact {target} {versions[target]}"
+                f"application installer did not return exact {target} {expected_version}"
             )
 
 
@@ -1146,7 +1163,11 @@ def _setup_outcome(
         for item in evidence
         if item.state in {StepState.COMPLETE, StepState.SKIPPED}
     }
-    terminal = all((step.id, step.fingerprint) in current for step in resolved.steps)
+    terminal = all(
+        (outcome := current.get((step.id, step.fingerprint))) is not None
+        and _terminal_setup_evidence_valid(resolved, outcome, performance_profile)
+        for step in resolved.steps
+    )
     completion = Completion.COMPLETE if terminal else Completion.PARTIAL
     target_readiness: dict[str, str] = {}
     for target in resolved.selection.application_targets:
@@ -1355,7 +1376,13 @@ def _durable_setup_outcome(
     }
     completion = (
         Completion.COMPLETE
-        if all(step in current for step in steps)
+        if all(
+            (outcome := current.get(step)) is not None
+            and _durable_terminal_setup_evidence_valid(
+                step[0], outcome, performance_profile
+            )
+            for step in steps
+        )
         else Completion.PARTIAL
     )
     raw_targets = plan["application_targets"]
@@ -1400,31 +1427,39 @@ def _durable_setup_outcome(
     }
 
 
+def _durable_canary_band(
+    target: str,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> str | None:
+    try:
+        payload = json.loads(evidence.detail)
+        result = payload["result"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, Mapping):
+        return None
+    validated = _application_canary_performance(target, result, performance_profile)
+    if validated is None:
+        return None
+    performance, value = validated
+    if performance_profile.get("status") != "validated":
+        band = Readiness.UNVERIFIED.value
+    else:
+        band = _profile_metric_band(
+            f"{target}.native_canary.duration_seconds", value, performance_profile
+        )
+    if performance.get("band") != band:
+        return None
+    return band
+
+
 def _durable_canary_readiness(
     target: str,
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
 ) -> str:
-    try:
-        payload = json.loads(evidence.detail)
-        result = payload["result"]
-        performance = result["performance"]
-        value = _duration_seconds({"duration_seconds": performance["value"]})
-    except (KeyError, TypeError, json.JSONDecodeError, RuntimeError):
-        return Readiness.UNVERIFIED.value
-    if (
-        not isinstance(result, Mapping)
-        or not _application_canary_contract_ready(result)
-        or not isinstance(performance, Mapping)
-        or performance_profile.get("status") != "validated"
-        or performance.get("profile_id") != performance_profile.get("id")
-        or performance.get("profile_version") != performance_profile.get("version")
-        or performance.get("metric") != f"{target}.native_canary.duration_seconds"
-        or performance.get("value") != value
-        or not _exact_sha256(result.get("evidence_sha256"))
-    ):
-        return Readiness.UNVERIFIED.value
-    band = performance.get("band")
+    band = _durable_canary_band(target, evidence, performance_profile)
     if band == "expected":
         return Readiness.READY.value
     if band == Readiness.DEGRADED.value:
@@ -1432,7 +1467,26 @@ def _durable_canary_readiness(
     return Readiness.UNVERIFIED.value
 
 
+def _durable_terminal_setup_evidence_valid(
+    step_id: str,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> bool:
+    if evidence.state is StepState.SKIPPED:
+        return True
+    if evidence.state is not StepState.COMPLETE:
+        return False
+    if step_id == "verify.request":
+        return _verification_ready(evidence)
+    if step_id.startswith("application.canary."):
+        target = step_id.removeprefix("application.canary.")
+        return _durable_canary_band(target, evidence, performance_profile) is not None
+    return True
+
+
 def _verification_ready(evidence: SetupEvidence) -> bool:
+    if evidence.state is not StepState.COMPLETE:
+        return False
     try:
         payload = json.loads(evidence.detail)
         result = payload["result"]
@@ -1446,12 +1500,49 @@ def _verification_ready(evidence: SetupEvidence) -> bool:
     )
 
 
-def _application_canary_contract_ready(result: Mapping[str, object]) -> bool:
+def _application_canary_contract_ready(
+    target: str, result: Mapping[str, object]
+) -> bool:
+    contract = _APPLICATION_CANARY_CONTRACTS.get(target)
+    if contract is None:
+        return False
+    profile, phases = contract
+    raw_phases = result.get("phases")
     return bool(
         result.get("ok") is True
         and result.get("exact_contract") is True
+        and result.get("profile") == profile
+        and isinstance(raw_phases, Sequence)
+        and not isinstance(raw_phases, (str, bytes))
+        and tuple(raw_phases) == phases
         and _exact_sha256(result.get("evidence_sha256"))
     )
+
+
+def _application_canary_performance(
+    target: str,
+    result: Mapping[str, object],
+    performance_profile: Mapping[str, object],
+) -> tuple[Mapping[str, object], float] | None:
+    if not _application_canary_contract_ready(target, result):
+        return None
+    performance = result.get("performance")
+    if not isinstance(performance, Mapping):
+        return None
+    metric = f"{target}.native_canary.duration_seconds"
+    try:
+        value = _duration_seconds({"duration_seconds": performance.get("value")})
+    except RuntimeError:
+        return None
+    if (
+        performance.get("metric") != metric
+        or performance.get("unit") != "seconds"
+        or performance.get("value") != value
+        or performance.get("profile_id") != performance_profile.get("id")
+        or performance.get("profile_version") != performance_profile.get("version")
+    ):
+        return None
+    return performance, value
 
 
 def _exact_sha256(value: object) -> bool:
@@ -1592,6 +1683,15 @@ def _performance_band(
         != _performance_plan_fingerprint(resolved.selection)
     ):
         return Readiness.UNVERIFIED.value
+    return _profile_metric_band(metric, value, performance_profile)
+
+
+def _profile_metric_band(
+    metric: str, value: float, performance_profile: Mapping[str, object]
+) -> str:
+    metrics = performance_profile.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return Readiness.UNVERIFIED.value
     raw_band = metrics.get(metric)
     if not isinstance(raw_band, Mapping):
         return Readiness.UNVERIFIED.value
@@ -1606,45 +1706,77 @@ def _performance_band(
     return Readiness.DEGRADED.value
 
 
+def _evidenced_canary_band(
+    resolved: ResolvedSetup,
+    target: str,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> str | None:
+    try:
+        payload = json.loads(evidence.detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        return None
+    validated = _application_canary_performance(target, result, performance_profile)
+    if validated is None:
+        return None
+    performance, value = validated
+    metric = f"{target}.native_canary.duration_seconds"
+    band = _performance_band(resolved, metric, value, performance_profile)
+    if performance.get("band") != band:
+        return None
+    return band
+
+
 def _evidenced_canary_readiness(
     resolved: ResolvedSetup,
     target: str,
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
 ) -> str:
-    try:
-        payload = json.loads(evidence.detail)
-    except json.JSONDecodeError:
-        return Readiness.UNVERIFIED.value
-    if not isinstance(payload, Mapping):
-        return Readiness.UNVERIFIED.value
-    result = payload.get("result")
-    if not isinstance(result, Mapping):
-        return Readiness.UNVERIFIED.value
-    if not _application_canary_contract_ready(result):
-        return Readiness.UNVERIFIED.value
-    performance = result.get("performance")
-    if not isinstance(performance, Mapping):
-        return Readiness.UNVERIFIED.value
-    if performance.get("profile_id") != performance_profile.get(
-        "id"
-    ) or performance.get("profile_version") != performance_profile.get("version"):
-        return Readiness.UNVERIFIED.value
-    metric = f"{target}.native_canary.duration_seconds"
-    if performance.get("metric") != metric:
-        return Readiness.UNVERIFIED.value
-    try:
-        value = _duration_seconds({"duration_seconds": performance.get("value")})
-    except RuntimeError:
-        return Readiness.UNVERIFIED.value
-    band = _performance_band(resolved, metric, value, performance_profile)
-    if performance.get("band") != band:
-        return Readiness.UNVERIFIED.value
+    band = _evidenced_canary_band(resolved, target, evidence, performance_profile)
     if band == "expected":
         return Readiness.READY.value
     if band == Readiness.DEGRADED.value:
         return Readiness.DEGRADED.value
     return Readiness.UNVERIFIED.value
+
+
+def _terminal_setup_evidence_valid(
+    resolved: ResolvedSetup,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> bool:
+    if evidence.state is StepState.SKIPPED:
+        return True
+    if evidence.state is not StepState.COMPLETE:
+        return False
+    if evidence.step_id == "verify.request":
+        return _verification_ready(evidence)
+    if evidence.step_id.startswith("application.canary."):
+        target = evidence.step_id.removeprefix("application.canary.")
+        return (
+            _evidenced_canary_band(resolved, target, evidence, performance_profile)
+            is not None
+        )
+    return True
+
+
+def _reusable_setup_evidence(
+    resolved: ResolvedSetup,
+    evidence: Sequence[SetupEvidence],
+    performance_profile: Mapping[str, object],
+) -> tuple[SetupEvidence, ...]:
+    return tuple(
+        item
+        for item in evidence
+        if item.state is not StepState.COMPLETE
+        or _terminal_setup_evidence_valid(resolved, item, performance_profile)
+    )
 
 
 def _no_validated_fit(error: NoValidatedFitError) -> Mapping[str, object]:

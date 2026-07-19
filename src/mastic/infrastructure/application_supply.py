@@ -16,11 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mastic.application.dispatch import ApplicationError
+from mastic.application.setup import PHASE1_APPLICATION_VERSIONS
 from mastic.infrastructure.application_target_persistence import _write_private
 from mastic.infrastructure.config_store import private_file_lock
 
 
-_VERSIONS = {"codex": "0.144.1", "hindsight": "0.8.4"}
+_VERSIONS = dict(PHASE1_APPLICATION_VERSIONS)
 _REQUIRED = {"codex": ("codex-cli",), "hindsight": ("hindsight-cli", "hindsight-api")}
 _HINDSIGHT_API_ENTRY_POINTS = {
     "hindsight-admin": "hindsight_api.admin.cli:main",
