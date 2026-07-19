@@ -148,6 +148,18 @@ def validated_performance_profile(*, plan_sha256: str) -> dict[str, object]:
     }
 
 
+def canary_phases(target: str) -> list[str]:
+    return {
+        "codex": ["codex.exec", "responses.exact"],
+        "hindsight": [
+            "hindsight.start",
+            "bank.create",
+            "memory.retain",
+            "memory.reflect",
+        ],
+    }[target]
+
+
 class SetupOperationPortTests(unittest.TestCase):
     def setUp(self):
         compact = RecommendedProfile("compact", 16 * GIB, selection(revision="1" * 40))
@@ -222,7 +234,7 @@ class SetupOperationPortTests(unittest.TestCase):
                         "ok": True,
                         "exact_contract": True,
                         "duration_seconds": 12.0,
-                        "phases": ["application.native"],
+                        "phases": canary_phases(parameters["application_target"]),
                         "evidence_sha256": "b" * 64,
                     },
                 }
@@ -402,7 +414,7 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         malformed = provider.outcome()
 
-        self.assertEqual(malformed["completion"], "complete")
+        self.assertEqual(malformed["completion"], "partial")
         self.assertEqual(malformed["readiness"], "unverified")
         self.assertEqual(
             malformed["application_target_readiness"], {"codex": "unverified"}
@@ -544,12 +556,12 @@ class SetupOperationPortTests(unittest.TestCase):
         evidence = FakeEvidenceStore()
         inspections = FakeOwner(fail="application-target.inspect")
 
-        def outcome_for(digest):
+        def outcome_for(digest, *, state=StepState.COMPLETE):
             evidence.items["setup"] = [
                 SetupEvidence(
                     "verify.request",
                     "verify-v1",
-                    StepState.COMPLETE,
+                    state,
                     json.dumps({"result": {"ok": True, "response_sha256": digest}}),
                 )
             ]
@@ -564,7 +576,70 @@ class SetupOperationPortTests(unittest.TestCase):
             "ready",
         )
         self.assertEqual(outcome_for("b" * 64)["readiness"], "unverified")
+        self.assertEqual(
+            outcome_for(
+                "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d",
+                state=StepState.SKIPPED,
+            )["readiness"],
+            "unverified",
+        )
         self.assertEqual(inspections.calls, [])
+
+    def test_durable_canary_recomputes_the_persisted_performance_band(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "application_targets": ("codex",),
+        }
+        evidence = FakeEvidenceStore()
+        evidence.items["setup"] = [
+            SetupEvidence(
+                "application.canary.codex",
+                "canary-v1",
+                StepState.COMPLETE,
+                json.dumps(
+                    {
+                        "result": {
+                            "profile": "coding",
+                            "ok": True,
+                            "exact_contract": True,
+                            "phases": ["codex.exec", "responses.exact"],
+                            "evidence_sha256": "b" * 64,
+                            "performance": {
+                                "metric": "codex.native_canary.duration_seconds",
+                                "value": 999.0,
+                                "unit": "seconds",
+                                "band": "expected",
+                                "profile_id": "phase1-qwen36-optiq-apple-silicon",
+                                "profile_version": 1,
+                            },
+                        }
+                    }
+                ),
+            )
+        ]
+        inspections = FakeOwner(
+            {
+                "application-target.inspect": {
+                    "state": "healthy",
+                    "detail": "managed state matches",
+                }
+            }
+        )
+
+        outcome = DurableSetupOutcomeProvider(
+            plans,
+            evidence,
+            validated_performance_profile(plan_sha256="a" * 64),
+            application_targets=inspections,
+        ).outcome()
+
+        self.assertEqual(outcome["completion"], "partial")
+        self.assertEqual(outcome["readiness"], "unverified")
+        self.assertEqual(
+            outcome["application_target_readiness"], {"codex": "unverified"}
+        )
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -892,7 +967,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "duration_seconds": durations[parameters["application_target"]],
-                    "phases": ["application.native"],
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                 },
             }
@@ -930,7 +1005,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "profile": "coding",
                 "ok": True,
                 "exact_contract": True,
-                "phases": ["application.native"],
+                "phases": canary_phases("codex"),
                 "evidence_sha256": "b" * 64,
                 "performance": {
                     "metric": "codex.native_canary.duration_seconds",
@@ -990,6 +1065,71 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(resumed["readiness"], "unverified")
         self.assertEqual(resumed["application_target_readiness"]["codex"], "unverified")
 
+        self.application_targets.calls.clear()
+        repaired = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": resumed["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(repaired["readiness"], "ready")
+        self.assertEqual(
+            [
+                call[1]["application_target"]
+                for call in self.application_targets.calls
+                if call[0] == "application-target.test"
+            ],
+            ["codex"],
+        )
+
+    def test_resumed_preview_validates_the_complete_canary_evidence_shape(self) -> None:
+        port = self.port(
+            performance_profile=validated_performance_profile(
+                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+            )
+        )
+        preview = port.preview({})
+        port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        index, canary = next(
+            (index, item)
+            for index, item in enumerate(self.evidence.items["setup"])
+            if item.step_id == "application.canary.codex"
+        )
+
+        cases = (
+            ("profile", "not-coding"),
+            ("phases", ["responses.exact", "codex.exec"]),
+            ("unit", "milliseconds"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                detail = json.loads(canary.detail)
+                if field == "unit":
+                    detail["result"]["performance"][field] = value
+                else:
+                    detail["result"][field] = value
+                self.evidence.items["setup"][index] = replace(
+                    canary, detail=json.dumps(detail)
+                )
+
+                resumed = port.preview({})
+
+                self.assertEqual(resumed["readiness"], "unverified")
+                self.assertEqual(
+                    resumed["application_target_readiness"]["codex"],
+                    "unverified",
+                )
+
+        self.evidence.items["setup"][index] = canary
+
     def test_resumed_preview_rejects_malformed_terminal_gateway_evidence(self) -> None:
         exact = replace(
             selection(), application_targets=(), application_target_options={}
@@ -1020,6 +1160,19 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(resumed["readiness"], "unverified")
 
+        self.verifier.calls.clear()
+        repaired = port.execute(
+            "setup",
+            {
+                "selection": exact,
+                "confirmed": True,
+                "preview_fingerprint": resumed["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(repaired["readiness"], "ready")
+        self.assertEqual([call[0] for call in self.verifier.calls], ["verify.request"])
+
     def test_skipped_required_canary_precedes_a_degraded_target(self) -> None:
         self.application_targets.results["application-target.test"] = (
             lambda parameters: {
@@ -1028,7 +1181,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "duration_seconds": 61.0,
-                    "phases": ["application.native"],
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                 },
             }
@@ -1164,7 +1317,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "response": {
                     "ok": True,
                     "exact_contract": True,
-                    "phases": ["application.native"],
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                 },
             }
@@ -1192,7 +1345,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "duration_seconds": 12.0,
-                    "phases": ["application.native"],
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                     "contract": parameters["application_target"],
                 },
@@ -1248,6 +1401,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "duration_seconds": 12.0,
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                 },
             }
@@ -1303,6 +1457,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "duration_seconds": 12.0,
+                    "phases": canary_phases(parameters["application_target"]),
                     "evidence_sha256": "b" * 64,
                 },
             }
