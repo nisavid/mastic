@@ -361,16 +361,13 @@ class DaemonOperationRouter:
             "result": dict(pending.result),
         }
         self._state.put_operation(operation)
-        if not any(
-            event.get("kind") == "complete" for event in self._state.events(identity)
-        ):
-            self._state.append_event(
-                {
-                    "kind": "complete",
-                    "operation_id": identity,
-                    "resource": pending.resource,
-                }
-            )
+        self._state.append_event_once(
+            {
+                "kind": "complete",
+                "operation_id": identity,
+                "resource": pending.resource,
+            }
+        )
         self._state.put_operation({**operation, "terminal_event_pending": False})
         with self._condition:
             current = self._completed_results.get(identity)

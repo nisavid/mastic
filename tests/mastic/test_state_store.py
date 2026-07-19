@@ -13,6 +13,37 @@ from mastic.infrastructure.state_store import (
 
 
 class OperationalStateStoreTests(unittest.TestCase):
+    def test_append_event_once_is_atomic_across_concurrent_store_instances(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite3"
+            OperationalStateStore(path).put_operation(
+                {"id": "op-1", "kind": "runtime.install", "status": "complete"}
+            )
+            barrier = threading.Barrier(8)
+
+            def append() -> dict[str, object]:
+                store = OperationalStateStore(path)
+                barrier.wait()
+                return store.append_event_once(
+                    {
+                        "operation_id": "op-1",
+                        "kind": "complete",
+                        "resource": "runtime",
+                    }
+                )
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = tuple(pool.map(lambda _: append(), range(8)))
+
+            store = OperationalStateStore(path)
+            complete = [
+                event for event in store.events("op-1") if event["kind"] == "complete"
+            ]
+            self.assertEqual(len(complete), 1)
+            self.assertEqual({result["sequence"] for result in results}, {1})
+
     def test_rejects_a_state_directory_not_owned_by_the_current_user(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with patch(

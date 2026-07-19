@@ -220,6 +220,33 @@ swap_move() {
   return $result_code
 }
 
+record_mutable_target() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  unsetopt bg_nice
+  local destination=$1 parent backup
+  parent=${destination:h}
+  backup="$parent/.${destination:t}.mastic-backup.$$"
+  integer copy_status=0
+  mkdir -p -- "$parent"
+  [[ -d $parent && ! -L $parent && -O $parent ]] || fail "destination parent must be a user-owned directory: $parent"
+  [[ ! -e $backup && ! -L $backup ]] || fail "backup path already exists: $backup"
+  if [[ -e $destination || -L $destination ]]; then
+    MASTIC_ACTIVE_SWAP_DESTINATION=''
+    MASTIC_ACTIVE_SWAP_STAGE=$backup
+    MASTIC_ACTIVE_SWAP_BACKUP=''
+    /bin/cp -R -P "$destination" "$backup" &
+    MASTIC_ACTIVE_SWAP_PID=$!
+    wait $MASTIC_ACTIVE_SWAP_PID || copy_status=$?
+    MASTIC_ACTIVE_SWAP_PID=0
+    (( copy_status == 0 )) || fail "could not snapshot destination: $destination"
+  fi
+  MASTIC_COMPLETED_SWAPS+=("$destination" "$backup")
+  MASTIC_ACTIVE_SWAP_DESTINATION=''
+  MASTIC_ACTIVE_SWAP_STAGE=''
+  MASTIC_ACTIVE_SWAP_BACKUP=''
+}
+
 replace_directory() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
@@ -371,6 +398,11 @@ main() {
   replace_file "$receipt_stage" "$receipt"
 
   wheel="$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl"
+  record_mutable_target "$mastic_data_dir/tools/mastic"
+  record_mutable_target "$HOME/.local/bin/mastic"
+  record_mutable_target "$HOME/.local/bin/masticd"
+  integer install_status=0
+  unsetopt bg_nice
   UV_TOOL_DIR="$mastic_data_dir/tools" \
   UV_TOOL_BIN_DIR="$HOME/.local/bin" \
   "$uv_destination/uv" tool install \
@@ -381,7 +413,11 @@ main() {
     --python-preference only-system \
     --no-python-downloads \
     --force \
-    "$wheel"
+    "$wheel" &
+  MASTIC_ACTIVE_SWAP_PID=$!
+  wait $MASTIC_ACTIVE_SWAP_PID || install_status=$?
+  MASTIC_ACTIVE_SWAP_PID=0
+  (( install_status == 0 )) || fail 'exact MASTIC tool installation failed'
   MASTIC_BOOTSTRAP_COMMITTED=1
 
   print -r -- "Installed MASTIC ${MASTIC_VERSION}."

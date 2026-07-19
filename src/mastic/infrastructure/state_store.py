@@ -190,6 +190,32 @@ class OperationalStateStore:
             sequence = int(cursor.lastrowid)
         return _record({**dto, "sequence": sequence})
 
+    def append_event_once(self, event: Mapping[str, object]) -> dict[str, object]:
+        """Append one operation event kind atomically, or return the existing event."""
+        dto = _record(event)
+        if "sequence" in dto:
+            raise ValueError("event sequence is assigned by the state store")
+        operation_id = _identity(dto, "operation_id", "event")
+        kind = _identity(dto, "kind", "event")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT sequence, dto_json FROM events
+                WHERE operation_id = ? AND kind = ?
+                ORDER BY sequence LIMIT 1
+                """,
+                (operation_id, kind),
+            ).fetchone()
+            if row is not None:
+                return _record({**_decode(row[1]), "sequence": int(row[0])})
+            cursor = connection.execute(
+                "INSERT INTO events(operation_id, kind, dto_json) VALUES (?, ?, ?)",
+                (operation_id, kind, _encode(dto)),
+            )
+            sequence = int(cursor.lastrowid)
+        return _record({**dto, "sequence": sequence})
+
     def events(
         self,
         operation_id: str | None = None,

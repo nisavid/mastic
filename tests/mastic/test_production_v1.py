@@ -711,17 +711,19 @@ class ProductionCompositionTests(unittest.TestCase):
                 supervisor=_Port(),
                 state=state,
             )
-            original_append = state.append_event
-            events = 0
+            original_append_once = state.append_event_once
+            attempts = 0
 
-            def append_event(event):
-                nonlocal events
-                events += 1
-                if events == 2:
+            def append_event_once(event):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
                     raise OSError("journal unavailable")
-                return original_append(event)
+                return original_append_once(event)
 
-            with patch.object(state, "append_event", side_effect=append_event):
+            with patch.object(
+                state, "append_event_once", side_effect=append_event_once
+            ):
                 first = router.execute(
                     "runtime.install",
                     {"runtime": "optiq"},
