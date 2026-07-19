@@ -68,6 +68,12 @@ class _Snapshots:
             ),
             active_operations=0,
             pressure="normal",
+            completion="complete",
+            readiness="degraded",
+            application_target_readiness={
+                "codex": "ready",
+                "hindsight": "degraded",
+            },
         )
 
 
@@ -93,6 +99,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(140, 45)) as pilot:
             state = str(self.app.query_one("#machine-state", Static).content)
             self.assertIn("Gateway ready · 127.0.0.1:8766", state)
+            self.assertIn("Completion complete", state)
+            self.assertIn("Readiness degraded", state)
+            self.assertIn("codex ready", state)
+            self.assertIn("hindsight degraded", state)
 
             self.app.snapshots = _Snapshots(GatewaySnapshot("stopped"))
             self.app.show_view("home")

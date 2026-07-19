@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from mastic.application.dispatch import OperationResult
-from mastic.application.status import StatusSnapshot
+from mastic.application.status import GatewaySnapshot, StatusSnapshot
 from mastic.infrastructure.host_integration import (
     LaunchdSupervisorActivator,
     LocalSnapshotProvider,
@@ -111,6 +111,12 @@ class HostIntegrationTests(unittest.TestCase):
                     {"id": "op-1", "status": "running"},
                     {"id": "op-2", "status": "ready"},
                 ],
+                "completion": "complete",
+                "readiness": "degraded",
+                "application_target_readiness": {
+                    "codex": "ready",
+                    "hindsight": "degraded",
+                },
             }
         )
 
@@ -125,6 +131,24 @@ class HostIntegrationTests(unittest.TestCase):
         self.assertEqual(snapshot.pressure, "warning")
         self.assertEqual(snapshot.active_operations, 1)
         self.assertEqual(snapshot.services[0].runtime, "optiq@0.3.3")
+        self.assertEqual(snapshot.completion, "complete")
+        self.assertEqual(snapshot.readiness, "degraded")
+        self.assertEqual(
+            snapshot.application_target_readiness,
+            {"codex": "ready", "hindsight": "degraded"},
+        )
+
+    def test_status_snapshot_freezes_caller_owned_target_readiness(self) -> None:
+        target_readiness = {"codex": "ready"}
+        snapshot = StatusSnapshot(
+            supervisor="running",
+            gateway=GatewaySnapshot("ready"),
+            application_target_readiness=target_readiness,
+        )
+
+        target_readiness["codex"] = "degraded"
+
+        self.assertEqual(snapshot.application_target_readiness, {"codex": "ready"})
 
     def test_private_log_reader_bounds_files_and_rejects_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

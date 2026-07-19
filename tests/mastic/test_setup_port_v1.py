@@ -27,7 +27,9 @@ from mastic.infrastructure.paths_v1 import MasticPaths
 from mastic.infrastructure.production import _setup_transition
 from mastic.infrastructure.production_host import OwnedStateRemover
 from mastic.infrastructure.setup_port import (
+    DurableSetupOutcomeProvider,
     OperationalSetupEvidenceStore,
+    OperationalSetupPlanStore,
     SetupOperationPort,
 )
 
@@ -60,6 +62,18 @@ class FakeEvidenceStore:
 
     def record(self, scope, evidence):
         self.items[scope].append(evidence)
+
+
+class FakePlanStore:
+    def __init__(self):
+        self.plan = None
+        self.calls_before_record = None
+
+    def record(self, plan):
+        self.plan = dict(plan)
+
+    def load(self):
+        return self.plan
 
 
 class FakeOperationalState:
@@ -239,6 +253,7 @@ class SetupOperationPortTests(unittest.TestCase):
         evidence=None,
         inventory=None,
         transition=None,
+        plan_store=None,
     ):
         return SetupOperationPort(
             self.resolver,
@@ -264,7 +279,165 @@ class SetupOperationPortTests(unittest.TestCase):
             removal_inventory=lambda: inventory or self.inventory,
             performance_profile=performance_profile,
             transition=transition,
+            plan_store=plan_store,
         )
+
+    def test_confirmed_setup_records_content_free_exact_plan_before_mutation(self):
+        plan_store = FakePlanStore()
+
+        def record(plan):
+            plan_store.calls_before_record = list(self.runtime.calls)
+            plan_store.plan = dict(plan)
+
+        plan_store.record = record
+        port = self.port(plan_store=plan_store)
+        preview = port.preview({})
+
+        port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(plan_store.calls_before_record, [])
+        self.assertEqual(
+            plan_store.plan["plan_identity"], preview["preview_fingerprint"]
+        )
+        self.assertEqual(plan_store.plan["application_targets"], ("codex", "hindsight"))
+        self.assertTrue(plan_store.plan["steps"])
+        self.assertEqual(
+            set(plan_store.plan), {"plan_identity", "steps", "application_targets"}
+        )
+        encoded = json.dumps(plan_store.plan)
+        for forbidden in ("prompt", "messages", "credentials", "model_repository"):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_durable_outcome_survives_store_recomposition_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.sqlite3"
+            state = OperationalStateStore(state_path)
+            evidence = OperationalSetupEvidenceStore(state)
+            plans = OperationalSetupPlanStore(state)
+            port = self.port(evidence=evidence, plan_store=plans)
+            preview = port.preview({})
+            result = port.execute(
+                "setup",
+                {
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+
+            reopened = OperationalStateStore(state_path)
+            outcome = DurableSetupOutcomeProvider(
+                OperationalSetupPlanStore(reopened),
+                OperationalSetupEvidenceStore(reopened),
+            ).outcome()
+
+            self.assertEqual(outcome["completion"], result["completion"])
+            self.assertEqual(outcome["readiness"], result["readiness"])
+            self.assertEqual(
+                outcome["application_target_readiness"],
+                result["application_target_readiness"],
+            )
+            stored = reopened.snapshot("setup_plan", "active")
+            self.assertEqual(
+                set(stored),
+                {
+                    "kind",
+                    "id",
+                    "version",
+                    "plan_identity",
+                    "steps",
+                    "application_targets",
+                },
+            )
+
+            stored["steps"] = [{"id": "application.canary.codex"}]
+            malformed = FakePlanStore()
+            malformed.plan = stored
+            conservative = DurableSetupOutcomeProvider(
+                malformed, OperationalSetupEvidenceStore(reopened)
+            ).outcome()
+            self.assertEqual(conservative["completion"], "partial")
+            self.assertEqual(conservative["readiness"], "unverified")
+
+    def test_durable_outcome_keeps_missing_and_malformed_canaries_fail_closed(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": (
+                {"id": "preflight", "fingerprint": "preflight-v1"},
+                {"id": "application.canary.codex", "fingerprint": "canary-v1"},
+            ),
+            "application_targets": ("codex",),
+        }
+        evidence = FakeEvidenceStore()
+        evidence.record(
+            "setup",
+            SetupEvidence("preflight", "preflight-v1", StepState.COMPLETE, "{}"),
+        )
+        provider = DurableSetupOutcomeProvider(plans, evidence)
+
+        missing = provider.outcome()
+
+        self.assertEqual(missing["completion"], "partial")
+        self.assertEqual(missing["readiness"], "pending")
+        self.assertEqual(missing["application_target_readiness"], {"codex": "pending"})
+
+        evidence.record(
+            "setup",
+            SetupEvidence(
+                "application.canary.codex",
+                "canary-v1",
+                StepState.COMPLETE,
+                '{"result":{"performance":{"band":"expected"}}}',
+            ),
+        )
+        malformed = provider.outcome()
+
+        self.assertEqual(malformed["completion"], "complete")
+        self.assertEqual(malformed["readiness"], "unverified")
+        self.assertEqual(
+            malformed["application_target_readiness"], {"codex": "unverified"}
+        )
+
+    def test_plan_store_can_reactivate_an_exact_prior_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plans = OperationalSetupPlanStore(
+                OperationalStateStore(Path(directory) / "state.sqlite3")
+            )
+            base = {
+                "steps": ({"id": "verify.request", "fingerprint": "verify-v1"},),
+                "application_targets": (),
+            }
+
+            plans.record({**base, "plan_identity": "a" * 64})
+            plans.record({**base, "plan_identity": "b" * 64})
+            plans.record({**base, "plan_identity": "a" * 64})
+
+            self.assertEqual(plans.load()["plan_identity"], "a" * 64)
+
+    def test_plan_store_rejects_fields_outside_the_content_free_envelope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = OperationalStateStore(Path(directory) / "state.sqlite3")
+            plans = OperationalSetupPlanStore(state)
+
+            with self.assertRaisesRegex(ValueError, "unsupported fields"):
+                plans.record(
+                    {
+                        "plan_identity": "a" * 64,
+                        "steps": (
+                            {"id": "verify.request", "fingerprint": "verify-v1"},
+                        ),
+                        "application_targets": (),
+                        "prompt": "must not persist",
+                    }
+                )
+
+            self.assertEqual(state.snapshots("setup_plan"), ())
 
     def test_preview_is_exact_machine_aware_editable_and_side_effect_free(self):
         preview = self.port().preview({"profile": "recommended"})

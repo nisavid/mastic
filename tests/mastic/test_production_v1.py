@@ -17,7 +17,13 @@ from unittest.mock import patch
 
 from mastic.application.config_schema import validate_config
 from mastic.application.dispatch import ApplicationError, OperationRequest
-from mastic.application.setup import SetupIntent, SetupPreflight, SetupRequest
+from mastic.application.setup import (
+    SetupEvidence,
+    SetupIntent,
+    SetupPreflight,
+    SetupRequest,
+    StepState,
+)
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.model_supply import CacheInventory, CachedRevision
 from mastic.infrastructure.gateway_credential import GatewayCredential
@@ -49,6 +55,10 @@ from mastic.infrastructure.production_host import (
     sampling_profile,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
+from mastic.infrastructure.setup_port import (
+    OperationalSetupEvidenceStore,
+    OperationalSetupPlanStore,
+)
 
 
 class _Port:
@@ -748,6 +758,66 @@ route = "coding"
             self.assertEqual(credential["scheme"], "Bearer")
             self.assertEqual(credential["path"], str(paths.gateway_credential))
             self.assertEqual(set(credential), {"scheme", "path", "instructions"})
+
+    def test_local_status_reconstructs_setup_outcome_after_fresh_composition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            state = OperationalStateStore(paths.state_db)
+            plans = OperationalSetupPlanStore(state)
+            evidence = OperationalSetupEvidenceStore(state)
+            fingerprint = "step-verify-v1"
+            plans.record(
+                {
+                    "plan_identity": "a" * 64,
+                    "steps": ({"id": "verify.request", "fingerprint": fingerprint},),
+                    "application_targets": (),
+                }
+            )
+            evidence.record(
+                "setup",
+                SetupEvidence(
+                    "verify.request",
+                    fingerprint,
+                    StepState.COMPLETE,
+                    json.dumps(
+                        {
+                            "result": {
+                                "ok": True,
+                                "response_sha256": "b" * 64,
+                            }
+                        }
+                    ),
+                ),
+            )
+
+            first = compose_local(
+                paths=paths, home=root, executable=Path("/usr/bin/python3")
+            )
+            first_status = first.application.dispatcher.execute(
+                OperationRequest("status")
+            ).value
+            restarted = compose_local(
+                paths=paths, home=root, executable=Path("/usr/bin/python3")
+            )
+            restarted_check = restarted.application.dispatcher.execute(
+                OperationRequest("check")
+            ).value
+
+            for result in (first_status, restarted_check):
+                self.assertEqual(result["completion"], "complete")
+                self.assertEqual(result["readiness"], "ready")
+                self.assertEqual(result["application_target_readiness"], {})
+                self.assertIn("setup-plan", result["evidence"])
+                self.assertIn("setup-evidence", result["evidence"])
+                encoded = repr(result)
+                self.assertNotIn("prompt", encoded)
+                self.assertNotIn("messages", encoded)
 
     def test_daemon_graph_composes_without_binding_or_starting_services(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Mapping, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,18 @@ class StatusSnapshot:
     services: tuple[ServiceSnapshot, ...] = ()
     active_operations: int = 0
     pressure: str = "unknown"
+    completion: str = "partial"
+    readiness: str = "pending"
+    application_target_readiness: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "application_target_readiness",
+            MappingProxyType(dict(self.application_target_readiness)),
+        )
 
 
 class SnapshotProvider(Protocol):

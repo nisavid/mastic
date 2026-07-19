@@ -333,6 +333,33 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("choose exactly one output mode", result.output)
         self.assertFalse(self.dispatcher.requests)
 
+    def test_status_and_check_preserve_setup_outcome_in_human_and_json(self) -> None:
+        outcome = {
+            "state": "ok",
+            "completion": "complete",
+            "readiness": "degraded",
+            "application_target_readiness": {
+                "codex": "ready",
+                "hindsight": "degraded",
+            },
+        }
+        self.dispatcher.results.update({"status": outcome, "check": outcome})
+
+        for command in ("status", "check"):
+            with self.subTest(command=command):
+                machine = self.runner.invoke(self.app, [command, "--json"])
+                human = self.runner.invoke(self.app, [command])
+
+                self.assertEqual(machine.exit_code, 0, machine.output)
+                self.assertEqual(json.loads(machine.output)["result"], outcome)
+                self.assertEqual(human.exit_code, 0, human.output)
+                self.assertIn("completion", human.output)
+                self.assertIn("complete", human.output)
+                self.assertIn("readiness", human.output)
+                self.assertIn("degraded", human.output)
+                self.assertIn("codex", human.output)
+                self.assertIn("ready", human.output)
+
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])
         self.assertEqual(machine.exit_code, 1)

@@ -83,7 +83,8 @@ class MasticApp(App[None]):
         text-style: bold;
     }
     #machine-state {
-        height: 2;
+        height: auto;
+        min-height: 2;
         padding: 0 2;
         background: #101916;
         color: #b6c5bf;
@@ -468,10 +469,22 @@ class MasticApp(App[None]):
         if workspace_generation != self._workspace_generation:
             return
         gateway = self._gateway_label(snapshot)
+        target_readiness = " · ".join(
+            f"{target} {readiness}"
+            for target, readiness in sorted(
+                snapshot.application_target_readiness.items()
+            )
+        )
+        setup_state = (
+            f"◇ Completion {snapshot.completion}   "
+            f"◇ Readiness {snapshot.readiness}"
+            + (f"   ⇄ {target_readiness}" if target_readiness else "")
+        )
         self.query_one("#machine-state", Static).update(
             f"{self._state_mark(snapshot.supervisor)} Supervisor {snapshot.supervisor}   "
             f"{self._state_mark(snapshot.gateway.state)} Gateway {gateway}   "
-            f"◆ Pressure {snapshot.pressure}   ↻ {snapshot.active_operations} active"
+            f"◆ Pressure {snapshot.pressure}   ↻ {snapshot.active_operations} active\n"
+            f"{setup_state}"
         )
         self.query_one("#view-title", Static).update(title)
         self.query_one("#view-body", Static).update(body)

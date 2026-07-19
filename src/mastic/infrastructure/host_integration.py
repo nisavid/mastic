@@ -9,6 +9,7 @@ import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 from mastic.application.dispatch import OperationRequest
@@ -91,6 +92,7 @@ class LocalSnapshotProvider:
         port = gateway.get("port")
         gateway_state = str(gateway.get("state", "stopped"))
         operations = _sequence(value.get("operations"))
+        target_readiness = _mapping(value.get("application_target_readiness"))
         active = sum(
             1
             for item in operations
@@ -106,6 +108,14 @@ class LocalSnapshotProvider:
             services=services,
             active_operations=active,
             pressure=str(value.get("pressure", supervisor.get("pressure", "unknown"))),
+            completion=str(value.get("completion", "partial")),
+            readiness=str(value.get("readiness", "pending")),
+            application_target_readiness=MappingProxyType(
+                {
+                    str(target): str(readiness)
+                    for target, readiness in target_readiness.items()
+                }
+            ),
         )
 
     @staticmethod
