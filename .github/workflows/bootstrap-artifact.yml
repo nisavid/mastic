@@ -1,0 +1,171 @@
+name: Bootstrap artifact
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: bootstrap-artifact-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build exact bootstrap closure
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install build frontend
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: true
+          python-version: "3.11.15"
+
+      - name: Validate bootstrap contracts
+        run: uv run --frozen python -m unittest tests.mastic.test_bootstrap_artifact_v1
+
+      - name: Build exact closure and generated installer
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          uv build --wheel
+          wheels=(dist/mastic-*-py3-none-any.whl(N))
+          (( ${#wheels} == 1 ))
+          version=${${wheels[1]:t}#mastic-}
+          version=${version%-py3-none-any.whl}
+          closure="dist/mastic-bootstrap-closure-${version}-macos-arm64.tar.gz"
+          release_tag=''
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            release_tag=$GITHUB_REF_NAME
+          fi
+          closure_args=("$wheels[1]" "$closure")
+          bootstrap_args=("$wheels[1]" "$closure" dist/bootstrap-mastic.zsh)
+          if [[ -n $release_tag ]]; then
+            closure_args+=("$release_tag")
+            bootstrap_args+=("$release_tag")
+          fi
+          zsh scripts/build-bootstrap-closure.zsh "${closure_args[@]}"
+          zsh scripts/build-bootstrap.zsh "${bootstrap_args[@]}"
+          dist/bootstrap-mastic.zsh --dry-run
+          extract_dir=$(mktemp -d "${RUNNER_TEMP}/mastic-release.XXXXXXXX")
+          trap 'rm -rf -- "$extract_dir"' EXIT
+          tar -xzf "$closure" -C "$extract_dir" \
+            ./application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz
+          cp \
+            "$extract_dir/application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz" \
+            dist/hindsight-api-0.8.4-macos-arm64.tar.gz
+          for artifact in \
+            "$wheels[1]" \
+            "$closure" \
+            dist/bootstrap-mastic.zsh \
+            dist/hindsight-api-0.8.4-macos-arm64.tar.gz; do
+            digest=$(shasum -a 256 "$artifact")
+            digest=${digest%% *}
+            print -r -- "${digest}  ${artifact:t}" >"$artifact.sha256"
+          done
+
+      - name: Upload exact release inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mastic-bootstrap-${{ github.sha }}
+          path: |
+            dist/mastic-*-py3-none-any.whl
+            dist/mastic-*-py3-none-any.whl.sha256
+            dist/mastic-bootstrap-closure-*-macos-arm64.tar.gz
+            dist/mastic-bootstrap-closure-*-macos-arm64.tar.gz.sha256
+            dist/bootstrap-mastic.zsh
+            dist/bootstrap-mastic.zsh.sha256
+            dist/hindsight-api-0.8.4-macos-arm64.tar.gz
+            dist/hindsight-api-0.8.4-macos-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  host-contract:
+    name: Exercise bootstrap · macOS ${{ matrix.macos }}
+    needs: [package]
+    strategy:
+      fail-fast: false
+      matrix:
+        macos: ["15", "26"]
+    runs-on: macos-${{ matrix.macos }}
+    steps:
+      - name: Download exact release inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mastic-bootstrap-${{ github.sha }}
+          path: dist
+
+      - name: Validate the real runner without mutation
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          chmod 0755 dist/bootstrap-mastic.zsh
+          dist/bootstrap-mastic.zsh --dry-run
+
+      - name: Verify download-layout checksums and install offline
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          checksums=(dist/*.sha256(N))
+          (( ${#checksums} == 4 ))
+          for checksum in $checksums; do
+            (cd dist && shasum -c "${checksum:t}")
+          done
+
+          install_home=$(mktemp -d "${RUNNER_TEMP}/mastic-install.XXXXXXXX")
+          trap 'rm -rf -- "$install_home"' EXIT
+          mastic_data="$install_home/mastic-data"
+          HOME="$install_home" \
+          MASTIC_DATA_DIR="$mastic_data" \
+          UV_OFFLINE=1 \
+          PIP_NO_INDEX=1 \
+          HTTP_PROXY=http://127.0.0.1:1 \
+          HTTPS_PROXY=http://127.0.0.1:1 \
+          ALL_PROXY=http://127.0.0.1:1 \
+          NO_PROXY='' \
+            dist/bootstrap-mastic.zsh \
+              --artifact-dir "${PWD}/dist" \
+              --yes
+
+          "$install_home/.local/bin/mastic" --help >/dev/null
+          "$install_home/.local/bin/masticd" --help >/dev/null
+          [[ $("$mastic_data/bootstrap-uv/uv" --version) == 'uv 0.11.29'* ]]
+          [[ $("$mastic_data/bootstrap-python/bin/python3.11" --version) == 'Python 3.11.15' ]]
+          [[ -f "$mastic_data/bootstrap-artifacts/bootstrap-receipt.json" ]]
+
+  publish:
+    name: Attest and publish tagged artifact
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host-contract, package]
+    runs-on: macos-15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Download exact release inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mastic-bootstrap-${{ github.sha }}
+          path: dist
+
+      - name: Attest release inputs
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: "dist/*"
+
+      - name: Publish versioned GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

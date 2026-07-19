@@ -1,0 +1,312 @@
+#!/bin/zsh -f
+
+set -euo pipefail
+
+readonly MASTIC_VERSION='@MASTIC_VERSION@'
+readonly MASTIC_WHEEL_SHA256='@MASTIC_WHEEL_SHA256@'
+readonly MASTIC_CLOSURE_SHA256='@MASTIC_CLOSURE_SHA256@'
+readonly MASTIC_CLOSURE_NAME="mastic-bootstrap-closure-${MASTIC_VERSION}-macos-arm64.tar.gz"
+readonly MASTIC_DEFAULT_CLOSURE_URL="https://github.com/nisavid/mastic/releases/download/v${MASTIC_VERSION}/${MASTIC_CLOSURE_NAME}"
+typeset -g MASTIC_WORK_DIR=''
+typeset -g MASTIC_ACTIVE_SWAP_STAGE=''
+typeset -g MASTIC_ACTIVE_SWAP_BACKUP=''
+typeset -g MASTIC_ACTIVE_SWAP_DESTINATION=''
+
+usage() {
+  emulate -L zsh
+  print -r -- $'Install one exact, verified MASTIC release on a supported Apple-silicon Mac.\n\nUsage: bootstrap-mastic.zsh [-n|--dry-run] [-y|--yes] [--artifact-dir DIR] [--closure-url URL]\n\n  -n, --dry-run       Validate the host and print the exact plan without mutation or network access.\n  -y, --yes           Accept this command\'s fixed install defaults; no durable consent is stored.\n      --artifact-dir  Install from an offline directory containing the exact release closure.\n      --closure-url   Fetch the closure from an alternate URL; its embedded digest still must match.\n  -h, --help          Show this help.'
+}
+
+fail() {
+  emulate -L zsh
+  print -ru2 -- "mastic bootstrap: $1"
+  return 1
+}
+
+validate_host() {
+  emulate -L zsh
+  local system machine version major
+  system=$(uname -s)
+  machine=$(uname -m)
+  version=$(sw_vers -productVersion)
+  major=${version%%.*}
+  if [[ $system != Darwin ]]; then
+    fail 'Phase 1 requires macOS.'
+    return 1
+  fi
+  if [[ $machine != arm64 ]]; then
+    fail 'Phase 1 requires an Apple-silicon Mac.'
+    return 1
+  fi
+  case $major in
+    15|26) ;;
+    *)
+      fail "macOS ${version} is outside the validated Phase 1 range (15.x or 26.x)."
+      return 1
+      ;;
+  esac
+  print -r -- "Host validated: macOS ${version} (${machine})"
+}
+
+verify_sha256() {
+  emulate -L zsh
+  local file=$1 expected=$2 actual
+  actual=$(shasum -a 256 "$file")
+  actual=${actual%% *}
+  [[ $actual == $expected ]] || fail "digest verification failed for ${file:t}"
+}
+
+verify_closure() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local root=$1 manifest="$1/SHA256SUMS" line digest relative file actual
+  local -a invalid missing mismatched required
+  local -A declared
+  required=(
+    uv/uv
+    python/bin/python3.11
+    "wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl"
+    application-targets-v1/manifest.json
+    application-targets-v1/artifacts/codex-aarch64-apple-darwin.tar.gz
+    application-targets-v1/artifacts/hindsight-darwin-arm64
+    application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz
+  )
+  [[ -f $manifest && ! -L $manifest ]] || {
+    fail 'release closure is missing SHA256SUMS'
+    return 1
+  }
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line != *'  '* ]]; then
+      invalid+=("${line:-<empty>}")
+      continue
+    fi
+    digest=${line%%  *}
+    relative=${line#*  }
+    if [[ ${#digest} != 64 || $digest == *[^0-9a-fA-F]* || -z $relative || $relative == /* || $relative == *'../'* || $relative == '..' ]]; then
+      invalid+=("${relative:-<empty>}")
+      continue
+    fi
+    if (( ${+declared[$relative]} )); then
+      invalid+=("duplicate:$relative")
+      continue
+    fi
+    declared[$relative]=1
+    file="$root/$relative"
+    if [[ ! -f $file || -L $file ]]; then
+      missing+=($relative)
+      continue
+    fi
+    actual=$(shasum -a 256 "$file")
+    actual=${actual%% *}
+    [[ $actual == $digest ]] || mismatched+=($relative)
+  done <"$manifest"
+  for relative in $required; do
+    (( ${+declared[$relative]} )) || missing+=($relative)
+  done
+  local -a closure_files=("$root"/**/*(N.))
+  for file in $closure_files; do
+    relative=${file#$root/}
+    [[ $relative == SHA256SUMS ]] && continue
+    (( ${+declared[$relative]} )) || invalid+=("undeclared:$relative")
+  done
+  if (( ${#invalid} || ${#missing} || ${#mismatched} )); then
+    (( ${#invalid} )) && print -ru2 -- "mastic bootstrap: invalid closure manifest entries: ${(j<, >)invalid}"
+    (( ${#missing} )) && print -ru2 -- "mastic bootstrap: missing closure inputs: ${(j<, >)${(ou)missing}}"
+    (( ${#mismatched} )) && print -ru2 -- "mastic bootstrap: closure digest mismatches: ${(j<, >)${(ou)mismatched}}"
+    return 1
+  fi
+  verify_sha256 "$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl" $MASTIC_WHEEL_SHA256
+  [[ -x "$root/uv/uv" ]] || fail 'verified closure uv is not executable'
+  [[ -x "$root/python/bin/python3.11" ]] || fail 'verified closure Python 3.11 is not executable'
+}
+
+validate_archive_members() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local archive=$1 member normalized listing line kind
+  listing=$(tar -tzf "$archive") || fail 'release closure member listing failed'
+  for member in ${(f)listing}; do
+    normalized=${member#./}
+    [[ -z $normalized ]] && continue
+    if [[ $normalized == /* || "/$normalized/" == *'/../'* ]]; then
+      fail "release closure contains an unsafe member: $member"
+      return 1
+    fi
+  done
+  listing=$(tar -tvzf "$archive") || fail 'release closure type listing failed'
+  for line in ${(f)listing}; do
+    [[ -n $line ]] || continue
+    kind=${line[1]}
+    if [[ $kind != '-' && $kind != d ]]; then
+      fail "release closure contains a link or special member (type ${kind})"
+      return 1
+    fi
+  done
+}
+
+cleanup_bootstrap_state() {
+  emulate -L zsh
+  setopt no_unset
+  local destination=$MASTIC_ACTIVE_SWAP_DESTINATION
+  local stage=$MASTIC_ACTIVE_SWAP_STAGE
+  local backup=$MASTIC_ACTIVE_SWAP_BACKUP
+  if [[ -n $destination && -n $backup && ! -e $destination && ! -L $destination && ( -e $backup || -L $backup ) ]]; then
+    if ! mv "$backup" "$destination"; then
+      print -ru2 -- "mastic bootstrap: could not restore interrupted destination: $destination"
+    fi
+  fi
+  if [[ -n $stage && ( -e $stage || -L $stage ) ]]; then
+    rm -rf -- "$stage"
+  fi
+  if [[ -n $backup && ( -e $backup || -L $backup ) && ( -e $destination || -L $destination ) ]]; then
+    rm -rf -- "$backup"
+  fi
+  if [[ -n $MASTIC_WORK_DIR && -d $MASTIC_WORK_DIR ]]; then
+    rm -rf -- "$MASTIC_WORK_DIR"
+  fi
+}
+
+replace_directory() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local source=$1 destination=$2 parent=${2:h} stage
+  mkdir -p -- "$parent"
+  [[ -d $parent && ! -L $parent && -O $parent ]] || fail "destination parent must be a user-owned directory: $parent"
+  chmod 0700 "$parent"
+  stage="$parent/.${destination:t}.mastic-bootstrap.$$"
+  [[ ! -e $stage ]] || fail "staging path already exists: $stage"
+  MASTIC_ACTIVE_SWAP_DESTINATION=$destination
+  MASTIC_ACTIVE_SWAP_STAGE=$stage
+  cp -R "$source" "$stage"
+  local backup="$parent/.${destination:t}.mastic-backup.$$"
+  [[ ! -e $backup ]] || fail "backup path already exists: $backup"
+  MASTIC_ACTIVE_SWAP_BACKUP=$backup
+  if [[ -e $destination || -L $destination ]]; then
+    mv "$destination" "$backup"
+  fi
+  if ! mv "$stage" "$destination"; then
+    [[ ! -e $destination && -e $backup ]] && mv "$backup" "$destination"
+    fail "could not replace destination: $destination"
+    return 1
+  fi
+  chmod 0700 "$destination"
+  [[ -e $backup ]] && rm -rf -- "$backup"
+  MASTIC_ACTIVE_SWAP_DESTINATION=''
+  MASTIC_ACTIVE_SWAP_STAGE=''
+  MASTIC_ACTIVE_SWAP_BACKUP=''
+  return 0
+}
+
+main() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  integer dry_run=0
+  integer accept_defaults=0
+  local artifact_dir='' closure_url=$MASTIC_DEFAULT_CLOSURE_URL
+  while (( $# )); do
+    case $1 in
+      -n|--dry-run) dry_run=1 ;;
+      -y|--yes) accept_defaults=1 ;;
+      --artifact-dir)
+        (( $# >= 2 )) || fail '--artifact-dir requires a value'
+        artifact_dir=$2
+        shift
+        ;;
+      --closure-url)
+        (( $# >= 2 )) || fail '--closure-url requires a value'
+        closure_url=$2
+        shift
+        ;;
+      -h|--help) usage; return 0 ;;
+      *) fail "unknown argument: $1" ;;
+    esac
+    shift
+  done
+
+  validate_host
+  print -r -- "MASTIC ${MASTIC_VERSION} closure: ${closure_url}"
+  print -r -- "Expected closure sha256: ${MASTIC_CLOSURE_SHA256}"
+  if (( dry_run )); then
+    print -r -- 'Dry run complete: no files, tools, or network resources were changed.'
+    return 0
+  fi
+
+  command -v shasum >/dev/null || fail 'shasum is required to verify artifacts.'
+  command -v tar >/dev/null || fail 'tar is required to unpack verified artifacts.'
+  [[ -n ${HOME:-} && $HOME == /* ]] || fail 'HOME must be an absolute path.'
+  local data_home=${XDG_DATA_HOME:-$HOME/.local/share} mastic_data_dir
+  [[ $data_home == /* ]] || fail 'XDG_DATA_HOME must be an absolute path.'
+  if (( ${+MASTIC_DATA_DIR} )); then
+    [[ -n $MASTIC_DATA_DIR ]] || fail 'MASTIC_DATA_DIR must be a non-empty absolute path.'
+    mastic_data_dir=$MASTIC_DATA_DIR
+  else
+    mastic_data_dir="$data_home/mastic"
+  fi
+  [[ $mastic_data_dir == /* ]] || fail 'MASTIC_DATA_DIR must be an absolute path.'
+  local work closure root uv_source uv_destination python_destination cache_destination wheel
+  work=$(mktemp -d "${TMPDIR:-/tmp}/mastic-bootstrap.XXXXXXXX")
+  MASTIC_WORK_DIR=$work
+  trap cleanup_bootstrap_state EXIT
+  trap 'cleanup_bootstrap_state; trap - EXIT; exit 130' INT
+  trap 'cleanup_bootstrap_state; trap - EXIT; exit 143' TERM
+
+  closure="$work/$MASTIC_CLOSURE_NAME"
+  if [[ -n $artifact_dir ]]; then
+    [[ -d $artifact_dir ]] || fail "artifact directory does not exist: $artifact_dir"
+    local source="$artifact_dir/$MASTIC_CLOSURE_NAME"
+    [[ -f $source && ! -L $source ]] || {
+      fail "missing release inputs: $MASTIC_CLOSURE_NAME"
+      return 1
+    }
+    cp "$source" "$closure"
+  else
+    command -v curl >/dev/null || fail 'curl is required to fetch verified artifacts.'
+    curl --fail --silent --show-error --location "$closure_url" --output "$closure"
+  fi
+  verify_sha256 "$closure" $MASTIC_CLOSURE_SHA256
+  validate_archive_members "$closure"
+  root="$work/closure"
+  mkdir "$root"
+  tar -xzf "$closure" -C "$root"
+  verify_closure "$root"
+
+  uv_source="$root/uv"
+  uv_destination="$mastic_data_dir/bootstrap-uv"
+  replace_directory "$uv_source" "$uv_destination"
+
+  python_destination="$mastic_data_dir/bootstrap-python"
+  replace_directory "$root/python" "$python_destination"
+  cache_destination="$mastic_data_dir/bootstrap-artifacts/application-targets-v1"
+  replace_directory "$root/application-targets-v1" "$cache_destination"
+  local artifacts_parent=${cache_destination:h}
+  local application_manifest_digest receipt receipt_stage
+  application_manifest_digest=$(shasum -a 256 "$cache_destination/manifest.json")
+  application_manifest_digest=${application_manifest_digest%% *}
+  receipt="$artifacts_parent/bootstrap-receipt.json"
+  receipt_stage="${receipt}.mastic-bootstrap.$$"
+  print -r -- "{\"schema_version\":1,\"closure_sha256\":\"${MASTIC_CLOSURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
+  chmod 0600 "$receipt_stage"
+  mv -f "$receipt_stage" "$receipt"
+
+  wheel="$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl"
+  UV_TOOL_DIR="$mastic_data_dir/tools" \
+  UV_TOOL_BIN_DIR="$HOME/.local/bin" \
+  "$uv_destination/uv" tool install \
+    --offline \
+    --no-index \
+    --find-links "$root/wheels" \
+    --python "$python_destination/bin/python3.11" \
+    --python-preference only-system \
+    --no-python-downloads \
+    --force \
+    "$wheel"
+
+  print -r -- "Installed MASTIC ${MASTIC_VERSION}."
+  print -r -- 'Cached exact application artifacts for guided setup; no consuming application was installed.'
+  if (( accept_defaults )); then
+    print -r -- 'Command-local defaults accepted; review the exact guided setup preview next.'
+  fi
+  print -r -- 'Run `mastic setup` to inspect the machine-bound Plan, then confirm it explicitly.'
+}
+
+main "$@"
