@@ -202,10 +202,10 @@ class UnixControlServer:
     async def close(self) -> None:
         """Stop accepting connections and remove this server's socket."""
 
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        server = self._server
+        if server is not None:
             self._server = None
+            server.close()
         await asyncio.sleep(0)
         connections = tuple(self._connections)
         if connections:
@@ -217,6 +217,8 @@ class UnixControlServer:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
             del done
+        if server is not None:
+            await server.wait_closed()
         self._unlink_our_socket()
 
     async def _prepare_socket_path(self) -> None:

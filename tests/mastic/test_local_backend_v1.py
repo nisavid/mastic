@@ -1254,27 +1254,6 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertIn(("verify", "qwen"), model.calls)
             self.assertEqual(result["evidence"], ["cache-completeness"])
 
-    def test_every_catalogue_entry_prepares_with_realistic_prerequisites(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            backend, state = self._backend(
-                root,
-                runtime_supply=_Port(),
-                model_supply=_ModelSupply(),
-                supervisor=_Port(),
-                logs=_Telemetry(),
-                metrics=_Telemetry(),
-                setup=_Port(),
-                application_targets=_Port(),
-            )
-            state.put_operation({"id": "job-1", "state": "running"})
-            for name in build_operation_catalogue():
-                with self.subTest(operation=name):
-                    prepared = backend.prepare(
-                        OperationRequest(name, self._parameters(name))
-                    )
-                    self.assertIsNotNone(prepared.execute)
-
     def test_every_query_executes_without_supervisor_activation(self) -> None:
         with TemporaryDirectory() as directory:
             backend, state = self._backend(

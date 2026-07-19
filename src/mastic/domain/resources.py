@@ -17,7 +17,13 @@ _IMMUTABLE_REVISION = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 def validate_runtime_installation_id(value: object) -> str:
     """Return one path-safe Runtime Installation identity."""
 
-    if not isinstance(value, str) or _INSTALLATION_ID.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or _INSTALLATION_ID.fullmatch(value) is None
+    ):
         raise ValueError("runtime installation ID contains unsafe characters")
     return value
 
@@ -26,7 +32,13 @@ class ResourceName(str):
     """A stable user-facing resource identity safe for paths and routing."""
 
     def __new__(cls, value: str) -> ResourceName:
-        if not isinstance(value, str) or _RESOURCE_NAME.fullmatch(value) is None:
+        if (
+            not isinstance(value, str)
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or _RESOURCE_NAME.fullmatch(value) is None
+        ):
             raise ValueError("resource name must match [A-Za-z0-9][A-Za-z0-9._-]*")
         return str.__new__(cls, value)
 
@@ -157,7 +169,9 @@ class ServiceRun:
         object.__setattr__(self, "service_name", ResourceName(self.service_name))
         if not self.run_id:
             raise ValueError("run ID is required")
-        if self.upstream_port is not None and not 1 <= self.upstream_port <= 65535:
+        if self.upstream_port is not None and (
+            type(self.upstream_port) is not int or not 1 <= self.upstream_port <= 65535
+        ):
             raise ValueError("upstream port must be in 1..65535")
 
 

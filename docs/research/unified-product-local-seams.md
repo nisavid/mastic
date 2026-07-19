@@ -10,10 +10,11 @@ architecture.
   (`origin/main`, `feat(mastic/clients): apply Qwen generation profiles`).
 - [`agents` source](https://github.com/nisavid/agents/tree/d7a4b62bc835012873aca95f2463b1e4e8c02c00): `d7a4b62bc835012873aca95f2463b1e4e8c02c00`
   (`origin/main`, `fix(responses-adapter): reject ambiguous history calls`).
-- `responses-adapter` is owned by `tooling/responses-adapter/` in `agents`; its
-  implementation, README, and tests are all inside that directory.
+- The seam later named `responses-adapter` is stored under
+  `tooling/codex-ns-proxy/` at the inspected `agents` commit; its implementation,
+  README, and tests are all inside that directory.
 
-All `tools/mastic/...` and `tooling/responses-adapter/...` references below are
+All `tools/mastic/...` and `tooling/codex-ns-proxy/...` references below are
 historical coordinates within those linked commits, not paths in this repository.
 Historical identifiers such as `ClientSettings` and `client` are quoted only
 when they name the audited source; current MASTIC vocabulary is defined in
@@ -46,7 +47,7 @@ processes, and provider compatibility adapter into one executable.
 human / automation
         |
         v
-mastic CLI or TUI                     responses-adapter.py (direct execution)
+mastic CLI or TUI                     codex-ns-proxy.py (direct execution)
         |                                      |
  local queries/config edits                     | one authenticated HTTP seam
         |                                      v
@@ -68,7 +69,7 @@ Supervisor, Gateway, child processes, physical work, observations, logs, and
 metrics (`tools/mastic/docs/architecture.md:32-55`). `responses-adapter` currently
 has no control-plane or installer entrypoint: its documented operator surface
 is environment variables plus direct Python execution
-(`tooling/responses-adapter/README.md:40-118`).
+(`tooling/codex-ns-proxy/README.md:40-118`).
 
 ## Responsibility matrix
 
@@ -112,7 +113,7 @@ yet multi-host or arbitrary-adapter configuration
 `responses-adapter` has no equivalent desired-state store or user workflow.
 `ProxyConfig` validates one upstream, one listener, two credentials, transport
 bounds, one adapter choice, bounded mapping capacity, and debug mode from
-`MASTIC_RESPONSES_ADAPTER_*` environment variables (`tooling/responses-adapter/responses-adapter.py:86-165`).
+`MASTIC_RESPONSES_ADAPTER_*` environment variables (`tooling/codex-ns-proxy/codex-ns-proxy.py:86-165`).
 That is a useful process configuration contract, but not yet a resource model,
 adapter catalogue, or persistent configurator.
 
@@ -138,7 +139,7 @@ loop (`tools/mastic/src/mastic/infrastructure/daemon_service.py:299-405`).
 
 `responses-adapter` does not reconcile anything external. Its only durable-like
 state is a bounded, process-local LRU mapping from Responses IDs to namespace
-reconstruction maps (`tooling/responses-adapter/responses-adapter.py:335-358`). It can
+reconstruction maps (`tooling/codex-ns-proxy/codex-ns-proxy.py:335-358`). It can
 therefore be supervised by another controller without duplicating the current
 Supervisor’s desired/live-state policy.
 
@@ -175,9 +176,9 @@ closure at Responses or `[DONE]` terminal events
 `tools/mastic/src/mastic/infrastructure/gateway.py:71-161`).
 
 `responses-adapter` routes only `GET /v1/models` and `POST /v1/responses` to one
-configured upstream (`tooling/responses-adapter/responses-adapter.py:27-31`). Unlike
+configured upstream (`tooling/codex-ns-proxy/codex-ns-proxy.py:27-31`). Unlike
 the current `mastic` Gateway, that upstream may be remote HTTP or HTTPS and may
-receive a separate bearer (`tooling/responses-adapter/responses-adapter.py:86-124,710-799`).
+receive a separate bearer (`tooling/codex-ns-proxy/codex-ns-proxy.py:86-124,710-799`).
 It has no model/service route table, readiness model, lifecycle action, or
 admission policy.
 
@@ -189,7 +190,7 @@ main duplicated implementation surface. The implementations differ in detail:
 whereas `responses-adapter` is a standard-library threaded HTTP server and a
 standalone process (`tools/mastic/src/mastic/infrastructure/gateway.py:178-205`;
 `tools/mastic/src/mastic/infrastructure/gateway_runtime.py:75-103`;
-`tooling/responses-adapter/responses-adapter.py:1021-1092`).
+`tooling/codex-ns-proxy/codex-ns-proxy.py:1021-1092`).
 
 ### 5. Application-target, provider, and protocol/capability adapters
 
@@ -211,11 +212,11 @@ forwards the same OpenAI-compatible operation to the selected local engine.
 The proxy’s `codex-namespace` adapter is a true client/provider capability
 adapter. It flattens namespace function definitions and history, rejects
 ambiguous or unsupported shapes, and reconstructs only exact names it mapped
-(`tooling/responses-adapter/responses-adapter.py:168-318`). It inherits a bounded map
+(`tooling/codex-ns-proxy/codex-ns-proxy.py:168-318`). It inherits a bounded map
 through `previous_response_id` and fails before forwarding if state is missing
-or a name collides (`tooling/responses-adapter/responses-adapter.py:598-646`). It
+or a name collides (`tooling/codex-ns-proxy/codex-ns-proxy.py:598-646`). It
 performs the reverse transform in plain JSON and SSE and emits keep-alive
-comments for silent streams (`tooling/responses-adapter/responses-adapter.py:801-905`).
+comments for silent streams (`tooling/codex-ns-proxy/codex-ns-proxy.py:801-905`).
 
 These are complementary adapter categories that should remain named
 separately during design:
@@ -244,7 +245,7 @@ header allowlist excludes authorization
 `responses-adapter` instead requires a per-run inbound token and optionally accepts
 an independent upstream token. It rejects equal credentials, strips inbound
 authorization, and injects only the configured upstream bearer
-(`tooling/responses-adapter/responses-adapter.py:86-124,648-653,781-799`). This trust
+(`tooling/codex-ns-proxy/codex-ns-proxy.py:86-124,648-653,781-799`). This trust
 boundary is additive if the unified product supports authenticated or remote
 providers; it is not represented in current `mastic` desired state.
 
@@ -366,7 +367,7 @@ dedicated repository. Two facts make extraction mechanically plausible:
 
 - `tools/mastic/` is already an independent product/release boundary inside
   `systools` (`AGENTS.md:10-14`; `README.md:6-8`).
-- `tooling/responses-adapter/` is already a self-contained leaf in `agents`.
+- `tooling/codex-ns-proxy/` is already a self-contained leaf in `agents`.
 
 A dedicated repository would have to adopt the owning policies now supplied by
 `systools` (context mapping, docs contracts, validation, packaging) and preserve

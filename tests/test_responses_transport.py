@@ -7,6 +7,7 @@ import httpx
 
 from mastic.infrastructure.responses_transport import (
     RequestTransformationTooLarge,
+    ResponseAdaptationTooLarge,
     ResponsesTransport,
 )
 
@@ -83,6 +84,21 @@ class ResponsesTransportTests(unittest.IsolatedAsyncioTestCase):
             b'{"id":"response-1","output":[{"type":"function_call","name":"add","namespace":"math"}]}',
         )
 
+    async def test_json_response_stops_at_the_response_budget(self) -> None:
+        transport = ResponsesTransport(max_request_bytes=1024, max_response_bytes=32)
+        _request, reconstruction = transport.transform_request({})
+        upstream = httpx.Response(
+            200,
+            stream=ChunkStream([b'{"output":"', b"x" * 32, b'"}']),
+        )
+
+        with self.assertRaises(ResponseAdaptationTooLarge):
+            await transport.adapt_response_body(
+                upstream,
+                reconstruction,
+                content_type="application/json",
+            )
+
     def test_request_budget_applies_to_the_exact_serialized_transformation(
         self,
     ) -> None:
@@ -132,7 +148,14 @@ class ResponsesTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         upstream = httpx.Response(
             200,
-            stream=ChunkStream([added + terminal + b"data: must-not-forward\n\n"]),
+            stream=ChunkStream(
+                [
+                    added[:17],
+                    added[17:-1],
+                    added[-1:] + terminal[:23],
+                    terminal[23:] + b"data: must-not-forward\n\n",
+                ]
+            ),
         )
 
         stream = await transport.adapt_sse_response(upstream, reconstruction)

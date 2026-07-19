@@ -15,8 +15,10 @@ and lifecycle.
 | `python -m mastic.entrypoints daemon` | Private stable target used by mastic's generated LaunchAgent. |
 
 The supported release entry point is `bootstrap-mastic.zsh`. Its embedded digest
-authenticates one exact macOS/arm64 closure containing MASTIC, Python, `uv`, the
-MASTIC dependency wheelhouse, and the selected application artifacts. Use
+verifies the bytes of one exact macOS/arm64 closure containing MASTIC, Python,
+`uv`, the MASTIC dependency wheelhouse, and the selected application artifacts.
+The digest does not authenticate the publisher; operators must obtain the script
+and its digest manifest through a trusted release channel. Use
 `--dry-run` for host validation without network or mutation, or `--artifact-dir`
 with the exact closure for offline installation. Do not install separate MLX
 runtimes globally for mastic: `mastic runtime install` owns isolated exact Runtime
