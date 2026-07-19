@@ -4,6 +4,9 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
+import tomlkit
+
+from mastic.application.config_schema import validate_config
 from mastic.infrastructure.runtime_supply import (
     RuntimeCatalogue,
     RuntimeChangeResolver,
@@ -198,6 +201,38 @@ class RuntimeCatalogueTests(unittest.TestCase):
 
     def test_nested_launch_options_render_as_canonical_json(self) -> None:
         catalogue = RuntimeCatalogue.load_builtin()
+        config = validate_config(
+            tomlkit.parse(
+                """
+schema_version = 1
+
+[runtimes.\"optiq-0.3.3\"]
+definition = \"optiq\"
+version = \"0.3.3\"
+provenance = \"tested\"
+root = \"/runtimes/optiq-0.3.3\"
+launcher = [\"/runtimes/optiq-0.3.3/bin/optiq\", \"serve\"]
+capabilities = [\"model\", \"host\", \"port\", \"chat_template_args\"]
+bundle_id = \"optiq-0.3.3\"
+
+[models.qwen]
+repository = \"owner/qwen\"
+revision = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+[aliases.coding]
+installation = \"qwen\"
+
+[services.coding]
+model_alias = \"coding\"
+runtime = \"optiq-0.3.3\"
+route = \"coding\"
+
+[services.coding.options.chat_template_args]
+thinking = true
+budget = 4096
+"""
+            )
+        )
         installation = RuntimeInstallation(
             installation_id="optiq-0.3.3",
             runtime="optiq",
@@ -213,7 +248,7 @@ class RuntimeCatalogueTests(unittest.TestCase):
             model="/models/qwen",
             host="127.0.0.1",
             port=49152,
-            options={"chat_template_args": {"thinking": True, "budget": 4096}},
+            options=config.services["coding"].options,
         )
 
         self.assertIn(

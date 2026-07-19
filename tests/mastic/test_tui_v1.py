@@ -80,7 +80,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
     async def test_operations_console_has_stable_nav_workspace_and_inspector(
         self,
     ) -> None:
-        async with self.app.run_test(size=(140, 45)) as pilot:
+        async with self.app.run_test(size=(140, 45)):
             self.assertIsNotNone(self.app.query_one("#resource-nav"))
             self.assertIsNotNone(self.app.query_one("#workspace"))
             self.assertIsNotNone(self.app.query_one("#inspector"))
