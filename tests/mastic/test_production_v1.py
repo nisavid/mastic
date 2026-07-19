@@ -222,6 +222,136 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertTrue(paths.log_dir.exists())
             self.assertTrue(paths.state_db.exists())
 
+    def test_precomposed_mutation_waits_for_removal_before_touching_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            source = root / "candidate.toml"
+            source.write_text("schema_version = 1\n", encoding="utf-8")
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            production = compose_local(
+                paths=paths,
+                home=home,
+                executable=Path("/usr/bin/python3"),
+            )
+            dispatcher = production.application.dispatcher
+            preview = dispatcher.preview(
+                OperationRequest("config.import", {"source": str(source)})
+            )
+            request = OperationRequest(
+                "config.import",
+                {
+                    "source": str(source),
+                    "confirmed": True,
+                    "preview_fingerprint": preview.value["preview_fingerprint"],
+                },
+            )
+            transition = _setup_transition(paths)
+            execution_started = threading.Event()
+            execution_finished = threading.Event()
+
+            def execute():
+                execution_started.set()
+                try:
+                    return dispatcher.execute(request)
+                finally:
+                    execution_finished.set()
+
+            underlying = dispatcher._dispatcher
+            with (
+                patch.object(
+                    underlying,
+                    "execute",
+                    wraps=underlying.execute,
+                ) as underlying_execute,
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with transition():
+                    for path in (
+                        paths.config_dir,
+                        paths.state_dir,
+                        paths.data_dir,
+                        paths.log_dir,
+                    ):
+                        shutil.rmtree(path)
+                    mutation = pool.submit(execute)
+
+                    self.assertTrue(execution_started.wait(1))
+                    self.assertFalse(execution_finished.wait(0.1))
+                    self.assertFalse(paths.config_dir.exists())
+
+                with self.assertRaises(ApplicationError) as raised:
+                    mutation.result(timeout=2)
+
+            self.assertEqual(raised.exception.code, "product_state_removed")
+            self.assertEqual(
+                raised.exception.message,
+                "MASTIC product state was removed after this command initialized.",
+            )
+            self.assertEqual(
+                raised.exception.next_actions,
+                ("retry the command to reinitialize local state",),
+            )
+            underlying_execute.assert_not_called()
+            self.assertTrue(execution_finished.is_set())
+            self.assertFalse(paths.config_dir.exists())
+            self.assertFalse(paths.state_dir.exists())
+            self.assertFalse(paths.data_dir.exists())
+            self.assertFalse(paths.log_dir.exists())
+
+    def test_precomposed_mutation_rejects_replaced_product_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            source = root / "candidate.toml"
+            source.write_text("schema_version = 1\n", encoding="utf-8")
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            production = compose_local(
+                paths=paths,
+                home=home,
+                executable=Path("/usr/bin/python3"),
+            )
+            dispatcher = production.application.dispatcher
+            preview = dispatcher.preview(
+                OperationRequest("config.import", {"source": str(source)})
+            )
+            request = OperationRequest(
+                "config.import",
+                {
+                    "source": str(source),
+                    "confirmed": True,
+                    "preview_fingerprint": preview.value["preview_fingerprint"],
+                },
+            )
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+
+            with _setup_transition(paths)():
+                shutil.rmtree(paths.config_dir)
+                paths.config_dir.symlink_to(outside, target_is_directory=True)
+
+            underlying = dispatcher._dispatcher
+            with (
+                patch.object(
+                    underlying,
+                    "execute",
+                    wraps=underlying.execute,
+                ) as underlying_execute,
+                self.assertRaises(ApplicationError) as raised,
+            ):
+                dispatcher.execute(request)
+
+            self.assertEqual(raised.exception.code, "product_state_removed")
+            underlying_execute.assert_not_called()
+            self.assertTrue(paths.config_dir.is_symlink())
+            self.assertEqual(tuple(outside.iterdir()), ())
+
     def test_real_application_target_mutation_takes_setup_lock_before_target_lock(
         self,
     ) -> None:
@@ -634,6 +764,56 @@ route = "coding"
             self.assertEqual(
                 stat.S_IMODE(paths.gateway_credential.stat().st_mode), 0o600
             )
+
+    def test_daemon_composition_waits_for_removal_before_recreating_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            transition = _setup_transition(paths)
+            prepare_started = threading.Event()
+            original_prepare = MasticPaths.prepare
+
+            def observed_prepare(observed: MasticPaths) -> None:
+                prepare_started.set()
+                original_prepare(observed)
+
+            with (
+                patch.object(MasticPaths, "prepare", observed_prepare),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with transition():
+                    for path in (
+                        paths.config_dir,
+                        paths.state_dir,
+                        paths.data_dir,
+                        paths.log_dir,
+                    ):
+                        shutil.rmtree(path)
+                    composition = pool.submit(
+                        compose_daemon,
+                        paths=paths,
+                        home=home,
+                    )
+
+                    self.assertFalse(prepare_started.wait(0.1))
+                    self.assertFalse(composition.done())
+                    self.assertFalse(paths.state_dir.exists())
+
+                daemon = composition.result(timeout=2)
+
+            self.assertIsInstance(daemon, DaemonService)
+            self.assertTrue(prepare_started.is_set())
+            self.assertTrue(paths.config_dir.exists())
+            self.assertTrue(paths.state_dir.exists())
+            self.assertTrue(paths.data_dir.exists())
+            self.assertTrue(paths.log_dir.exists())
+            self.assertTrue(paths.gateway_credential.exists())
+            self.assertTrue(paths.state_db.exists())
 
     def test_daemon_graph_resolves_uv_only_when_runtime_work_begins(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

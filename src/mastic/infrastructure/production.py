@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from mastic.application.application_targets import SamplingProfile
+from mastic.application.catalogue import Operation, OperationKind
 from mastic.application.config_schema import (
     MasticConfig,
     validate_config,
@@ -375,16 +378,29 @@ class _GatewayMutationGuard:
         dispatcher,
         launchd: LaunchdAdapter,
         control_socket: Path | None = None,
+        *,
+        catalogue: Mapping[str, Operation] | None = None,
+        transition: Callable[[], AbstractContextManager[None]] | None = None,
+        paths: MasticPaths | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._launchd = launchd
         self._control_socket = control_socket
+        self._catalogue = {} if catalogue is None else catalogue
+        self._transition = transition if transition is not None else nullcontext
+        self._paths = paths
 
     def preview(self, request: OperationRequest):
         self._check(request)
         return self._dispatcher.preview(request)
 
     def execute(self, request: OperationRequest):
+        operation = self._catalogue.get(request.name)
+        if operation is not None and operation.kind is OperationKind.MUTATION:
+            with self._transition():
+                self._require_product_roots()
+                self._check(request)
+                return self._dispatcher.execute(request)
         self._check(request)
         return self._dispatcher.execute(request)
 
@@ -404,6 +420,34 @@ class _GatewayMutationGuard:
                     "mastic supervisor start",
                 ),
             )
+
+    def _require_product_roots(self) -> None:
+        if self._paths is None:
+            return
+        required = (
+            self._paths.config_dir,
+            self._paths.state_dir,
+            self._paths.data_dir,
+            self._paths.log_dir,
+        )
+        if any(not _private_product_root_ready(path) for path in required):
+            raise ApplicationError(
+                "product_state_removed",
+                "MASTIC product state was removed after this command initialized.",
+                next_actions=("retry the command to reinitialize local state",),
+            )
+
+
+def _private_product_root_ready(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+    )
 
 
 class _SetupSupervisorOwner:
@@ -573,7 +617,12 @@ def _compose_local_locked(
         )
     )
     guarded = _GatewayMutationGuard(
-        application.dispatcher, launchd, paths.control_socket
+        application.dispatcher,
+        launchd,
+        paths.control_socket,
+        catalogue=application.catalogue,
+        transition=setup_transition,
+        paths=paths,
     )
     public_application = ApplicationComposition(
         dispatcher=guarded,
@@ -626,7 +675,18 @@ def compose_daemon(
     """Build real Runtime, Model, Gateway, and Supervisor owners for masticd."""
 
     resolved_home = (home or Path.home()).expanduser().resolve()
-    paths = paths or resolve_paths(home=resolved_home)
+    resolved_paths = paths or resolve_paths(home=resolved_home)
+    setup_transition = _setup_transition(resolved_paths)
+    with setup_transition():
+        return _compose_daemon_locked(
+            paths=resolved_paths,
+            resolved_home=resolved_home,
+        )
+
+
+def _compose_daemon_locked(*, paths: MasticPaths, resolved_home: Path) -> DaemonService:
+    """Build the daemon graph while state removal cannot cross composition."""
+
     paths.prepare()
     credential = GatewayCredential(paths.gateway_credential)
     credential.load_or_create()
