@@ -958,6 +958,68 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(resumed["application_target_readiness"]["codex"], "degraded")
         self.assertEqual(self.application_targets.calls, [])
 
+    def test_resumed_preview_rejects_malformed_terminal_canary_evidence(self) -> None:
+        port = self.port(
+            performance_profile=validated_performance_profile(
+                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+            )
+        )
+        preview = port.preview({})
+        first = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        self.assertEqual(first["readiness"], "ready")
+
+        index, canary = next(
+            (index, item)
+            for index, item in enumerate(self.evidence.items["setup"])
+            if item.step_id == "application.canary.codex"
+        )
+        detail = json.loads(canary.detail)
+        detail["result"].update(
+            {"ok": False, "exact_contract": False, "evidence_sha256": "invalid"}
+        )
+        self.evidence.items["setup"][index] = replace(canary, detail=json.dumps(detail))
+
+        resumed = port.preview({})
+
+        self.assertEqual(resumed["readiness"], "unverified")
+        self.assertEqual(resumed["application_target_readiness"]["codex"], "unverified")
+
+    def test_resumed_preview_rejects_malformed_terminal_gateway_evidence(self) -> None:
+        exact = replace(
+            selection(), application_targets=(), application_target_options={}
+        )
+        port = self.port()
+        preview = port.preview({"selection": exact})
+        first = port.execute(
+            "setup",
+            {
+                "selection": exact,
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        self.assertEqual(first["readiness"], "ready")
+
+        index, verification = next(
+            (index, item)
+            for index, item in enumerate(self.evidence.items["setup"])
+            if item.step_id == "verify.request"
+        )
+        self.evidence.items["setup"][index] = replace(
+            verification,
+            detail=json.dumps({"result": {"ok": False, "response_sha256": "invalid"}}),
+        )
+
+        resumed = port.preview({"selection": exact})
+
+        self.assertEqual(resumed["readiness"], "unverified")
+
     def test_skipped_required_canary_precedes_a_degraded_target(self) -> None:
         self.application_targets.results["application-target.test"] = (
             lambda parameters: {

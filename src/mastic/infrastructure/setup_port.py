@@ -1180,12 +1180,17 @@ def _setup_outcome(
             (item for item in resolved.steps if item.id == "verify.request"),
             None,
         )
-        readiness = (
-            Readiness.READY
+        outcome = (
+            current.get((verification.id, verification.fingerprint))
             if verification is not None
-            and (verification.id, verification.fingerprint) in current
-            else Readiness.PENDING
+            else None
         )
+        if outcome is None:
+            readiness = Readiness.PENDING
+        elif _verification_ready(outcome):
+            readiness = Readiness.READY
+        else:
+            readiness = Readiness.UNVERIFIED
     return completion.value, readiness.value, target_readiness
 
 
@@ -1383,7 +1388,7 @@ def _durable_setup_outcome(
         )
         if verification is None:
             readiness = Readiness.PENDING
-        elif _durable_verification_ready(verification):
+        elif _verification_ready(verification):
             readiness = Readiness.READY
         else:
             readiness = Readiness.UNVERIFIED
@@ -1409,8 +1414,7 @@ def _durable_canary_readiness(
         return Readiness.UNVERIFIED.value
     if (
         not isinstance(result, Mapping)
-        or result.get("ok") is not True
-        or result.get("exact_contract") is not True
+        or not _application_canary_contract_ready(result)
         or not isinstance(performance, Mapping)
         or performance_profile.get("status") != "validated"
         or performance.get("profile_id") != performance_profile.get("id")
@@ -1428,7 +1432,7 @@ def _durable_canary_readiness(
     return Readiness.UNVERIFIED.value
 
 
-def _durable_verification_ready(evidence: SetupEvidence) -> bool:
+def _verification_ready(evidence: SetupEvidence) -> bool:
     try:
         payload = json.loads(evidence.detail)
         result = payload["result"]
@@ -1439,6 +1443,14 @@ def _durable_verification_ready(evidence: SetupEvidence) -> bool:
         isinstance(result, Mapping)
         and result.get("ok") is True
         and digest == _READY_RESPONSE_SHA256
+    )
+
+
+def _application_canary_contract_ready(result: Mapping[str, object]) -> bool:
+    return bool(
+        result.get("ok") is True
+        and result.get("exact_contract") is True
+        and _exact_sha256(result.get("evidence_sha256"))
     )
 
 
@@ -1608,6 +1620,8 @@ def _evidenced_canary_readiness(
         return Readiness.UNVERIFIED.value
     result = payload.get("result")
     if not isinstance(result, Mapping):
+        return Readiness.UNVERIFIED.value
+    if not _application_canary_contract_ready(result):
         return Readiness.UNVERIFIED.value
     performance = result.get("performance")
     if not isinstance(performance, Mapping):
