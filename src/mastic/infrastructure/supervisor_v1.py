@@ -381,6 +381,12 @@ class Supervisor:
                 ServiceRunState.UNHEALTHY,
             }:
                 return ServiceTransition("none", current.status)
+            if (
+                current is not None
+                and current.status.state is ServiceRunState.STOPPING
+                and not self._finish_stopping_run_locked(current)
+            ):
+                return ServiceTransition("none", current.status)
             if self._memory_pressure.current() is PressureLevel.CRITICAL:
                 operation_id = self._begin_operation_locked("service.start", name)
                 rejected = ServiceRunStatus(
@@ -401,6 +407,12 @@ class Supervisor:
                 ServiceRunState.READY,
                 ServiceRunState.UNHEALTHY,
             }:
+                return ServiceTransition("none", current.status, needs_start)
+            if (
+                current is not None
+                and current.status.state is ServiceRunState.STOPPING
+                and not self._finish_stopping_run_locked(current)
+            ):
                 return ServiceTransition("none", current.status, needs_start)
             operation_id = self._begin_operation_locked("service.start", name)
             run_id = self._new_identity_locked("run")
@@ -1100,6 +1112,22 @@ class Supervisor:
                 raise RuntimeError(
                     "launched process could not be confirmed stopped"
                 ) from error
+
+    def _finish_stopping_run_locked(self, run: _Run) -> bool:
+        """Retry cleanup without replacing a process that may still be live."""
+
+        try:
+            self._terminate_locked(run)
+        except Exception:
+            return False
+        run.status = ServiceRunStatus(
+            run.status.service,
+            run.status.run_id,
+            ServiceRunState.STOPPED,
+        )
+        self._gateway.set_route(self._gateway_route(run.service), "stopped", None)
+        self._persist_run_locked(run)
+        return True
 
     def _cleanup_failed_launch_locked(
         self, run: _Run, pending: PendingProcess

@@ -493,6 +493,10 @@ class SetupOperationPortTests(unittest.TestCase):
             _combined_readiness({"codex": "future-state"}).value,
             "unverified",
         )
+        self.assertEqual(
+            _combined_readiness({"codex": "ready", "hindsight": "future-state"}).value,
+            "unverified",
+        )
 
     def test_durable_outcome_fails_closed_when_target_observation_is_unknown(self):
         plans = FakePlanStore()

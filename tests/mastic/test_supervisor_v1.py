@@ -461,6 +461,34 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(stopped.run.state, ServiceRunState.STOPPED)
         self.assertFalse(process.running)
 
+    def test_start_retry_does_not_replace_an_unconfirmed_stopping_run(self) -> None:
+        self.probe.identity_error = OSError("identity unavailable")
+        self.processes.ignores_terminate = True
+        self.processes.ignores_kill = True
+        first = self.supervisor.start_service("coding")
+        process = next(iter(self.processes.processes.values()))
+        cleanup_attempts = (process.terminate_calls, process.kill_calls)
+
+        retried = self.supervisor.start_service("coding")
+
+        self.assertEqual(retried.operation_id, "none")
+        self.assertEqual(retried.run, first.run)
+        self.assertEqual(retried.run.state, ServiceRunState.STOPPING)
+        self.assertEqual(len(self.processes.launched), 1)
+        self.assertTrue(process.running)
+        self.assertIs(self.supervisor._runs["coding"].process, process)  # noqa: SLF001
+        self.assertGreater(process.terminate_calls, cleanup_attempts[0])
+        self.assertGreater(process.kill_calls, cleanup_attempts[1])
+
+        process.ignores_kill = False
+        self.probe.identity_error = None
+        recovered = self.supervisor.start_service("coding")
+
+        self.assertEqual(recovered.run.state, ServiceRunState.READY)
+        self.assertNotEqual(recovered.run.run_id, first.run.run_id)
+        self.assertEqual(len(self.processes.launched), 2)
+        self.assertFalse(process.running)
+
     def test_starting_snapshot_failure_aborts_without_committing_runtime(self) -> None:
         class FailingStateStore(FakeStateStore):
             def put_snapshot(self, item):

@@ -1269,6 +1269,9 @@ def _target_readiness(outcome: Mapping[str, object]) -> Mapping[str, str]:
 
 def _combined_readiness(target_readiness: Mapping[str, str]) -> Readiness:
     values = set(target_readiness.values())
+    known_values = {candidate.value for candidate in Readiness}
+    if not values or not values <= known_values:
+        return Readiness.UNVERIFIED
     return next(
         (
             candidate
