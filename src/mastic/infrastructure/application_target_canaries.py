@@ -97,19 +97,13 @@ class NativeApplicationTargetCanary:
                 "invalid_parameter", f"unsupported application canary: {target}"
             )
         duration = max(0.0, self._monotonic() - started)
-        evidence = hashlib.sha256(
-            json.dumps(
-                {
-                    "target": target,
-                    "profile": profile,
-                    "service": configuration.service_name,
-                    "phases": phases,
-                    "exact_contract": True,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        evidence = application_canary_evidence_sha256(
+            target=target,
+            profile=profile,
+            service=configuration.service_name,
+            phases=phases,
+            exact_contract=True,
+        )
         return _plain_result(
             ApplicationCanaryResult(target, phases, True, duration, evidence)
         )
@@ -481,3 +475,28 @@ def _plain_result(result: ApplicationCanaryResult) -> Mapping[str, object]:
         "duration_seconds": result.duration_seconds,
         "evidence_sha256": result.evidence_sha256,
     }
+
+
+def application_canary_evidence_sha256(
+    *,
+    target: str,
+    profile: str,
+    service: str,
+    phases: Sequence[str],
+    exact_contract: bool,
+) -> str:
+    """Digest the content-free native canary contract."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "target": target,
+                "profile": profile,
+                "service": service,
+                "phases": list(phases),
+                "exact_contract": exact_contract,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()

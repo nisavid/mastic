@@ -27,7 +27,7 @@ from mastic.application.setup import (
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.model_supply import CacheInventory, CachedRevision
 from mastic.infrastructure.gateway_credential import GatewayCredential
-from mastic.infrastructure.paths_v1 import MasticPaths
+from mastic.infrastructure.paths_v1 import MasticPaths, resolve_paths
 from mastic.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mastic.infrastructure.production import (
     _ActivatingOperationOwner,
@@ -204,6 +204,21 @@ class ProductionCompositionTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "must not overlap"),
                 ):
                     transition(paths)
+
+    def test_transition_locks_share_one_namespace_across_product_roots(self) -> None:
+        home = Path("/home/user")
+        first = resolve_paths(
+            home=home, environment={"MASTIC_STATE_DIR": "/first/state"}
+        )
+        second = resolve_paths(
+            home=home, environment={"MASTIC_STATE_DIR": "/second/state"}
+        )
+
+        self.assertEqual(_setup_transition(first).path, _setup_transition(second).path)
+        self.assertEqual(
+            _composition_transition(first).path,
+            _composition_transition(second).path,
+        )
 
     def test_local_read_composition_remains_available_during_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

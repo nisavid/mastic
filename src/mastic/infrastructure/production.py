@@ -167,6 +167,15 @@ def _external_transition(
         raise ValueError(
             "product-owned paths must not overlap after resolving symlinks"
         )
+    if paths.coordination_dir is not None:
+        candidate = paths.coordination_dir / filename
+        physical_candidate = _canonical_transition_path(candidate)
+        if any(
+            physical_candidate == path or physical_candidate.is_relative_to(path)
+            for path in owned
+        ):
+            raise ValueError("transition lock must be outside removable paths")
+        return _ReentrantPrivateFileLock(candidate)
     parent = _canonical_transition_path(paths.state_dir).parent
     while True:
         candidate = parent / ".mastic-locks" / filename

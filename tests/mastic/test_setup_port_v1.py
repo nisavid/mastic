@@ -160,6 +160,23 @@ def canary_phases(target: str) -> list[str]:
     }[target]
 
 
+def canary_evidence_sha256(target: str, *, service: str = "coding") -> str:
+    profile = {"codex": "coding", "hindsight": "retain"}[target]
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "target": target,
+                "profile": profile,
+                "service": service,
+                "phases": canary_phases(target),
+                "exact_contract": True,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
 class SetupOperationPortTests(unittest.TestCase):
     def setUp(self):
         compact = RecommendedProfile("compact", 16 * GIB, selection(revision="1" * 40))
@@ -235,7 +252,9 @@ class SetupOperationPortTests(unittest.TestCase):
                         "exact_contract": True,
                         "duration_seconds": 12.0,
                         "phases": canary_phases(parameters["application_target"]),
-                        "evidence_sha256": "b" * 64,
+                        "evidence_sha256": canary_evidence_sha256(
+                            parameters["application_target"]
+                        ),
                     },
                 }
             }
@@ -324,7 +343,25 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(plan_store.plan["application_targets"], ("codex", "hindsight"))
         self.assertTrue(plan_store.plan["steps"])
         self.assertEqual(
-            set(plan_store.plan), {"plan_identity", "steps", "application_targets"}
+            set(plan_store.plan),
+            {
+                "plan_identity",
+                "steps",
+                "application_targets",
+                "performance_binding",
+            },
+        )
+        self.assertEqual(
+            set(plan_store.plan["performance_binding"]),
+            {
+                "selection_sha256",
+                "application_versions",
+                "platform",
+                "machine",
+                "memory_bytes",
+                "macos_major",
+                "service",
+            },
         )
         encoded = json.dumps(plan_store.plan)
         for forbidden in ("prompt", "messages", "credentials", "model_repository"):
@@ -368,6 +405,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "plan_identity",
                     "steps",
                     "application_targets",
+                    "performance_binding",
                 },
             )
 
@@ -602,10 +640,11 @@ class SetupOperationPortTests(unittest.TestCase):
                     {
                         "result": {
                             "profile": "coding",
+                            "service": "coding",
                             "ok": True,
                             "exact_contract": True,
                             "phases": ["codex.exec", "responses.exact"],
-                            "evidence_sha256": "b" * 64,
+                            "evidence_sha256": canary_evidence_sha256("codex"),
                             "performance": {
                                 "metric": "codex.native_canary.duration_seconds",
                                 "value": 999.0,
@@ -640,6 +679,73 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(
             outcome["application_target_readiness"], {"codex": "unverified"}
         )
+
+    def test_durable_canary_requires_the_machine_bound_plan_binding(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "application_targets": ("codex",),
+        }
+        profile = validated_performance_profile(plan_sha256="c" * 64)
+        evidence = FakeEvidenceStore()
+        evidence.items["setup"] = [
+            SetupEvidence(
+                "application.canary.codex",
+                "canary-v1",
+                StepState.COMPLETE,
+                json.dumps(
+                    {
+                        "result": {
+                            "profile": "coding",
+                            "service": "coding",
+                            "ok": True,
+                            "exact_contract": True,
+                            "phases": canary_phases("codex"),
+                            "evidence_sha256": canary_evidence_sha256("codex"),
+                            "performance": {
+                                "metric": "codex.native_canary.duration_seconds",
+                                "value": 12.0,
+                                "unit": "seconds",
+                                "band": "expected",
+                                "profile_id": profile["id"],
+                                "profile_version": profile["version"],
+                            },
+                        }
+                    }
+                ),
+            )
+        ]
+        inspections = FakeOwner(
+            {"application-target.inspect": {"state": "healthy", "detail": "ok"}}
+        )
+
+        without_binding = DurableSetupOutcomeProvider(
+            plans, evidence, profile, application_targets=inspections
+        ).outcome()
+        plans.plan["performance_binding"] = {
+            "selection_sha256": "c" * 64,
+            "application_versions": {"codex": "0.144.1", "hindsight": "0.8.4"},
+            "platform": "darwin",
+            "machine": "arm64",
+            "memory_bytes": 96 * GIB,
+            "macos_major": 26,
+            "service": "coding",
+        }
+        matching = DurableSetupOutcomeProvider(
+            plans, evidence, profile, application_targets=inspections
+        ).outcome()
+        plans.plan["performance_binding"] = {
+            **plans.plan["performance_binding"],
+            "selection_sha256": "d" * 64,
+        }
+        wrong_plan = DurableSetupOutcomeProvider(
+            plans, evidence, profile, application_targets=inspections
+        ).outcome()
+
+        self.assertEqual(without_binding["readiness"], "unverified")
+        self.assertEqual(matching["readiness"], "ready")
+        self.assertEqual(wrong_plan["readiness"], "unverified")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -968,7 +1074,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "exact_contract": True,
                     "duration_seconds": durations[parameters["application_target"]],
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                 },
             }
         )
@@ -1003,10 +1111,11 @@ class SetupOperationPortTests(unittest.TestCase):
             detail,
             {
                 "profile": "coding",
+                "service": "coding",
                 "ok": True,
                 "exact_contract": True,
                 "phases": canary_phases("codex"),
-                "evidence_sha256": "b" * 64,
+                "evidence_sha256": canary_evidence_sha256("codex"),
                 "performance": {
                     "metric": "codex.native_canary.duration_seconds",
                     "value": 60.001,
@@ -1108,6 +1217,7 @@ class SetupOperationPortTests(unittest.TestCase):
             ("profile", "not-coding"),
             ("phases", ["responses.exact", "codex.exec"]),
             ("unit", "milliseconds"),
+            ("evidence_sha256", "0" * 64),
         )
         for field, value in cases:
             with self.subTest(field=field):
@@ -1182,7 +1292,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "exact_contract": True,
                     "duration_seconds": 61.0,
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                 },
             }
         )
@@ -1318,7 +1430,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "ok": True,
                     "exact_contract": True,
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                 },
             }
         )
@@ -1346,7 +1460,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "exact_contract": True,
                     "duration_seconds": 12.0,
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                     "contract": parameters["application_target"],
                 },
             }
@@ -1402,7 +1518,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "exact_contract": True,
                     "duration_seconds": 12.0,
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                 },
             }
 
@@ -1458,7 +1576,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     "exact_contract": True,
                     "duration_seconds": 12.0,
                     "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": "b" * 64,
+                    "evidence_sha256": canary_evidence_sha256(
+                        parameters["application_target"]
+                    ),
                 },
             }
         )
