@@ -144,6 +144,19 @@ class ResourceIdentityTests(unittest.TestCase):
             ):
                 ModelRevision("org/model", "a" * length)
 
+        with self.assertRaisesRegex(ValueError, "immutable commit SHA"):
+            ModelRevision("org/model", None)  # type: ignore[arg-type]
+
+    def test_service_options_reject_non_json_sets(self) -> None:
+        with self.assertRaisesRegex(ValueError, "option value"):
+            InferenceService(
+                name=ResourceName("coding"),
+                model_alias=ResourceName("coding-model"),
+                runtime_installation="mlx-lm@0.31.3",
+                route=ResourceName("coding"),
+                options={"unsupported": {"mutable"}},
+            )
+
     def test_model_repositories_reject_unsafe_path_components(self) -> None:
         for repository in (
             "",
