@@ -33,9 +33,9 @@ is a tested application contract, not duplicated UI work.
 
 ## Process boundaries
 
-`mastic` performs local read-only queries and configuration edits without
-starting any process. It can inspect config, persisted observations, launchd,
-the control socket, and process identity while the Supervisor is stopped.
+`mastic` performs local read-only queries without requiring a running
+Supervisor. It can inspect config, persisted observations, launchd, the
+control socket, and process identity while the Supervisor is stopped.
 
 `masticd` owns:
 
@@ -63,8 +63,8 @@ cancellation semantics that an operation owner cannot guarantee.
   replaced.
 - SQLite in WAL mode stores operation journals, observed resource and run
   state, versioned snapshots, and metrics.
-- Runtime logs are private, size-bounded, rotated, and correlated to Service Run
-  IDs.
+- Runtime logs are private, size-bounded, rotated, and scoped to Inference
+  Service names across their successive Service Runs.
 - Runtime Installations are immutable side-by-side environments under the
   per-user data directory.
 - Model bytes stay in official Hugging Face or declared local caches. mastic
