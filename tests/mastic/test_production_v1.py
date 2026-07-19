@@ -833,7 +833,7 @@ route = "coding"
                         {
                             "result": {
                                 "ok": True,
-                                "response_sha256": "b" * 64,
+                                "response_sha256": "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d",
                             }
                         }
                     ),

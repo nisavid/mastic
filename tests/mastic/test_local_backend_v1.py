@@ -321,6 +321,66 @@ class LocalOperationBackendTests(unittest.TestCase):
                 )
             self.assertEqual(outcomes.calls, 2)
 
+    def test_overviews_surface_application_target_drift_with_interface_parity(
+        self,
+    ) -> None:
+        issue = {
+            "code": "application_target_drifted",
+            "application_target": "hindsight",
+            "state": "drifted",
+            "message": "Hindsight profile differs from mastic ownership.",
+            "next_actions": ("mastic application-target configure hindsight --help",),
+        }
+        outcomes = _SetupOutcomes(
+            {
+                "completion": "complete",
+                "readiness": "unverified",
+                "application_target_readiness": {
+                    "codex": "ready",
+                    "hindsight": "unverified",
+                },
+                "application_target_issues": (issue,),
+            }
+        )
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(
+                Path(directory), config=_EMPTY_CONFIG, setup_outcomes=outcomes
+            )
+            state.put_snapshot(
+                {
+                    "kind": "supervisor",
+                    "id": "supervisor",
+                    "version": 1,
+                    "state": "running",
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "gateway",
+                    "id": "gateway",
+                    "version": 1,
+                    "state": "running",
+                }
+            )
+
+            status = backend.prepare(OperationRequest("status")).execute()
+            check = backend.prepare(OperationRequest("check")).execute()
+            doctor = backend.prepare(OperationRequest("doctor")).execute()
+
+            for result in (status, check, doctor):
+                self.assertIn(issue, result["issues"])
+                self.assertIn(
+                    "mastic application-target configure hindsight --help",
+                    result["next_actions"],
+                )
+            self.assertIn(
+                {"name": "application-target:hindsight", "state": "unverified"},
+                check["checks"],
+            )
+            self.assertEqual(status["state"], "ok")
+            self.assertEqual(check["state"], "failed")
+            self.assertFalse(doctor["healthy"])
+
     def test_status_reports_failed_for_unhealthy_top_level_components(self) -> None:
         for component, component_state in (
             ("supervisor", "failed"),

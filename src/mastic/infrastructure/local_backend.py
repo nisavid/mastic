@@ -409,6 +409,19 @@ class LocalOperationBackend:
             setup_evidence, str | bytes
         ):
             setup_evidence = ()
+        raw_target_issues = setup_outcome.get("application_target_issues", ())
+        target_issues = (
+            [dict(item) for item in raw_target_issues if isinstance(item, Mapping)]
+            if isinstance(raw_target_issues, Sequence)
+            and not isinstance(raw_target_issues, str | bytes)
+            else []
+        )
+        raw_target_readiness = setup_outcome.get("application_target_readiness")
+        target_readiness = (
+            raw_target_readiness.items()
+            if isinstance(raw_target_readiness, Mapping)
+            else ()
+        )
         supervisor = self._latest("supervisor", "supervisor") or {"state": "stopped"}
         gateway = self._latest("gateway", "gateway") or {
             "state": "stopped",
@@ -440,6 +453,8 @@ class LocalOperationBackend:
             if failed or component_failed or gateway_stopped
             else ("stopped" if supervisor.get("state") == "stopped" else "ok")
         )
+        if name == "check" and target_issues:
+            state = "failed"
         next_actions = []
         if supervisor.get("state") == "stopped":
             next_actions.append("mastic supervisor start")
@@ -447,7 +462,16 @@ class LocalOperationBackend:
             next_actions.append("mastic gateway restart")
         if failed or component_failed:
             next_actions.append("mastic doctor")
-        details: dict[str, object] = {}
+        for issue in target_issues:
+            actions = issue.get("next_actions", ())
+            if not isinstance(actions, Sequence) or isinstance(actions, str | bytes):
+                continue
+            next_actions.extend(
+                action
+                for action in actions
+                if isinstance(action, str) and action not in next_actions
+            )
+        details: dict[str, object] = {"issues": list(target_issues)}
         if name == "check":
             details["checks"] = [
                 {
@@ -465,9 +489,19 @@ class LocalOperationBackend:
                     }
                     for item in services
                 ),
+                *(
+                    {
+                        "name": f"application-target:{target}",
+                        "state": str(target_state),
+                    }
+                    for target, target_state in target_readiness
+                ),
             ]
         elif name == "doctor":
-            issues = self._diagnostic_issues(config, supervisor, gateway, services)
+            issues = [
+                *target_issues,
+                *self._diagnostic_issues(config, supervisor, gateway, services),
+            ]
             if "codex" in config.application_targets:
                 try:
                     codex = config.application_targets["codex"]
