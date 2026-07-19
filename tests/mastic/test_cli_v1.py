@@ -90,10 +90,13 @@ class CliV1Tests(unittest.TestCase):
         app = build_cli(self.dispatcher, catalogue, tui_launcher=lambda: 0)
 
         missing = self.runner.invoke(app, ["model", "search"])
-        present = self.runner.invoke(app, ["model", "search", "--limit", "8"])
 
         self.assertEqual(missing.exit_code, 2)
-        self.assertIn("--limit", missing.output)
+        self.assertFalse(self.dispatcher.requests)
+        self.assertIn("--limit", strip_ansi(missing.output))
+
+        present = self.runner.invoke(app, ["model", "search", "--limit", "8"])
+
         self.assertEqual(present.exit_code, 0, present.output)
         self.assertEqual(self.dispatcher.requests[-1].parameters["limit"], 8)
 
