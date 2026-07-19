@@ -948,6 +948,34 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertEqual(stopped[0]["state"], "stopped")
             self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
 
+    def test_stop_observation_failure_still_completes_daemon_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            requested: list[bool] = []
+            supervisor = _Port({"state": "stopped"})
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=_Port(),
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+                request_stop=lambda: requested.append(True),
+            )
+
+            with (
+                patch.object(
+                    router,
+                    "_record_lifecycle",
+                    side_effect=OSError("snapshot unavailable"),
+                ),
+                self.assertRaisesRegex(OSError, "snapshot unavailable"),
+            ):
+                router.execute("supervisor.stop", {}, operation_id="stop-1")
+
+            self.assertTrue(router._physically_stopped)
+            self.assertEqual(requested, [True])
+            replay = router.execute("supervisor.stop", {}, operation_id="stop-2")
+            self.assertTrue(replay["already_stopped"])
+            self.assertEqual(requested, [True, True])
+
     def test_waiting_stop_reclaims_the_drain_gate_after_the_first_stop_fails(
         self,
     ) -> None:
