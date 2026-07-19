@@ -93,7 +93,10 @@ class ModelRevision:
             )
         ):
             raise ValueError("model repository must be a repository ID")
-        if _IMMUTABLE_REVISION.fullmatch(self.revision) is None:
+        if (
+            not isinstance(self.revision, str)
+            or _IMMUTABLE_REVISION.fullmatch(self.revision) is None
+        ):
             raise ValueError("model revision must be an immutable commit SHA")
 
 
@@ -189,4 +192,6 @@ def _freeze_option_value(value: object) -> object:
         )
     if isinstance(value, list | tuple):
         return tuple(_freeze_option_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        raise ValueError("service option value must use JSON-compatible collections")
     return value
