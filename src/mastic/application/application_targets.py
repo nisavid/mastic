@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-from enum import StrEnum
+import hashlib
+import json
 import math
 import re
+from dataclasses import dataclass, fields
+from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
 
@@ -46,6 +48,31 @@ APPLICATION_CANARY_CONTRACTS: Mapping[str, ApplicationCanaryContract] = (
         }
     )
 )
+
+
+def application_canary_evidence_sha256(
+    *,
+    target: str,
+    profile: str,
+    service: str,
+    phases: Sequence[str],
+    exact_contract: bool,
+) -> str:
+    """Digest the content-free native canary contract."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "target": target,
+                "profile": profile,
+                "service": service,
+                "phases": list(phases),
+                "exact_contract": exact_contract,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
 
 class ApplicationTargetDriftIntent(StrEnum):

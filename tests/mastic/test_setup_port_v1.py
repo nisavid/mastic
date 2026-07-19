@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
-from mastic.application.dispatch import ApplicationError
+from mastic.application.dispatch import ApplicationError, OperationRequest
 from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
@@ -29,14 +29,13 @@ from mastic.infrastructure.application_target_canaries import (
     application_canary_evidence_sha256,
 )
 from mastic.infrastructure.paths_v1 import MasticPaths
-from mastic.infrastructure.production import _setup_transition
+from mastic.infrastructure.production import _setup_transition, compose_local
 from mastic.infrastructure.production_host import OwnedStateRemover
 from mastic.infrastructure.setup_port import (
     DurableSetupOutcomeProvider,
     OperationalSetupEvidenceStore,
     OperationalSetupPlanStore,
     SetupOperationPort,
-    _combined_readiness,
 )
 
 
@@ -434,6 +433,78 @@ class SetupOperationPortTests(unittest.TestCase):
             self.assertEqual(conservative["completion"], "partial")
             self.assertEqual(conservative["readiness"], "unverified")
 
+    def test_live_setup_outcome_matches_fresh_production_composition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config",
+                root / "state",
+                root / "data",
+                root / "logs",
+            )
+            paths.prepare()
+            state = OperationalStateStore(paths.state_db)
+            evidence = OperationalSetupEvidenceStore(state)
+            plans = OperationalSetupPlanStore(state)
+            port = self.port(evidence=evidence, plan_store=plans)
+            parameters = {
+                "application_targets": (),
+                "application_target_options": {},
+            }
+            preview = port.preview(parameters)
+
+            live = port.execute(
+                "setup",
+                {
+                    **parameters,
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+            restarted = compose_local(
+                paths=paths,
+                home=root,
+                executable=Path("/usr/bin/python3"),
+            )
+            fresh = restarted.application.dispatcher.execute(
+                OperationRequest("status")
+            ).value
+
+            self.assertEqual(fresh["completion"], live["completion"])
+            self.assertEqual(fresh["readiness"], live["readiness"])
+            self.assertEqual(
+                fresh["application_target_readiness"],
+                live["application_target_readiness"],
+            )
+
+    def test_live_and_durable_outcomes_match_when_profile_plan_differs(self):
+        plans = FakePlanStore()
+        profile = validated_performance_profile(plan_sha256="c" * 64)
+        port = self.port(performance_profile=profile, plan_store=plans)
+        preview = port.preview({})
+
+        live = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        durable = DurableSetupOutcomeProvider(
+            plans,
+            self.evidence,
+            profile,
+        ).outcome()
+
+        self.assertEqual(live["completion"], "complete")
+        self.assertEqual(live["readiness"], "unverified")
+        self.assertEqual(durable["completion"], live["completion"])
+        self.assertEqual(durable["readiness"], live["readiness"])
+        self.assertEqual(
+            durable["application_target_readiness"],
+            live["application_target_readiness"],
+        )
+
     def test_durable_outcome_keeps_missing_and_malformed_canaries_fail_closed(self):
         plans = FakePlanStore()
         plans.plan = {
@@ -569,17 +640,6 @@ class SetupOperationPortTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("credential", json.dumps(outcome))
-
-    def test_unknown_or_empty_target_readiness_fails_closed(self):
-        self.assertEqual(_combined_readiness({}).value, "unverified")
-        self.assertEqual(
-            _combined_readiness({"codex": "future-state"}).value,
-            "unverified",
-        )
-        self.assertEqual(
-            _combined_readiness({"codex": "ready", "hindsight": "future-state"}).value,
-            "unverified",
-        )
 
     def test_durable_outcome_fails_closed_when_target_observation_is_unknown(self):
         plans = FakePlanStore()
