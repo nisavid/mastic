@@ -467,26 +467,11 @@ class Supervisor:
                 process.commit()
             except Exception as error:
                 launch_error = f"process launch failed: {error}"
-                cleanup_errors: list[str] = []
-                if pending is not None:
-                    try:
-                        pending.abort()
-                    except Exception as cleanup_error:
-                        cleanup_errors.append(f"gate abort: {cleanup_error}")
-                    if run.identity is None:
-                        try:
-                            self._terminate_direct_locked(pending)
-                        except Exception as cleanup_error:
-                            cleanup_errors.append(
-                                f"direct termination: {cleanup_error}"
-                            )
-                        finally:
-                            run.process = None
-                    else:
-                        try:
-                            self._terminate_locked(run)
-                        except Exception as cleanup_error:
-                            cleanup_errors.append(f"termination: {cleanup_error}")
+                cleanup_errors = (
+                    self._cleanup_failed_launch_locked(run, pending)
+                    if pending is not None
+                    else []
+                )
                 detail = launch_error
                 if cleanup_errors:
                     detail += "; cleanup failed: " + "; ".join(cleanup_errors)
@@ -495,9 +480,7 @@ class Supervisor:
                     operation_id,
                     detail,
                     needs_start,
-                    cleanup_unconfirmed=(
-                        run.process is not None and run.identity is not None
-                    ),
+                    cleanup_unconfirmed=run.process is not None,
                 )
 
         deadline = self._clock.monotonic() + self._readiness_timeout
@@ -1077,7 +1060,11 @@ class Supervisor:
         identity = run.identity
         if process is None:
             return
-        if identity is None or not self._probe.identity_matches(identity):
+        if identity is None:
+            self._terminate_direct_locked(process)
+            run.process = None
+            return
+        if not self._probe.identity_matches(identity):
             run.process = None
             run.identity = None
             return
@@ -1109,8 +1096,30 @@ class Supervisor:
             process.kill()
             try:
                 process.wait(self._kill_timeout)
-            except (TimeoutError, OSError):
-                pass
+            except (TimeoutError, OSError) as error:
+                raise RuntimeError(
+                    "launched process could not be confirmed stopped"
+                ) from error
+
+    def _cleanup_failed_launch_locked(
+        self, run: _Run, pending: PendingProcess
+    ) -> list[str]:
+        cleanup_errors: list[str] = []
+        try:
+            pending.abort()
+        except Exception as error:
+            cleanup_errors.append(f"gate abort: {error}")
+        try:
+            if run.identity is None:
+                self._terminate_direct_locked(pending)
+                run.process = None
+            else:
+                self._terminate_locked(run)
+        except Exception as error:
+            cleanup_errors.append(
+                f"{'direct termination' if run.identity is None else 'termination'}: {error}"
+            )
+        return cleanup_errors
 
     def _terminate_recovered_process_locked(
         self,
@@ -1189,12 +1198,15 @@ class Supervisor:
         state = (
             ServiceRunState.STOPPING if cleanup_unconfirmed else ServiceRunState.FAILED
         )
+        pid = run.status.pid
+        if cleanup_unconfirmed and pid is None and run.process is not None:
+            pid = run.process.pid
         run.status = ServiceRunStatus(
             run.status.service,
             run.status.run_id,
             state,
             upstream_port=(run.status.upstream_port if cleanup_unconfirmed else None),
-            pid=run.status.pid if cleanup_unconfirmed else None,
+            pid=pid if cleanup_unconfirmed else None,
             error=error,
         )
         self._gateway.set_route(self._gateway_route(run.service), "unavailable", None)

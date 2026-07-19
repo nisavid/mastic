@@ -180,8 +180,11 @@ class FakeProbe:
     def __init__(self) -> None:
         self.ready = True
         self.identities: dict[int, ProcessIdentity] = {}
+        self.identity_error: Exception | None = None
 
     def identity(self, process: FakeProcess) -> ProcessIdentity:
+        if self.identity_error is not None:
+            raise self.identity_error
         identity = ProcessIdentity(process.pid, f"birth-{process.pid}")
         self.identities[process.pid] = identity
         return identity
@@ -434,6 +437,29 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(recovered.runs, ())
         self.assertFalse(process.running)
         self.assertEqual(self.store.snapshot_items[-1]["state"], "stopped")
+
+    def test_identity_probe_and_direct_cleanup_failure_preserve_the_live_handle(
+        self,
+    ) -> None:
+        self.probe.identity_error = OSError("identity unavailable")
+        self.processes.ignores_terminate = True
+        self.processes.ignores_kill = True
+
+        result = self.supervisor.start_service("coding")
+
+        process = next(iter(self.processes.processes.values()))
+        self.assertEqual(result.run.state, ServiceRunState.STOPPING)
+        self.assertEqual(result.run.pid, process.pid)
+        self.assertIn("identity unavailable", result.run.error or "")
+        self.assertIn("direct termination", result.run.error or "")
+        self.assertTrue(process.running)
+        self.assertIs(self.supervisor._runs["coding"].process, process)  # noqa: SLF001
+
+        process.ignores_kill = False
+        stopped = self.supervisor.stop_service("coding")
+
+        self.assertEqual(stopped.run.state, ServiceRunState.STOPPED)
+        self.assertFalse(process.running)
 
     def test_starting_snapshot_failure_aborts_without_committing_runtime(self) -> None:
         class FailingStateStore(FakeStateStore):
