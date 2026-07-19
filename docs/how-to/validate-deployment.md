@@ -6,7 +6,7 @@ Configuration Targets, bounded application-native Codex and Hindsight paths,
 durable setup evidence, one configured service, and clean shutdown.
 
 The current performance profile is provisional. A successful native canary is
-therefore valid exact-contract evidence but remains `Unverified` until matching
+therefore valid exact-contract evidence but remains `unverified` until matching
 clean-host measurements validate the profile. Do not treat this guide as a
 support claim.
 
@@ -38,6 +38,13 @@ Leave the Supervisor running for the Gateway and service checks below. The
 final section stops the complete stack and verifies that reading status does
 not reactivate `masticd`.
 
+If a later command fails or you stop the procedure early, run
+`mastic supervisor stop`, then `mastic status`. Confirm that the Supervisor is
+stopped before retrying or leaving the maintenance window. Supervisor shutdown
+drains every started service and the Gateway, so use it as the recovery command
+even when setup did not create the selected service. Do not let an optional
+individual service stop prevent this cleanup.
+
 ## Refresh durable setup evidence
 
 Run the guided setup:
@@ -46,10 +53,14 @@ Run the guided setup:
 mastic setup
 ```
 
-Review the exact preview and confirm it. Setup resumes matching completed work,
-applies any changed steps, starts the selected service, and finishes with one
-bounded application-native canary for each selected target. A failure is
-attributed to its exact step and can be resumed by running setup again.
+Review the exact preview and confirm it. Setup reuses matching terminal evidence
+without reexecuting those steps, then applies only changed or incomplete steps.
+The selected service starts and each selected target's bounded native canary
+runs only when its corresponding step lacks matching terminal evidence. A
+failure is attributed to its exact step and can be resumed by running setup
+again. Reused service-start evidence does not prove that the service is still
+running; inspect it before the standalone checks below and start it manually if
+it is stopped.
 
 Inspect the persisted outcome:
 
@@ -61,14 +72,15 @@ mastic check
 For the recommended selection, `completion` must be `complete` and
 `application_target_readiness` must contain `codex` and `hindsight`; for an
 exact selection, it contains only the selected targets. With the provisional
-profile, correct canaries remain `unverified`; that state alone does not make
-`check` fail. Missing, drifted, incompatible, malformed, unmanaged, or
-unobservable managed target state does fail the check and supplies bounded
-next actions.
+profile, correct canaries remain `unverified`; an explicitly skipped required
+canary does too. Neither condition alone makes `check` fail. Missing, drifted,
+incompatible, malformed, unmanaged, or unobservable managed target state does
+fail the check and supplies bounded next actions.
 
 ## Verify Application Configuration Target metadata
 
-After configuring Codex, run:
+For each selected target, follow its subsection and skip the other one. If Codex
+is selected, run:
 
 ```sh
 mastic application-target inspect codex
@@ -81,7 +93,7 @@ through app-server `model/list`, verify the same route and context there;
 versions that return only the bundled catalogue use `codex debug models` as
 the acceptance surface.
 
-After configuring Hindsight, inspect the selected profile:
+If Hindsight is selected, inspect its configured environment profile:
 
 ```sh
 mastic application-target inspect hindsight
@@ -92,13 +104,25 @@ claiming unrelated profile fields.
 
 ## Verify the application-native paths
 
-Run the target-specific native checks:
+Confirmed setup includes starting the selected service, but a resumed setup may
+reuse prior terminal evidence. Inspect the current service state before the
+target-specific native checks. If it is stopped, run
+`mastic service start SERVICE_NAME` first.
+
+Inspect the selected service, then run only the native checks for selected
+targets:
 
 ```sh
-mastic service start SERVICE_NAME
+mastic service inspect SERVICE_NAME
+# When Codex is selected:
 mastic application-target test codex --profile coding
+# When Hindsight is selected:
 mastic application-target test hindsight --profile retain
 ```
+
+`coding` and `retain` are the canonical v1 native-canary sampling profiles. The
+Hindsight canary uses the separately configured Hindsight environment profile
+automatically.
 
 The Codex check invokes an ephemeral, read-only `codex exec` through the owned
 Responses configuration and requires one exact bounded response. The Hindsight
@@ -108,7 +132,7 @@ return content-free phase, digest, exact-contract, and duration evidence.
 
 These standalone checks are useful for diagnosis, but they do not rewrite the
 saved setup outcome. Confirmed setup runs the same checks as resumable terminal
-steps and owns durable `Completion` and `Readiness` evidence. Leave the selected
+steps and owns durable `completion` and `readiness` evidence. Leave the selected
 service running for the next section.
 
 ## Verify one configured service
@@ -141,13 +165,13 @@ status observation must not reactivate either one.
 ## Preserve the readiness boundary
 
 The native procedures establish whether each application consumed its owned
-configuration and returned the exact contract. `Ready` and `Degraded` also
-require a validated performance profile bound to the exact setup plan,
+configuration and returned the exact contract. `ready` and `degraded` also
+require a validated performance profile bound to the exact Plan,
 application versions, macOS major version, and supported host class. The
 repository's profile remains provisional, so MASTIC correctly reports
-`Unverified` even after successful canaries.
+`unverified` even after successful canaries.
 
-Record the exact plan identity, model, runtime, application versions, host
+Record the exact Plan identity, model, runtime, application versions, host
 profile, per-target duration, evidence digest, and observed result when
 collecting the clean-host measurements needed to validate that profile.
 

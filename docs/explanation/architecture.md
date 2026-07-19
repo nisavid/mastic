@@ -56,6 +56,13 @@ or TUI waits while the operation runs; `operation list` and `operation inspect`
 show the recorded result. Public v1 does not claim detach, resume, or
 cancellation semantics that an operation owner cannot guarantee.
 
+At the low-level control boundary, retry deduplication uses an `operation_id`
+plus the canonical operation-and-parameters fingerprint. Reusing the same pair
+waits for in-flight work or replays its durable result; reusing the identity for
+a different request is rejected. The `request_id` correlates transport frames
+only. Separate CLI invocations generate fresh identities, while setup resumption
+uses its persisted step fingerprints rather than this physical-operation replay.
+
 ## Persistence boundaries
 
 - Strict round-trip TOML stores desired per-user, per-machine configuration.
@@ -69,7 +76,12 @@ cancellation semantics that an operation owner cannot guarantee.
   per-user data directory.
 - Model bytes stay in official Hugging Face or declared local caches. MASTIC
   records Model Installations, aliases, provenance, and references without
-  claiming ownership of shared blobs.
+  claiming ownership of shared blobs. Routine MASTIC removal retains those
+  caches. Explicit `model.cache.evict` and `model.cache.prune` operations may
+  delete an exact observed Cached Revision only after a fresh reference check
+  and confirmation; a referenced revision is blocked. An external cache owner
+  may still remove blobs independently, which makes an affected Model
+  Installation unavailable until it is repaired or installed again.
 
 ## Control protocol
 
@@ -124,15 +136,29 @@ lifespan-managed HTTPX client forwards bounded JSON requests and streams
 upstream responses. Chat output and unadapted streams are forwarded
 incrementally. Namespace-adapted non-SSE responses and individual SSE frames
 are buffered only within configured response-adaptation limits. The Gateway
+uses a 30-second default timeout for the initial upstream response and idle time
+between upstream reads; it does not impose a separate maximum total stream
+lifetime. An admitted stream may therefore continue indefinitely while every
+upstream read arrives within the idle timeout. Critical memory pressure does
+not force-close it; operator intervention is required when the stream delays
+recovery, as described under resource admission and pressure. Before response
+streaming begins, upstream timeout or failure returns `502` with
+`upstream_unavailable`.
+A late adapted Responses SSE failure emits a Responses protocol error; an
+ordinary unadapted stream closes without a second HTTP error body. Upstream
+cleanup still releases request activity. Ordinary Gateway requests retain
+bounded content-free metrics rather than a per-request journal. The Gateway
 binds only to configured loopback addresses and routes the OpenAI-compatible
 `model` field by Inference Service name.
 
 Every managed profile route and ordinary `/v1` route requires the same private
 bearer credential. MASTIC creates the credential as a user-owned mode-0600 file
-at `~/.local/state/mastic/gateway.token`, injects it into owned Application
-Configuration Targets, and sends it as `Authorization: Bearer <token>`. Missing
-and invalid credentials both receive `401` with `WWW-Authenticate: Bearer`; the
-credential is never forwarded to an upstream runtime.
+named `gateway.token` in the effective state directory: `MASTIC_STATE_DIR` when
+set, otherwise `mastic` under `XDG_STATE_HOME`, defaulting to
+`~/.local/state/mastic`. MASTIC injects it into owned Application Configuration
+Targets and sends it as `Authorization: Bearer <token>`. Missing and invalid
+credentials both receive `401` with `WWW-Authenticate: Bearer`; the credential
+is never forwarded to an upstream runtime.
 
 Each Service Run receives a private dynamic Upstream Endpoint. The Gateway
 stays healthy when an upstream fails, reports per-service readiness through
@@ -166,11 +192,19 @@ before confirmation. Per-service admission is bounded and returns a stable retry
 response at the concurrency limit.
 
 Critical memory pressure immediately blocks new starts and sheds new Gateway
-work while bounded in-flight requests finish. The Supervisor may then stop the
+work while already-admitted requests continue. The in-flight bound limits
+concurrency, not lifetime: automatic pressure recovery adds no total-stream
+deadline and never force-closes a busy run. The Supervisor may stop
 least-recently-used idle Service Runs until pressure recovers, but never stops a
 Pinned Inference Service automatically. If only pinned or busy services remain,
-it keeps shedding work and presents an ordered operator stop sequence. Every pressure
-decision and lifecycle action is journaled and visible in CLI and TUI.
+it keeps shedding work and presents an ordered operator stop sequence. An
+explicit service stop terminates that run; an explicit Supervisor stop allows
+the configured Gateway drain interval, 10 seconds by default, before
+terminating remaining runs. After response streaming begins, an ordinary client
+observes transport closure, while an adapted Responses SSE stream may receive
+its protocol error. Pressure and lifecycle state is visible in CLI and TUI.
+Lifecycle actions are journaled, while content-free Gateway activity is retained
+as bounded metrics; there is no per-request journal.
 
 ## User interfaces
 

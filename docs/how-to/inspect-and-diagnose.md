@@ -9,7 +9,7 @@ stack is stopped, degraded, or not serving requests.
 mastic status
 ```
 
-The overview reports setup `Completion`, overall and per-target `Readiness`,
+The overview reports setup `completion`, overall and per-target `readiness`,
 the Supervisor, Gateway, inference services, active or recent operations,
 memory pressure, and valid next actions. A stopped resource does not make
 `status` fail when the observation itself succeeds.
@@ -31,10 +31,10 @@ its health policy. Use it in scripts and CI when stopped or degraded service
 should fail the caller.
 
 `check` also re-observes configured Application Configuration Targets. Missing,
-drifted, or invalid owned settings make the affected target `Unverified` and
-fail the check. A correctly recorded canary that remains `Unverified` only
-because its performance policy is provisional does not fail the check by
-itself.
+drifted, or invalid owned settings make the affected target `unverified` and
+fail the check. A correctly recorded canary under a provisional performance
+policy or an explicitly skipped required canary remains `unverified`, but does
+not fail the check by itself.
 
 To narrow the check to one inference service:
 
@@ -82,10 +82,13 @@ mastic check
 mastic status
 ```
 
-If the problem involves a managed application, also inspect that integration:
+If the problem involves a managed application, inspect every selected target
+and skip targets that are not configured:
 
 ```sh
+# When Codex is selected:
 mastic application-target inspect codex
+# When Hindsight is selected:
 mastic application-target inspect hindsight
 ```
 
