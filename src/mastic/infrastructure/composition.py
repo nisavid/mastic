@@ -57,6 +57,7 @@ def compose_application(
     logs=None,
     metrics=None,
     model_intelligence=None,
+    setup_outcomes=None,
 ) -> ApplicationComposition:
     """Bind concrete owners without activating any managed process."""
 
@@ -90,6 +91,7 @@ def compose_application(
         config_path=paths.config_file,
         gateway_credential_path=paths.gateway_credential,
         model_intelligence=model_intelligence,
+        setup_outcomes=setup_outcomes,
     )
     dispatcher = OperationDispatcher(catalogue, activator, backend)
     return ApplicationComposition(

@@ -81,7 +81,9 @@ from mastic.infrastructure.runtime_supply import (
     SubprocessRuntimeProbe,
 )
 from mastic.infrastructure.setup_port import (
+    DurableSetupOutcomeProvider,
     OperationalSetupEvidenceStore,
+    OperationalSetupPlanStore,
     SetupOperationPort,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
@@ -572,6 +574,9 @@ def _compose_local_locked(
         application_bin_dir=paths.data_dir / "application-bin",
         transition=setup_transition,
     )
+    setup_evidence = OperationalSetupEvidenceStore(state_store)
+    setup_plans = OperationalSetupPlanStore(state_store)
+    setup_outcomes = DurableSetupOutcomeProvider(setup_plans, setup_evidence)
     setup = SetupOperationPort(
         _setup_resolver(),
         preflight=SystemSetupPreflight(paths),
@@ -582,7 +587,7 @@ def _compose_local_locked(
         application_targets=application_targets,
         supervisor=setup_supervisor,
         verifier=GatewayVerificationPort(credential),
-        evidence=OperationalSetupEvidenceStore(state_store),
+        evidence=setup_evidence,
         removal_inventory=lambda: removal_inventory(
             paths,
             launchd,
@@ -592,6 +597,7 @@ def _compose_local_locked(
             application_inventory=applications.inventory(),
         ),
         transition=setup_transition,
+        plan_store=setup_plans,
     )
     application = compose_application(
         paths=paths,
@@ -606,6 +612,7 @@ def _compose_local_locked(
         config_store=config_store,
         state_store=state_store,
         model_intelligence=intelligence,
+        setup_outcomes=setup_outcomes,
     )
     config_owner.bind(
         _DispatcherOwner(

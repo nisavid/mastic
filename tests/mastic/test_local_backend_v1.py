@@ -151,6 +151,16 @@ class _Telemetry:
         return self.items
 
 
+class _SetupOutcomes:
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+
+    def outcome(self):
+        self.calls += 1
+        return self.value
+
+
 class _ModelSupply:
     revision_id = "mlx-community/Qwen-OptiQ@" + "a" * 40
 
@@ -244,6 +254,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             config_path=config_path,
             model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
             gateway_credential_path=ports.get("gateway_credential_path"),
+            setup_outcomes=ports.get("setup_outcomes"),
         )
         return backend, state
 
@@ -277,7 +288,38 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["operations"], [])
             self.assertEqual(result["active_operations"], 0)
             self.assertEqual(result["pressure"], "unknown")
+            self.assertEqual(result["completion"], "partial")
+            self.assertEqual(result["readiness"], "pending")
+            self.assertEqual(result["application_target_readiness"], {})
             self.assertIn("mastic supervisor start", result["next_actions"])
+
+    def test_status_and_check_share_durable_setup_outcome(self) -> None:
+        with TemporaryDirectory() as directory:
+            outcomes = _SetupOutcomes(
+                {
+                    "completion": "complete",
+                    "readiness": "degraded",
+                    "application_target_readiness": {
+                        "codex": "ready",
+                        "hindsight": "degraded",
+                    },
+                }
+            )
+            backend, _state = self._backend(
+                Path(directory), config=_EMPTY_CONFIG, setup_outcomes=outcomes
+            )
+
+            status = backend.prepare(OperationRequest("status")).execute()
+            check = backend.prepare(OperationRequest("check")).execute()
+
+            for result in (status, check):
+                self.assertEqual(result["completion"], "complete")
+                self.assertEqual(result["readiness"], "degraded")
+                self.assertEqual(
+                    result["application_target_readiness"],
+                    {"codex": "ready", "hindsight": "degraded"},
+                )
+            self.assertEqual(outcomes.calls, 2)
 
     def test_status_reports_failed_for_unhealthy_top_level_components(self) -> None:
         for component, component_state in (

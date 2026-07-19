@@ -54,6 +54,10 @@ class MetricsSource(Protocol):
     ) -> Sequence[Mapping[str, object]]: ...
 
 
+class SetupOutcomeProvider(Protocol):
+    def outcome(self) -> Mapping[str, object]: ...
+
+
 _SUPERVISOR_MUTATIONS = frozenset(
     {
         "supervisor.start",
@@ -123,6 +127,7 @@ class LocalOperationBackend:
         config_path: str | Path,
         gateway_credential_path: str | Path | None = None,
         model_intelligence=None,
+        setup_outcomes: SetupOutcomeProvider | None = None,
     ) -> None:
         self._catalogue = catalogue
         self._config_store = config_store
@@ -142,6 +147,7 @@ class LocalOperationBackend:
             else None
         )
         self._model_intelligence = model_intelligence
+        self._setup_outcomes = setup_outcomes
 
     def prepare(self, request: OperationRequest) -> PreparedOperation:
         operation = self._catalogue.get(request.name)
@@ -389,6 +395,20 @@ class LocalOperationBackend:
         raise ApplicationError("operation_unavailable", f"{name} has no local backend")
 
     def _overview(self, name: str, config: MasticConfig) -> Mapping[str, object]:
+        setup_outcome = (
+            self._setup_outcomes.outcome()
+            if self._setup_outcomes is not None
+            else {
+                "completion": "partial",
+                "readiness": "pending",
+                "application_target_readiness": {},
+            }
+        )
+        setup_evidence = setup_outcome.get("evidence", ())
+        if not isinstance(setup_evidence, Sequence) or isinstance(
+            setup_evidence, str | bytes
+        ):
+            setup_evidence = ()
         supervisor = self._latest("supervisor", "supervisor") or {"state": "stopped"}
         gateway = self._latest("gateway", "gateway") or {
             "state": "stopped",
@@ -529,7 +549,20 @@ class LocalOperationBackend:
             active_operations=active_operations,
             pressure=pressure,
             failed_services=failed,
-            evidence=["desired-state", "operational-state"],
+            completion=setup_outcome.get("completion", "partial"),
+            readiness=setup_outcome.get("readiness", "unverified"),
+            application_target_readiness=setup_outcome.get(
+                "application_target_readiness", {}
+            ),
+            evidence=[
+                "desired-state",
+                "operational-state",
+                *(
+                    str(item)
+                    for item in setup_evidence
+                    if item in {"setup-plan", "setup-evidence"}
+                ),
+            ],
             next_actions=next_actions,
             **details,
         )

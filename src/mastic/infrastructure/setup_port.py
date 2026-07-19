@@ -87,12 +87,30 @@ class EvidenceStore(Protocol):
     def record(self, scope: str, evidence: SetupEvidence) -> object: ...
 
 
+class SetupPlanStore(Protocol):
+    """Persist and load the exact content-free Plan used by setup."""
+
+    def record(self, plan: Mapping[str, object]) -> object: ...
+
+    def load(self) -> Mapping[str, object] | None: ...
+
+
 class OperationalState(Protocol):
     """Subset of OperationalStateStore used by setup evidence."""
 
     def put_snapshot(self, snapshot: Mapping[str, object]) -> Mapping[str, object]: ...
 
     def snapshots(self, kind: str) -> Sequence[Mapping[str, object]]: ...
+
+    def snapshot_history(self, kind: str) -> Sequence[Mapping[str, object]]: ...
+
+
+class OperationalPlanState(Protocol):
+    def put_snapshot(self, snapshot: Mapping[str, object]) -> Mapping[str, object]: ...
+
+    def snapshot(
+        self, kind: str, resource_id: str, *, version: str | int | None = None
+    ) -> Mapping[str, object] | None: ...
 
     def snapshot_history(self, kind: str) -> Sequence[Mapping[str, object]]: ...
 
@@ -138,6 +156,62 @@ class OperationalSetupEvidenceStore:
         )
 
 
+class OperationalSetupPlanStore:
+    """Persist the active setup Plan envelope without selection or user content."""
+
+    def __init__(self, state: OperationalPlanState) -> None:
+        self._state = state
+
+    def record(self, plan: Mapping[str, object]) -> Mapping[str, object]:
+        normalized = _validated_plan(plan)
+        activation = len(self._state.snapshot_history("setup_plan")) + 1
+        return self._state.put_snapshot(
+            {
+                "kind": "setup_plan",
+                "id": "active",
+                "version": f"{activation}:{normalized['plan_identity']}",
+                **normalized,
+            }
+        )
+
+    def load(self) -> Mapping[str, object] | None:
+        return self._state.snapshot("setup_plan", "active")
+
+
+class DurableSetupOutcomeProvider:
+    """Reconstruct setup completion and readiness from immutable evidence."""
+
+    def __init__(
+        self,
+        plans: SetupPlanStore,
+        evidence: EvidenceStore,
+        performance_profile: Mapping[str, object] | None = None,
+    ) -> None:
+        self._plans = plans
+        self._evidence = evidence
+        self._performance_profile = (
+            PHASE1_HOST_PERFORMANCE_PROFILE
+            if performance_profile is None
+            else performance_profile
+        )
+
+    def outcome(self) -> Mapping[str, object]:
+        try:
+            plan = self._plans.load()
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return _conservative_setup_outcome(malformed=True)
+        if plan is None:
+            return _conservative_setup_outcome(malformed=False)
+        try:
+            normalized = _validated_plan(plan)
+            evidence = tuple(self._evidence.load("setup"))
+            return _durable_setup_outcome(
+                normalized, evidence, self._performance_profile
+            )
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return _conservative_setup_outcome(malformed=True)
+
+
 PreflightProvider = Callable[[bool], SetupPreflight]
 RemovalInventoryProvider = Callable[[], RemovalInventory]
 
@@ -161,6 +235,7 @@ class SetupOperationPort:
         removal_inventory: RemovalInventoryProvider,
         performance_profile: Mapping[str, object] | None = None,
         transition: Callable[[], AbstractContextManager[None]] | None = None,
+        plan_store: SetupPlanStore | None = None,
     ) -> None:
         self._resolver = resolver
         self._preflight = preflight
@@ -174,6 +249,7 @@ class SetupOperationPort:
         self._evidence = evidence
         self._removal_inventory = removal_inventory
         self._transition = transition or nullcontext
+        self._plan_store = plan_store
         selected_profile = (
             PHASE1_HOST_PERFORMANCE_PROFILE
             if performance_profile is None
@@ -228,6 +304,18 @@ class SetupOperationPort:
                 code,
                 f"setup is blocked at {blocked.id}: {blocked.reason}",
                 next_actions=("connect this Mac and retry", "mastic setup --help"),
+            )
+
+        if self._plan_store is not None:
+            self._plan_store.record(
+                {
+                    "plan_identity": str(preview["preview_fingerprint"]),
+                    "steps": tuple(
+                        {"id": step.id, "fingerprint": step.fingerprint}
+                        for step in resolved.steps
+                    ),
+                    "application_targets": resolved.selection.application_targets,
+                }
             )
 
         prior = tuple(self._evidence.load("setup"))
@@ -1037,6 +1125,203 @@ def _setup_outcome(
             else Readiness.PENDING
         )
     return completion.value, readiness.value, target_readiness
+
+
+def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
+    unknown = set(plan) - {
+        "application_targets",
+        "id",
+        "kind",
+        "plan_identity",
+        "steps",
+        "version",
+    }
+    if unknown:
+        raise ValueError("setup Plan contains unsupported fields")
+    identity = plan.get("plan_identity")
+    if (
+        not isinstance(identity, str)
+        or len(identity) != 64
+        or any(character not in "0123456789abcdef" for character in identity)
+    ):
+        raise ValueError("setup Plan identity must be an exact sha256 digest")
+    raw_steps = plan.get("steps")
+    if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, str | bytes):
+        raise ValueError("setup Plan steps must be a sequence")
+    steps: list[dict[str, str]] = []
+    identities: set[str] = set()
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            raise ValueError("setup Plan steps must be objects")
+        if set(raw_step) != {"id", "fingerprint"}:
+            raise ValueError("setup Plan steps require exact id and fingerprint fields")
+        step_id = raw_step.get("id")
+        fingerprint = raw_step.get("fingerprint")
+        if not isinstance(step_id, str) or not step_id:
+            raise ValueError("setup Plan step id must be nonempty")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise ValueError("setup Plan step fingerprint must be nonempty")
+        if step_id in identities:
+            raise ValueError("setup Plan step ids must be unique")
+        identities.add(step_id)
+        steps.append({"id": step_id, "fingerprint": fingerprint})
+    if not steps:
+        raise ValueError("setup Plan requires steps")
+    raw_targets = plan.get("application_targets")
+    if not isinstance(raw_targets, Sequence) or isinstance(raw_targets, str | bytes):
+        raise ValueError("setup Plan application targets must be a sequence")
+    targets = tuple(raw_targets)
+    if any(
+        not isinstance(target, str) or target not in {"codex", "hindsight"}
+        for target in targets
+    ) or len(set(targets)) != len(targets):
+        raise ValueError("setup Plan application targets are invalid")
+    if any(f"application.canary.{target}" not in identities for target in targets):
+        raise ValueError("setup Plan is missing an application canary")
+    return {
+        "plan_identity": identity,
+        "steps": tuple(steps),
+        "application_targets": targets,
+    }
+
+
+def _conservative_setup_outcome(*, malformed: bool) -> Mapping[str, object]:
+    return {
+        "completion": Completion.PARTIAL.value,
+        "readiness": (
+            Readiness.UNVERIFIED.value if malformed else Readiness.PENDING.value
+        ),
+        "application_target_readiness": {},
+    }
+
+
+def _durable_setup_outcome(
+    plan: Mapping[str, object],
+    evidence: Sequence[SetupEvidence],
+    performance_profile: Mapping[str, object],
+) -> Mapping[str, object]:
+    raw_steps = plan["steps"]
+    assert isinstance(raw_steps, Sequence)
+    steps = tuple(
+        (str(step["id"]), str(step["fingerprint"]))
+        for step in raw_steps
+        if isinstance(step, Mapping)
+    )
+    current = {
+        (item.step_id, item.fingerprint): item
+        for item in evidence
+        if item.state in {StepState.COMPLETE, StepState.SKIPPED}
+    }
+    completion = (
+        Completion.COMPLETE
+        if all(step in current for step in steps)
+        else Completion.PARTIAL
+    )
+    raw_targets = plan["application_targets"]
+    assert isinstance(raw_targets, Sequence)
+    target_readiness: dict[str, str] = {}
+    for raw_target in raw_targets:
+        target = str(raw_target)
+        canary = next(
+            step for step in steps if step[0] == f"application.canary.{target}"
+        )
+        outcome = current.get(canary)
+        if outcome is None:
+            target_readiness[target] = Readiness.PENDING.value
+        elif outcome.state is StepState.SKIPPED:
+            target_readiness[target] = Readiness.UNVERIFIED.value
+        else:
+            target_readiness[target] = _durable_canary_readiness(
+                target, outcome, performance_profile
+            )
+    if target_readiness:
+        values = set(target_readiness.values())
+        readiness = next(
+            candidate
+            for candidate in (
+                Readiness.PENDING,
+                Readiness.UNVERIFIED,
+                Readiness.DEGRADED,
+                Readiness.READY,
+            )
+            if candidate.value in values
+        )
+    else:
+        verification = next(
+            (
+                current[step]
+                for step in steps
+                if step[0] == "verify.request" and step in current
+            ),
+            None,
+        )
+        if verification is None:
+            readiness = Readiness.PENDING
+        elif _durable_verification_ready(verification):
+            readiness = Readiness.READY
+        else:
+            readiness = Readiness.UNVERIFIED
+    return {
+        "completion": completion.value,
+        "readiness": readiness.value,
+        "application_target_readiness": target_readiness,
+        "evidence": ("setup-plan", "setup-evidence"),
+    }
+
+
+def _durable_canary_readiness(
+    target: str,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> str:
+    try:
+        payload = json.loads(evidence.detail)
+        result = payload["result"]
+        performance = result["performance"]
+        value = _duration_seconds({"duration_seconds": performance["value"]})
+    except (KeyError, TypeError, json.JSONDecodeError, RuntimeError):
+        return Readiness.UNVERIFIED.value
+    if (
+        not isinstance(result, Mapping)
+        or result.get("ok") is not True
+        or result.get("exact_contract") is not True
+        or not isinstance(performance, Mapping)
+        or performance_profile.get("status") != "validated"
+        or performance.get("profile_id") != performance_profile.get("id")
+        or performance.get("profile_version") != performance_profile.get("version")
+        or performance.get("metric") != f"{target}.native_canary.duration_seconds"
+        or performance.get("value") != value
+        or not _exact_sha256(result.get("evidence_sha256"))
+    ):
+        return Readiness.UNVERIFIED.value
+    band = performance.get("band")
+    if band == "expected":
+        return Readiness.READY.value
+    if band == Readiness.DEGRADED.value:
+        return Readiness.DEGRADED.value
+    return Readiness.UNVERIFIED.value
+
+
+def _durable_verification_ready(evidence: SetupEvidence) -> bool:
+    try:
+        payload = json.loads(evidence.detail)
+        result = payload["result"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return False
+    digest = result.get("response_sha256") if isinstance(result, Mapping) else None
+    return bool(
+        isinstance(result, Mapping)
+        and result.get("ok") is True
+        and _exact_sha256(digest)
+    )
+
+
+def _exact_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _duration_seconds(response: Mapping[str, object]) -> float:
