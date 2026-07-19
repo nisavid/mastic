@@ -19,6 +19,35 @@ _REQUIRED_SAMPLING_PROFILES = MappingProxyType(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationCanaryContract:
+    """The exact profile and phases owned by one native canary."""
+
+    profile: str
+    phases: tuple[str, ...]
+
+
+APPLICATION_CANARY_CONTRACTS: Mapping[str, ApplicationCanaryContract] = (
+    MappingProxyType(
+        {
+            "codex": ApplicationCanaryContract(
+                profile="coding",
+                phases=("codex.exec", "responses.exact"),
+            ),
+            "hindsight": ApplicationCanaryContract(
+                profile="retain",
+                phases=(
+                    "hindsight.start",
+                    "bank.create",
+                    "memory.retain",
+                    "memory.reflect",
+                ),
+            ),
+        }
+    )
+)
+
+
 class ApplicationTargetDriftIntent(StrEnum):
     """One explicit response to externally changed managed state."""
 

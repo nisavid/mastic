@@ -19,6 +19,7 @@ from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from mastic.application.application_targets import (
+    APPLICATION_CANARY_CONTRACTS,
     SamplingProfile,
     validate_application_target_sampling_profiles,
 )
@@ -989,7 +990,7 @@ class SetupResolver:
                     "Validate Codex through its managed application configuration",
                     {
                         "target": "codex",
-                        "profile": "coding",
+                        "profile": APPLICATION_CANARY_CONTRACTS["codex"].profile,
                         "service": selection.service_name,
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
@@ -1013,7 +1014,7 @@ class SetupResolver:
                     {
                         "target": "hindsight",
                         "configuration_profile": hindsight_options["profile"],
-                        "profile": "retain",
+                        "profile": APPLICATION_CANARY_CONTRACTS["hindsight"].profile,
                         "service": selection.service_name,
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,

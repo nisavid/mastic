@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
 from mastic.application.config_schema import ApplicationTargetSettings
 from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_integrations import (
@@ -38,31 +39,6 @@ class ApplicationCanaryResult:
     exact_contract: bool
     duration_seconds: float
     evidence_sha256: str
-
-
-@dataclass(frozen=True, slots=True)
-class ApplicationCanaryContract:
-    """The exact profile and phases owned by one native canary."""
-
-    profile: str
-    phases: tuple[str, ...]
-
-
-APPLICATION_CANARY_CONTRACTS: Mapping[str, ApplicationCanaryContract] = {
-    "codex": ApplicationCanaryContract(
-        profile="coding",
-        phases=("codex.exec", "responses.exact"),
-    ),
-    "hindsight": ApplicationCanaryContract(
-        profile="retain",
-        phases=(
-            "hindsight.start",
-            "bank.create",
-            "memory.retain",
-            "memory.reflect",
-        ),
-    ),
-}
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -123,7 +99,7 @@ class NativeApplicationTargetCanary:
         evidence = application_canary_evidence_sha256(
             target=target,
             profile=profile,
-            service=configuration.service_name,
+            service=configuration.service_identity or configuration.service_name,
             phases=phases,
             exact_contract=True,
         )

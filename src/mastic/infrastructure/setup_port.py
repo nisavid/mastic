@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
 from mastic.application.dispatch import ApplicationError
 from mastic.application.serialization import to_plain_data as _plain
 from mastic.application.setup import (
@@ -38,7 +39,6 @@ from mastic.application.setup import (
     StepState,
 )
 from mastic.infrastructure.application_target_canaries import (
-    APPLICATION_CANARY_CONTRACTS,
     application_canary_evidence_sha256,
 )
 
@@ -1053,7 +1053,10 @@ def _validate_runtime_result(
     mismatched = [
         key for key, expected in required.items() if result.get(key) != expected
     ]
-    if mismatched or not result.get("installation_id") or not result.get("bundle_id"):
+    identities = (result.get("installation_id"), result.get("bundle_id"))
+    if mismatched or any(
+        not isinstance(identity, str) or not identity for identity in identities
+    ):
         fields = ", ".join(mismatched) or "installation_id or bundle_id"
         raise RuntimeError(f"Runtime Installation evidence did not match: {fields}")
 
@@ -1061,8 +1064,11 @@ def _validate_runtime_result(
 def _validate_model_result(
     selection: ExactSetupSelection, result: Mapping[str, object]
 ) -> None:
-    if result.get("revision") != selection.model_revision or not result.get(
-        "installation_id"
+    installation_id = result.get("installation_id")
+    if (
+        result.get("revision") != selection.model_revision
+        or not isinstance(installation_id, str)
+        or not installation_id
     ):
         raise RuntimeError("Model Installation did not match the exact Model Revision")
 
@@ -1103,13 +1109,37 @@ def _restore_material(
     for item in evidence:
         if item.state is not StepState.COMPLETE or not item.detail:
             continue
-        try:
-            payload = json.loads(item.detail)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, Mapping) and isinstance(payload.get("result"), Mapping):
-            restored[(item.step_id, item.fingerprint)] = dict(payload["result"])
+        result = _evidence_result(item)
+        if result is not None:
+            restored[(item.step_id, item.fingerprint)] = dict(result)
     return restored
+
+
+def _evidence_result(evidence: SetupEvidence) -> Mapping[str, object] | None:
+    try:
+        payload = json.loads(evidence.detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    result = payload.get("result")
+    return result if isinstance(result, Mapping) else None
+
+
+def _resumable_material_valid(resolved: ResolvedSetup, evidence: SetupEvidence) -> bool:
+    if evidence.step_id not in {"runtime.install", "model.install"}:
+        return True
+    result = _evidence_result(evidence)
+    if result is None:
+        return False
+    try:
+        if evidence.step_id == "runtime.install":
+            _validate_runtime_result(resolved.selection, result)
+        else:
+            _validate_model_result(resolved.selection, result)
+    except RuntimeError:
+        return False
+    return True
 
 
 def _content_free_result(
@@ -1381,7 +1411,7 @@ def _durable_setup_outcome(
         if item.state in {StepState.COMPLETE, StepState.SKIPPED}
     }
     raw_binding = plan.get("performance_binding")
-    binding_matches = _performance_binding_matches(raw_binding, performance_profile)
+    binding_valid = _performance_binding_valid(raw_binding)
     bound_service = (
         raw_binding.get("service") if isinstance(raw_binding, Mapping) else None
     )
@@ -1395,7 +1425,7 @@ def _durable_setup_outcome(
                 outcome,
                 performance_profile,
                 expected_service,
-                binding_matches,
+                binding_valid,
             )
             for step in steps
         )
@@ -1509,17 +1539,15 @@ def _durable_terminal_setup_evidence_valid(
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
     expected_service: str | None,
-    performance_binding_matches: bool,
+    performance_binding_valid: bool,
 ) -> bool:
-    if evidence.state is StepState.SKIPPED:
-        return True
-    if evidence.state is not StepState.COMPLETE:
+    if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
         return False
-    if step_id == "verify.request":
-        return _verification_ready(evidence)
     if step_id.startswith("application.canary."):
-        if not performance_binding_matches:
+        if not performance_binding_valid:
             return False
+        if evidence.state is StepState.SKIPPED:
+            return True
         target = step_id.removeprefix("application.canary.")
         return (
             _durable_canary_band(
@@ -1530,6 +1558,10 @@ def _durable_terminal_setup_evidence_valid(
             )
             is not None
         )
+    if evidence.state is StepState.SKIPPED:
+        return True
+    if step_id == "verify.request":
+        return _verification_ready(evidence)
     return True
 
 
@@ -1656,6 +1688,26 @@ def _performance_binding(resolved: ResolvedSetup) -> Mapping[str, object]:
 def _performance_binding_matches(
     value: object, performance_profile: Mapping[str, object]
 ) -> bool:
+    if not _performance_binding_valid(value):
+        return False
+    assert isinstance(value, Mapping)
+    host = performance_profile.get("host")
+    plan = performance_profile.get("plan")
+    if not isinstance(host, Mapping) or not isinstance(plan, Mapping):
+        return False
+    memory_bytes = value["memory_bytes"]
+    assert type(memory_bytes) is int
+    return bool(
+        value["selection_sha256"] == plan.get("selection_sha256")
+        and value["application_versions"] == plan.get("application_versions")
+        and value["platform"] == host.get("platform")
+        and value["machine"] == host.get("machine")
+        and memory_bytes >= host.get("minimum_memory_bytes", math.inf)
+        and value["macos_major"] in host.get("macos_major_versions", ())
+    )
+
+
+def _performance_binding_valid(value: object) -> bool:
     if not isinstance(value, Mapping) or set(value) != {
         "selection_sha256",
         "application_versions",
@@ -1666,21 +1718,23 @@ def _performance_binding_matches(
         "service",
     }:
         return False
-    host = performance_profile.get("host")
-    plan = performance_profile.get("plan")
-    if not isinstance(host, Mapping) or not isinstance(plan, Mapping):
-        return False
+    selection_sha256 = value.get("selection_sha256")
     memory_bytes = value.get("memory_bytes")
+    macos_major = value.get("macos_major")
     service = value.get("service")
     return bool(
-        value.get("selection_sha256") == plan.get("selection_sha256")
+        isinstance(selection_sha256, str)
+        and len(selection_sha256) == 64
+        and all(character in "0123456789abcdef" for character in selection_sha256)
         and value.get("application_versions") == dict(PHASE1_APPLICATION_VERSIONS)
-        and value.get("application_versions") == plan.get("application_versions")
-        and value.get("platform") == host.get("platform")
-        and value.get("machine") == host.get("machine")
+        and isinstance(value.get("platform"), str)
+        and bool(value.get("platform"))
+        and isinstance(value.get("machine"), str)
+        and bool(value.get("machine"))
         and type(memory_bytes) is int
-        and memory_bytes >= host.get("minimum_memory_bytes", math.inf)
-        and value.get("macos_major") in host.get("macos_major_versions", ())
+        and memory_bytes > 0
+        and type(macos_major) is int
+        and macos_major > 0
         and isinstance(service, str)
         and bool(service)
     )
@@ -1893,7 +1947,10 @@ def _reusable_setup_evidence(
         item
         for item in evidence
         if item.state is not StepState.COMPLETE
-        or _terminal_setup_evidence_valid(resolved, item, performance_profile)
+        or (
+            _terminal_setup_evidence_valid(resolved, item, performance_profile)
+            and _resumable_material_valid(resolved, item)
+        )
     )
 
 
