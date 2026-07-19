@@ -38,18 +38,12 @@ from mastic.application.setup import (
     StepState,
 )
 from mastic.infrastructure.application_target_canaries import (
+    APPLICATION_CANARY_CONTRACTS,
     application_canary_evidence_sha256,
 )
 
 
 _GIB = 1024**3
-_APPLICATION_CANARY_CONTRACTS = {
-    "codex": ("coding", ("codex.exec", "responses.exact")),
-    "hindsight": (
-        "retain",
-        ("hindsight.start", "bank.create", "memory.retain", "memory.reflect"),
-    ),
-}
 PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
     "id": PHASE1_PERFORMANCE_PROFILE_ID,
     "version": PHASE1_PERFORMANCE_PROFILE_VERSION,
@@ -63,7 +57,7 @@ PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
     "plan": {
         # Empirical validation must publish the exact production Plan digest
         # before this provisional profile may make readiness claims.
-        "selection_sha256": "8bedb6280a52b8433da54a485e43b537714980511ae312cd81b8a82769402b56",
+        "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
         "application_versions": dict(PHASE1_APPLICATION_VERSIONS),
     },
     "metrics": {
@@ -1387,6 +1381,7 @@ def _durable_setup_outcome(
         if item.state in {StepState.COMPLETE, StepState.SKIPPED}
     }
     raw_binding = plan.get("performance_binding")
+    binding_matches = _performance_binding_matches(raw_binding, performance_profile)
     bound_service = (
         raw_binding.get("service") if isinstance(raw_binding, Mapping) else None
     )
@@ -1396,7 +1391,11 @@ def _durable_setup_outcome(
         if all(
             (outcome := current.get(step)) is not None
             and _durable_terminal_setup_evidence_valid(
-                step[0], outcome, performance_profile, expected_service
+                step[0],
+                outcome,
+                performance_profile,
+                expected_service,
+                binding_matches,
             )
             for step in steps
         )
@@ -1510,6 +1509,7 @@ def _durable_terminal_setup_evidence_valid(
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
     expected_service: str | None,
+    performance_binding_matches: bool,
 ) -> bool:
     if evidence.state is StepState.SKIPPED:
         return True
@@ -1518,6 +1518,8 @@ def _durable_terminal_setup_evidence_valid(
     if step_id == "verify.request":
         return _verification_ready(evidence)
     if step_id.startswith("application.canary."):
+        if not performance_binding_matches:
+            return False
         target = step_id.removeprefix("application.canary.")
         return (
             _durable_canary_band(
@@ -1553,10 +1555,11 @@ def _application_canary_contract_ready(
     *,
     expected_service: str | None = None,
 ) -> bool:
-    contract = _APPLICATION_CANARY_CONTRACTS.get(target)
+    contract = APPLICATION_CANARY_CONTRACTS.get(target)
     if contract is None:
         return False
-    profile, phases = contract
+    profile = contract.profile
+    phases = contract.phases
     raw_phases = result.get("phases")
     service = result.get("service")
     if not isinstance(service, str) or not service:

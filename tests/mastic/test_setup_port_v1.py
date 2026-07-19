@@ -758,10 +758,12 @@ class SetupOperationPortTests(unittest.TestCase):
             plans, evidence, profile, application_targets=inspections
         ).outcome()
 
+        self.assertEqual(without_binding["completion"], "partial")
         self.assertEqual(without_binding["readiness"], "unverified")
         self.assertEqual(matching["readiness"], "ready")
         self.assertEqual(wrong_service["completion"], "partial")
         self.assertEqual(wrong_service["readiness"], "unverified")
+        self.assertEqual(wrong_plan["completion"], "partial")
         self.assertEqual(wrong_plan["readiness"], "unverified")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
@@ -843,7 +845,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "macos_major_versions": [15, 26],
                 },
                 "plan": {
-                    "selection_sha256": "8bedb6280a52b8433da54a485e43b537714980511ae312cd81b8a82769402b56",
+                    "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
                     "application_versions": {
                         "codex": "0.144.1",
                         "hindsight": "0.8.4",
