@@ -1,8 +1,10 @@
-# MLX server HTTP API surface
+# Historical MLX server HTTP API snapshot
 
-Research for the `systools` server-adapter and metrics design. Sources: the
-installed package sources for `mlx-lm` v0.31.3 and `mlx-optiq` v0.3.1
-(`~/.local/share/uv/tools/{mlx-lm,mlx-optiq}/`), plus `optiq serve --help`.
+This note preserves research originally performed for the historical `systools`
+server adapter. It describes `mlx-lm` v0.31.3 with `mlx-optiq` v0.3.1 and does
+not define MASTIC's current pinned runtime. See
+[`optiq-0.3.3-sampling-compatibility.md`](optiq-0.3.3-sampling-compatibility.md)
+for the shipped OptiQ 0.3.3 contract.
 
 ## `mlx_lm.server` (v0.31.3)
 

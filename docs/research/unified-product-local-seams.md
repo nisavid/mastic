@@ -1,19 +1,23 @@
-# Unified product: current local seams
+# Historical unification research: local seams
 
 ## Scope and source baseline
 
-This note audits the checked-in contracts and implementations that already
-exist locally. It does not choose a product name, repository, or final process
+This note preserves the pre-unification audit of the two source repositories.
+It does not describe the current MASTIC source tree or choose a final process
 architecture.
 
-- `systools` source: `662567b47987b615eefb0c7f12dbeb82aad8deff`
+- [`systools` source](https://github.com/nisavid/systools/tree/662567b47987b615eefb0c7f12dbeb82aad8deff): `662567b47987b615eefb0c7f12dbeb82aad8deff`
   (`origin/main`, `feat(mastic/clients): apply Qwen generation profiles`).
-- `agents` source: `d7a4b62bc835012873aca95f2463b1e4e8c02c00`
+- [`agents` source](https://github.com/nisavid/agents/tree/d7a4b62bc835012873aca95f2463b1e4e8c02c00): `d7a4b62bc835012873aca95f2463b1e4e8c02c00`
   (`origin/main`, `fix(responses-adapter): reject ambiguous history calls`).
 - `responses-adapter` is owned by `tooling/responses-adapter/` in `agents`; its
   implementation, README, and tests are all inside that directory.
 
-All file references below are repository-relative and refer to those commits.
+All `tools/mastic/...` and `tooling/responses-adapter/...` references below are
+historical coordinates within those linked commits, not paths in this repository.
+Historical identifiers such as `ClientSettings` and `client` are quoted only
+when they name the audited source; current MASTIC vocabulary is defined in
+`CONTEXT.md`.
 
 ## Executive finding
 
@@ -21,7 +25,8 @@ The implementations are neither two complete competing products nor cleanly
 disjoint. `mastic` already contains the broad product shell and local-inference
 control plane: one CLI/TUI operation catalogue, guided desired-state planning,
 runtime and model supply, a per-user Supervisor, local service routing,
-admission and pressure policy, reversible client configuration, and macOS
+admission and pressure policy, reversible Application Configuration Target
+state, and macOS
 activation. `responses-adapter` is a narrower data-plane component: a single-
 upstream authenticated Responses gateway with a distinct upstream credential,
 provider transport support, exact namespace-tool adaptation, bounded
@@ -70,11 +75,11 @@ is environment variables plus direct Python execution
 | Surface | `mastic` today | `responses-adapter` today | Relationship |
 | --- | --- | --- | --- |
 | User-facing CLI/TUI | Full CLI and Textual TUI from one operation catalogue | None | Complementary |
-| Desired-state configurator | Strict TOML for Gateway, runtimes, models, aliases, services, and clients; guided plans and confirmations | Process-local environment configuration for one run | Overlapping configuration concern, different maturity and scope |
+| Desired-state configurator | Strict TOML for Gateway, runtimes, models, aliases, services, and Application Configuration Targets; guided plans and confirmations | Process-local environment configuration for one run | Overlapping configuration concern, different maturity and scope |
 | Controller/Supervisor | `masticd` reconciles desired services, runs, Gateway state, pressure, durable operations, and observations | No controller; only one server process and bounded in-memory transform state | Complementary |
 | Inference-engine adapters | Built-in runtime definitions, exact installs, capability probes, runtime-specific argv, and local child-process lifecycle | None; upstream is assumed already available | Complementary |
 | Gateway/router | Multi-service local route table, readiness, admission, request profiles, `/v1/models`, Chat Completions, and Responses | Single configured upstream, `/v1/models` and Responses only, provider transport, namespace transform | HTTP plumbing duplicated; routing and transforms complementary |
-| Client adapters | Reversible Codex and Hindsight config plus owned model metadata and profile endpoints | Codex wire-shape namespace adapter, not client configuration | Complementary uses of “client adapter” |
+| Application Configuration Target adapters | Reversible Codex and Hindsight config plus owned model metadata and profile endpoints | Codex wire-shape namespace adapter, not application configuration | Complementary adapter categories |
 | Provider adapters | Only inference-runtime launch adapters and generic loopback OpenAI-compatible forwarding | Identity or `codex-namespace` provider-compatibility mode, remote HTTP(S), distinct upstream bearer | Missing/general on `mastic`; narrow/specific on proxy |
 | Credentials | One persistent owner-only local Gateway credential; no upstream provider credential is forwarded | Per-run inbound bearer separated from optional upstream bearer | Same trust-boundary concern, distinct contracts |
 | Protocol/capability transforms | Workload sampling and chat-template projection; route/model selection | Namespace-tool flatten/reconstruction and continuation mapping | Complementary |
@@ -85,21 +90,21 @@ is environment variables plus direct Python execution
 ### 1. User-facing shell and desired-state configurator
 
 The `mastic` operation catalogue is the explicit CLI/TUI parity contract. It
-contains setup, diagnostics, Supervisor, Gateway, runtime, model, service,
-client, operation, and configuration surfaces, and classifies whether each
+contains setup, diagnostics, Supervisor, Gateway, runtime, model, service, the
+historical `client` target operation, operation, and configuration surfaces, and classifies whether each
 operation may start the Supervisor (`tools/mastic/src/mastic/application/catalogue.py:52-216`).
 The CLI and TUI call the same dispatcher; the TUI exposes every catalogue
 operation in its command palette (`tools/mastic/src/mastic/interfaces/tui.py:48-78`).
 
 Desired state is already wider than “MLX launch flags.” The immutable schema
 has Gateway settings, exact Runtime Installations, Model Installations and
-aliases, Inference Services, and Client Settings with sampling profiles
+aliases, Inference Services, and the historical `ClientSettings` target model with sampling profiles
 (`tools/mastic/src/mastic/application/config_schema.py:29-87`). The setup planner
 selects a machine-fitting recommendation or explicit exact selection, applies a
 capacity profile, creates fingerprinted ordered steps, and returns a complete
 editable preview before execution (`tools/mastic/src/mastic/application/setup.py:372-528`).
 The production setup currently hard-codes one OptiQ/Qwen recommendation and
-Codex/Hindsight client set, showing that the configurator is architecturally
+Codex/Hindsight Application Configuration Target set, showing that the configurator is architecturally
 general inside the current domain but its first-party recommendations are not
 yet multi-host or arbitrary-adapter configuration
 (`tools/mastic/src/mastic/infrastructure/production.py:681-780`).
@@ -162,7 +167,7 @@ The `mastic` Gateway owns a dynamic route table keyed by stable service name,
 but only permits private upstream endpoints that are literal HTTP loopback
 origins (`tools/mastic/src/mastic/infrastructure/gateway.py:276-311,344-377,499-518`).
 It exposes `/v1/models`, `/v1/chat/completions`, `/v1/responses`, and the same
-routes under client workload-profile prefixes
+routes under consuming-application workload-profile prefixes
 (`tools/mastic/src/mastic/infrastructure/gateway.py:410-432`). It also owns
 per-service admission, pressure shedding, activity accounting, and stream
 closure at Responses or `[DONE]` terminal events
@@ -186,9 +191,9 @@ standalone process (`tools/mastic/src/mastic/infrastructure/gateway.py:178-205`;
 `tools/mastic/src/mastic/infrastructure/gateway_runtime.py:75-103`;
 `tooling/responses-adapter/responses-adapter.py:1021-1092`).
 
-### 5. Client, provider, and protocol/capability adapters
+### 5. Application-target, provider, and protocol/capability adapters
 
-The existing `mastic` “Client Integration” adapter configures a consuming
+The audited `mastic` “Client Integration” adapter configures a consuming
 application. For Codex it sets the service model, local provider, workload-
 profile base URL, Responses wire API, credential-reader command, and owned
 model metadata; for Hindsight it writes per-operation Gateway base URLs and a
@@ -216,7 +221,7 @@ These are complementary adapter categories that should remain named
 separately during design:
 
 - **engine adapter**: install/probe/launch one inference runtime family;
-- **client configuration adapter**: safely configure Codex, Hindsight, or
+- **application configuration adapter**: safely configure Codex, Hindsight, or
   another consuming application;
 - **client-protocol adapter**: normalize a client’s API request/response shape;
 - **provider adapter**: authenticate and project the normalized request onto a
@@ -231,7 +236,7 @@ the local source does not require that combination as a permanent abstraction.
 file, validates owner and modes on every read, and uses constant-time bearer
 comparison (`tools/mastic/src/mastic/infrastructure/gateway_credential.py:15-72,86-133`).
 Production composition injects that credential into the Gateway and points
-managed clients to it (`tools/mastic/src/mastic/infrastructure/production.py:400-455,625-631`).
+managed Application Configuration Targets to it (`tools/mastic/src/mastic/infrastructure/production.py:400-455,625-631`).
 The local engine upstream receives no separate bearer: the Gateway request
 header allowlist excludes authorization
 (`tools/mastic/src/mastic/infrastructure/gateway.py:21-27,366-377`).
@@ -247,7 +252,7 @@ providers; it is not represented in current `mastic` desired state.
 
 The deployment boundary is already explicit. A deployment owner may install
 the package and inactive LaunchAgent, but `mastic` owns desired state, runtimes,
-models, services, client configuration, operational state, and lifecycle
+models, services, Application Configuration Target state, operational state, and lifecycle
 (`tools/mastic/docs/deployment-contract.md:1-18,55-75`). The LaunchAgent is
 registered with `RunAtLoad=false` and `KeepAlive=false`; a mutation that needs
 `masticd` activates it, while reads never do
@@ -284,7 +289,7 @@ Gateway’s route/admission/pressure contracts.
 
 - `mastic`: machine-aware recommendation, exact runtime/model supply, desired
   state, operation planning, Supervisor lifecycle, private dynamic engine
-  endpoints, route readiness, concurrency/pressure, TUI/CLI, reversible client
+  endpoints, route readiness, concurrency/pressure, TUI/CLI, reversible application-target
   configuration, persistent local credential, host activation, logs, metrics,
   and diagnostics.
 - `responses-adapter`: remote/provider upstream support, strict inbound/upstream
@@ -395,7 +400,7 @@ renaming, or committed architecture documentation.
 
 The following focused contract suites passed against the source baselines:
 
-- `mastic`: Gateway, Supervisor, client integrations, application dispatch,
+- `mastic`: Gateway, Supervisor, application-target integrations, application dispatch,
   and TUI — 80 tests.
 - `responses-adapter`: the complete proxy test module, covering authentication,
   request bounds, credential separation, namespace transforms and collisions,
