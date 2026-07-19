@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "build-bootstrap.zsh"
+CLOSURE_BUILDER = ROOT / "scripts" / "build-bootstrap-closure.zsh"
 _SUBPROCESS_TIMEOUT = 30
 
 
@@ -29,6 +30,23 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
             self.assertIn("--build-constraints packaging/build-backend.lock", workflow)
             self.assertIn("--require-hashes", workflow)
+
+        quality_workflow = (
+            ROOT / ".github" / "workflows" / "python-quality.yml"
+        ).read_text()
+        self.assertIn(
+            "enable-cache: ${{ github.event_name != 'pull_request' }}",
+            quality_workflow,
+        )
+
+    def test_closure_builder_bounds_and_retries_all_direct_downloads(self) -> None:
+        builder = CLOSURE_BUILDER.read_text()
+
+        self.assertEqual(
+            builder.count("curl --fail --silent --show-error --location"), 3
+        )
+        self.assertEqual(builder.count("--connect-timeout 30 --max-time 1800"), 3)
+        self.assertEqual(builder.count("--retry 3 --retry-delay 2"), 3)
 
     def test_builder_embeds_exact_release_closure_and_produces_valid_zsh(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -538,8 +556,9 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         environment = dict(os.environ)
         environment["PATH"] = f"{tools}:{environment['PATH']}"
         environment.pop("XDG_DATA_HOME", None)
-        if home is not None:
-            environment["HOME"] = str(home)
+        scoped_home = home if home is not None else artifact.parent / "home"
+        scoped_home.mkdir(parents=True, exist_ok=True)
+        environment["HOME"] = str(scoped_home)
         return subprocess.run(
             [str(artifact), *arguments],
             env=environment,

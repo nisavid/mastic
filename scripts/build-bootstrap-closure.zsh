@@ -97,6 +97,7 @@ main() {
 
   local uv_archive="$work/uv.tar.gz"
   curl --fail --silent --show-error --location \
+    --connect-timeout 30 --max-time 1800 --retry 3 --retry-delay 2 \
     "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-apple-darwin.tar.gz" \
     --output "$uv_archive"
   verify_sha256 "$uv_archive" $UV_SHA256
@@ -144,10 +145,14 @@ main() {
   hindsight_api_sha256=$(sha256 "$hindsight_api_bundle")
 
   local codex="$stage/application-targets-v1/artifacts/codex-aarch64-apple-darwin.tar.gz"
-  curl --fail --silent --show-error --location "$CODEX_URL" --output "$codex"
+  curl --fail --silent --show-error --location \
+    --connect-timeout 30 --max-time 1800 --retry 3 --retry-delay 2 \
+    "$CODEX_URL" --output "$codex"
   verify_sha256 "$codex" $CODEX_SHA256
   local hindsight="$stage/application-targets-v1/artifacts/hindsight-darwin-arm64"
-  curl --fail --silent --show-error --location "$HINDSIGHT_URL" --output "$hindsight"
+  curl --fail --silent --show-error --location \
+    --connect-timeout 30 --max-time 1800 --retry 3 --retry-delay 2 \
+    "$HINDSIGHT_URL" --output "$hindsight"
   verify_sha256 "$hindsight" $HINDSIGHT_SHA256
   chmod 0755 "$hindsight"
 
