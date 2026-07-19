@@ -122,21 +122,28 @@ lifespan-managed HTTPX client streams requests and responses without buffering
 model output. The Gateway binds only to configured loopback addresses and
 routes the OpenAI-compatible `model` field by Inference Service name.
 
+Every managed profile route and ordinary `/v1` route requires the same private
+bearer credential. MASTIC creates the credential as a user-owned mode-0600 file
+at `~/.local/state/mastic/gateway.token`, injects it into owned Application
+Configuration Targets, and sends it as `Authorization: Bearer <token>`. Missing
+and invalid credentials both receive `401` with `WWW-Authenticate: Bearer`; the
+credential is never forwarded to an upstream runtime.
+
 Each Service Run receives a private dynamic Upstream Endpoint. The Gateway
 stays healthy when an upstream fails, reports per-service readiness through
 `/v1/models`, and returns stable actionable errors for stopped or unavailable
 services. Requests never start services implicitly.
 
-Managed clients use workload-profiled Gateway base URLs under
-`/clients/<client>/profiles/<profile>/v1`. The profile resolves from mastic's
+Application Configuration Targets use workload-profiled Gateway base URLs under
+`/application-targets/<target>/profiles/<profile>/v1`. The profile resolves from mastic's
 validated desired state and must target the request's service route. Before
 forwarding, the Gateway replaces the supported generation and chat-template
 fields with that profile's values. This makes the complete request policy
-explicit even when a client cannot express the model profile natively. Runtime
+explicit even when an application cannot express the model profile natively. Runtime
 acceptance still has to prove that the selected inference-engine path honors
 those values. The ordinary
 `/v1` endpoints remain unmodified OpenAI-compatible routes for unmanaged
-clients.
+applications.
 
 Request telemetry records admission, completion, active-request counts, and
 service correlation. Lifecycle and pressure telemetry record state transitions.
@@ -184,7 +191,7 @@ Tests exercise externally meaningful boundaries:
 3. public TOML load and save behavior;
 4. exact runtime argv against fake executables;
 5. loopback Gateway HTTP and streaming behavior;
-6. PTY-driven TUI flows and the pure screen-state model.
+6. in-process Textual flows and the pure screen-state model.
 
 Unit tests may support these seams, but private helper structure is not a
 compatibility contract.
