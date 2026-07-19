@@ -13,6 +13,7 @@ from mastic.infrastructure.runtime_supply import (
     RuntimeInstallation,
     RuntimeManager,
     RuntimeProbeResult,
+    RuntimeSupplyError,
     SubprocessRuntimeProbe,
     RuntimeLaunchBuilder,
     TestedRuntimeBundle,
@@ -447,7 +448,9 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
 
             definition = RuntimeCatalogue.load_builtin().definition("optiq")
 
-            with self.assertRaisesRegex(ValueError, "is not in the subpath"):
+            with self.assertRaisesRegex(
+                RuntimeSupplyError, "console launcher is unavailable"
+            ):
                 SubprocessRuntimeProbe(
                     run=lambda *_args, **_options: SimpleNamespace(
                         returncode=0, stdout="0.3.3\n", stderr=""

@@ -123,7 +123,10 @@ class SubprocessRuntimeProbe:
         self._max_output = max_output_bytes
 
     def probe(self, definition: RuntimeDefinition, root: Path) -> RuntimeProbeResult:
-        resolved_root = root.expanduser().resolve(strict=True)
+        try:
+            resolved_root = root.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise RuntimeSupplyError("runtime root is unavailable") from error
         python = resolved_root / "bin/python"
         if not python.is_file():
             raise RuntimeSupplyError("runtime Python launcher is unavailable")
@@ -145,10 +148,15 @@ class SubprocessRuntimeProbe:
         if definition.key in {"mlx_lm", "mlx_vlm"}:
             launcher_relative = ("bin/python", "-m", definition.launcher[0])
         else:
-            console = (resolved_root / "bin" / definition.launcher[0]).resolve(
-                strict=True
-            )
-            console.relative_to(resolved_root)
+            try:
+                console = (resolved_root / "bin" / definition.launcher[0]).resolve(
+                    strict=True
+                )
+                console.relative_to(resolved_root)
+            except (OSError, ValueError) as error:
+                raise RuntimeSupplyError(
+                    "runtime console launcher is unavailable"
+                ) from error
             if not console.is_file():
                 raise RuntimeSupplyError("runtime console launcher is unavailable")
             launcher_relative = (
@@ -407,7 +415,11 @@ class RuntimeManager:
         self._staging_token = staging_token or (lambda: uuid4().hex)
 
     def install_tested(
-        self, bundle_id: str, installation_root: Path
+        self,
+        bundle_id: str,
+        installation_root: Path,
+        *,
+        before_publish: Callable[[Path, RuntimeInstallation], None] | None = None,
     ) -> RuntimeInstallation:
         bundle = self._bundle(bundle_id)
         lock_path = Path(bundle.lock_path)
@@ -424,6 +436,7 @@ class RuntimeManager:
             installation_root=installation_root,
             provenance="tested",
             bundle_id=bundle.bundle_id,
+            before_publish=before_publish,
             install_argv=lambda stage: (
                 "uv",
                 "pip",
@@ -441,6 +454,7 @@ class RuntimeManager:
         *,
         python: str,
         installation_root: Path,
+        before_publish: Callable[[Path, RuntimeInstallation], None] | None = None,
     ) -> RuntimeInstallation:
         definition = self._catalogue.definition(runtime)
         _validate_component(version, "runtime version")
@@ -453,6 +467,7 @@ class RuntimeManager:
             installation_root=installation_root,
             provenance="custom",
             bundle_id=None,
+            before_publish=before_publish,
             install_argv=lambda stage: (
                 "uv",
                 "pip",
@@ -490,6 +505,7 @@ class RuntimeManager:
         installation_root: Path,
         provenance: str,
         bundle_id: str | None,
+        before_publish: Callable[[Path, RuntimeInstallation], None] | None,
         install_argv: Callable[[Path], tuple[str, ...]],
     ) -> RuntimeInstallation:
         _validate_component(installation_id, "installation ID")
@@ -517,6 +533,8 @@ class RuntimeManager:
                 root=final,
                 result=result,
             )
+            if before_publish is not None:
+                before_publish(stage, installation)
             stage.replace(final)
             return installation
         except Exception:

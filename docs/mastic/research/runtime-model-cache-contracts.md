@@ -198,11 +198,11 @@ that its full native context is safe on a given Mac.
 ## Local cache contract
 
 The Hugging Face cache is content-addressed and shared across tools. A cached
-repository has refs, immutable snapshots, and shared blobs. `scan_cache_dir()`
-and `hf cache ls` provide repository/revision size, timestamps, paths, files,
-refs, and corruption warnings. `hf cache ls --revisions` exposes the revision
-boundary that a model manager needs; aggregate repository rows alone are not
-enough.
+repository has refs, immutable snapshots, and shared blobs. `hf cache ls`
+summarizes repositories; `hf cache ls --revisions` selects revision-level
+aggregation with revision sizes, timestamps, and paths. `scan_cache_dir()` is
+the source for file/blob-level inventory, refs, and corruption details. A model
+manager needs the revision boundary rather than aggregate repository rows alone.
 
 Management operations already exist:
 

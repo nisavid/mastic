@@ -204,45 +204,56 @@ class NativeApplicationTargetCanary:
             )
         with tempfile.TemporaryDirectory(prefix="mastic-hindsight-canary-") as raw:
             root = Path(raw)
-            port = _loopback_port()
-            endpoint = f"http://127.0.0.1:{port}"
-            environment = _isolated_environment(
-                root,
-                {
-                    "HINDSIGHT_API_DATABASE_URL": "pg0://mastic-canary",
-                    "HINDSIGHT_API_HOST": "127.0.0.1",
-                    "HINDSIGHT_API_PORT": str(port),
-                    "HINDSIGHT_API_URL": endpoint,
-                },
-            )
-            command = [
-                str(uv),
-                "run",
-                "--no-project",
-                "--no-config",
-                "--env-file",
-                str(profile_path),
-                "--",
-                str(api),
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--log-level",
-                "warning",
-                "--no-access-log",
-            ]
-            process = self._spawn(
-                command,
-                cwd=root,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            for attempt in range(3):
+                port = _loopback_port()
+                endpoint = f"http://127.0.0.1:{port}"
+                environment = _isolated_environment(
+                    root,
+                    {
+                        "HINDSIGHT_API_DATABASE_URL": "pg0://mastic-canary",
+                        "HINDSIGHT_API_HOST": "127.0.0.1",
+                        "HINDSIGHT_API_PORT": str(port),
+                        "HINDSIGHT_API_URL": endpoint,
+                    },
+                )
+                command = [
+                    str(uv),
+                    "run",
+                    "--no-project",
+                    "--no-config",
+                    "--env-file",
+                    str(profile_path),
+                    "--",
+                    str(api),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--log-level",
+                    "warning",
+                    "--no-access-log",
+                ]
+                process = self._spawn(
+                    command,
+                    cwd=root,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                try:
+                    self._await_hindsight(hindsight, environment, process, 90.0)
+                except ApplicationError:
+                    if process.poll() is None:
+                        self._stop_process(process)
+                        raise
+                    process.wait(timeout=5.0)
+                    if attempt == 2:
+                        raise
+                    continue
+                break
             try:
-                self._await_hindsight(hindsight, environment, process, 90.0)
                 nonce = uuid.uuid4().hex
                 bank = f"mastic-canary-{nonce}"
                 document = f"mastic-canary-{nonce}"

@@ -98,7 +98,16 @@ class ResourceIdentityTests(unittest.TestCase):
             )
 
     def test_invalid_resource_names_and_mutable_revisions_are_rejected(self) -> None:
-        for invalid in ("", "has space", "../escape", "/absolute", "ümlaut"):
+        for invalid in (
+            "",
+            ".",
+            "..",
+            "has space",
+            "../escape",
+            "/absolute",
+            "back\\slash",
+            "ümlaut",
+        ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 ResourceName(invalid)
         with self.assertRaisesRegex(ValueError, "immutable commit SHA"):
@@ -133,6 +142,31 @@ class ResourceIdentityTests(unittest.TestCase):
                 runtime_installation=None,  # type: ignore[arg-type]
                 route=ResourceName("coding"),
             )
+
+        for invalid in (".", "..", "a/b", "a\\b"):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "installation ID"),
+            ):
+                RuntimeInstallation(
+                    installation_id=invalid,
+                    family=RuntimeFamily.OPTIQ,
+                    version="0.3.3",
+                    provenance="tested",
+                )
+
+    def test_service_run_rejects_non_integer_ports(self) -> None:
+        for invalid in (True, 1.5, "49152"):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "upstream port"),
+            ):
+                ServiceRun(
+                    run_id="run-1",
+                    service_name=ResourceName("coding"),
+                    state=ServiceRunState.READY,
+                    upstream_port=invalid,  # type: ignore[arg-type]
+                )
 
 
 if __name__ == "__main__":

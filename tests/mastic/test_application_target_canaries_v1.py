@@ -191,6 +191,72 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
             self.assertNotIn("capture_output", command_kwargs)
             self.assertIs(command_kwargs["stderr"], subprocess.DEVNULL)
 
+    def test_hindsight_retries_when_the_selected_port_is_claimed_before_bind(
+        self,
+    ) -> None:
+        class Process:
+            def __init__(self, pid, returncode):
+                self.pid = pid
+                self.returncode = returncode
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout):
+                return self.returncode or 0
+
+        processes = [Process(111_111_111, 1), Process(222_222_222, None)]
+        spawned = []
+
+        def spawn(command, **kwargs):
+            spawned.append(list(command))
+            return processes[len(spawned) - 1]
+
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            profile = home / ".hindsight" / "profiles" / "project.env"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("HINDSIGHT_API_LLM_PROVIDER=openai\n", encoding="utf-8")
+            canary = NativeApplicationTargetCanary(
+                home,
+                resolve_executable=lambda name: Path(f"/tools/{name}"),
+                run_command=lambda command, **kwargs: subprocess.CompletedProcess(
+                    command, 0, "", ""
+                ),
+                spawn_process=spawn,
+            )
+            with (
+                patch(
+                    "mastic.infrastructure.application_target_canaries._loopback_port",
+                    side_effect=(41001, 41002),
+                ),
+                patch.object(
+                    canary,
+                    "_hindsight_command",
+                    side_effect=(
+                        {"bank_id": "mastic-canary-fixed"},
+                        {"success": True},
+                        {"text": "mastic gateway contract ok"},
+                    ),
+                ) as command,
+                patch("os.killpg"),
+                patch("uuid.uuid4", return_value=type("UUID", (), {"hex": "fixed"})()),
+            ):
+                result = canary.run(
+                    "hindsight",
+                    ApplicationTargetConfiguration(
+                        "http://127.0.0.1:8766/v1", "memory"
+                    ),
+                    _settings("hindsight", profile="project"),
+                    profile="retain",
+                )
+
+        self.assertEqual(len(spawned), 2)
+        self.assertIn("41001", spawned[0])
+        self.assertIn("41002", spawned[1])
+        self.assertEqual(command.call_count, 3)
+        self.assertTrue(result["exact_contract"])
+
     def test_codex_rejects_an_oversized_result_file(self) -> None:
         def run(command, **kwargs):
             output = Path(command[command.index("--output-last-message") + 1])

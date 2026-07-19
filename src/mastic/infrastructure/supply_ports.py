@@ -538,7 +538,8 @@ class RuntimeSupplyPort:
         self._catalogue = catalogue or RuntimeCatalogue.load_builtin()
         self._resolver = resolver or RuntimeChangeResolver()
         self._filesystem = filesystem or LocalRuntimeFilesystem()
-        self._reconcile_runtime_transitions()
+        with private_file_lock(self._installation_root / ".mastic-transition.lock"):
+            self._reconcile_runtime_transitions()
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -592,6 +593,7 @@ class RuntimeSupplyPort:
                 self._manager.install_tested,
                 bundle.bundle_id,
                 self._installation_root,
+                before_publish=self._record_staged_installation,
             )
             requested_version = bundle.version
             requested_bundle_id: str | None = bundle.bundle_id
@@ -616,6 +618,7 @@ class RuntimeSupplyPort:
                 version,
                 python=python,
                 installation_root=self._installation_root,
+                before_publish=self._record_staged_installation,
             )
             requested_version = version
             requested_bundle_id = None
@@ -633,7 +636,6 @@ class RuntimeSupplyPort:
                 )
                 or install()
             )
-            self.record_managed_installation(installation)
             self.persist_runtime(self._config_store, installation)
         result = _runtime_result(installation, preview)
         result["lock_sha256"] = lock_sha256
@@ -758,19 +760,28 @@ class RuntimeSupplyPort:
             else:
                 self._validate_managed_installation(installation)
                 tombstone = self._runtime_tombstone(resource)
-                if tombstone.exists():
+                transition = self._runtime_removal_transition(resource)
+                if tombstone.exists() or transition.exists():
                     raise SupplyPortError(
                         f"runtime removal transition already exists: {resource!r}"
                     )
+                marker = installation.root / ".mastic-runtime-owner.json"
+                marker.replace(transition)
+                _fsync_directory(installation.root)
+                _fsync_directory(self._installation_root)
                 installation.root.replace(tombstone)
                 _fsync_directory(self._installation_root)
                 try:
                     self._remove_runtime_record(resource)
                 except Exception:
                     tombstone.replace(installation.root)
+                    transition.replace(marker)
+                    _fsync_directory(installation.root)
                     _fsync_directory(self._installation_root)
                     raise
                 self._filesystem.remove(tombstone)
+                _fsync_directory(self._installation_root)
+                transition.unlink()
                 _fsync_directory(self._installation_root)
         return {
             "installation_id": resource,
@@ -814,9 +825,22 @@ class RuntimeSupplyPort:
             self._installation_root,
             installation.installation_id,
         )
-        marker = root / ".mastic-runtime-owner.json"
+        self._write_runtime_marker(root, installation)
+
+    def _record_staged_installation(
+        self, stage: Path, installation: RuntimeInstallation
+    ) -> None:
+        stage = _validate_runtime_staging_directory(
+            stage, self._installation_root, installation.installation_id
+        )
+        self._write_runtime_marker(stage, installation)
+
+    def _write_runtime_marker(
+        self, marker_root: Path, installation: RuntimeInstallation
+    ) -> None:
+        marker = marker_root / ".mastic-runtime-owner.json"
         payload = json.dumps(
-            _runtime_marker_payload(installation, root),
+            _runtime_marker_payload(installation, installation.root),
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
@@ -841,7 +865,7 @@ class RuntimeSupplyPort:
                 stream.write(payload)
                 stream.flush()
             os.fsync(descriptor)
-            _fsync_directory(root)
+            _fsync_directory(marker_root)
         except Exception:
             os.close(descriptor)
             marker.unlink(missing_ok=True)
@@ -895,7 +919,13 @@ class RuntimeSupplyPort:
     def _read_runtime_marker(
         self, marker_root: Path, *, expected_root: Path
     ) -> RuntimeInstallation:
-        marker = marker_root / ".mastic-runtime-owner.json"
+        return self._read_runtime_marker_file(
+            marker_root / ".mastic-runtime-owner.json", expected_root=expected_root
+        )
+
+    def _read_runtime_marker_file(
+        self, marker: Path, *, expected_root: Path
+    ) -> RuntimeInstallation:
         try:
             descriptor = os.open(
                 marker,
@@ -932,43 +962,74 @@ class RuntimeSupplyPort:
     def _runtime_tombstone(self, installation_id: str) -> Path:
         return self._installation_root / f".{installation_id}.removing"
 
+    def _runtime_removal_transition(self, installation_id: str) -> Path:
+        return self._installation_root / f".{installation_id}.removing.json"
+
     def _reconcile_runtime_transitions(self) -> None:
         config = self._config_store.load().value if self._config_store.exists else None
         configured = config.runtimes if config is not None else {}
-        for candidate in self._installation_root.iterdir():
+        candidates = tuple(self._installation_root.iterdir())
+        reconciled: set[str] = set()
+        for transition in candidates:
             match = re.fullmatch(
-                r"\.([A-Za-z0-9][A-Za-z0-9._@+-]*)\.removing", candidate.name
+                r"\.([A-Za-z0-9][A-Za-z0-9._@+-]*)\.removing\.json",
+                transition.name,
             )
             if match is None:
                 continue
             installation_id = match.group(1)
-            metadata = candidate.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                raise SupplyPortError(
-                    f"runtime removal transition is unsafe: {candidate}"
-                )
             destination = self._installation_root / installation_id
-            installation = self._read_runtime_marker(
-                candidate, expected_root=destination
+            tombstone = self._runtime_tombstone(installation_id)
+            installation = self._read_runtime_marker_file(
+                transition, expected_root=destination
             )
             if installation.installation_id != installation_id:
                 raise SupplyPortError(
-                    f"runtime removal transition identity is invalid: {candidate}"
+                    f"runtime removal transition identity is invalid: {transition}"
                 )
             if installation_id in configured:
                 if _runtime_installation(configured, installation_id) != installation:
                     raise SupplyPortError(
-                        f"runtime removal transition does not match desired state: {candidate}"
+                        f"runtime removal transition does not match desired state: {transition}"
                     )
-                if destination.exists():
+                if tombstone.exists() and destination.exists():
                     raise SupplyPortError(
                         f"runtime removal recovery conflicts with {destination}"
                     )
-                candidate.replace(destination)
+                if tombstone.exists():
+                    tombstone.replace(destination)
+                if not destination.is_dir():
+                    raise SupplyPortError(
+                        f"runtime removal recovery is missing {destination}"
+                    )
+                marker = destination / ".mastic-runtime-owner.json"
+                if marker.exists():
+                    raise SupplyPortError(
+                        f"runtime removal recovery conflicts with {marker}"
+                    )
+                transition.replace(marker)
+                _fsync_directory(destination)
                 _fsync_directory(self._installation_root)
             else:
-                self._filesystem.remove(candidate)
+                if tombstone.exists() and destination.exists():
+                    raise SupplyPortError(
+                        f"runtime removal recovery conflicts with {destination}"
+                    )
+                owned_root = tombstone if tombstone.exists() else destination
+                if owned_root.exists():
+                    self._filesystem.remove(owned_root)
+                    _fsync_directory(self._installation_root)
+                transition.unlink()
                 _fsync_directory(self._installation_root)
+            reconciled.add(installation_id)
+        for candidate in self._installation_root.iterdir():
+            match = re.fullmatch(
+                r"\.([A-Za-z0-9][A-Za-z0-9._@+-]*)\.removing", candidate.name
+            )
+            if match is not None and match.group(1) not in reconciled:
+                raise SupplyPortError(
+                    f"runtime removal transition is missing ownership evidence: {candidate}"
+                )
 
     def _tested_bundle(self, runtime: str, bundle_id: str | None):
         choices = tuple(
@@ -2007,6 +2068,29 @@ def _validate_runtime_directory(
             "managed runtime must be an exact direct managed child matching its "
             "installation identity"
         )
+    return resolved
+
+
+def _validate_runtime_staging_directory(
+    path: Path, installation_root: Path, installation_id: str
+) -> Path:
+    candidate = path.expanduser()
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise SupplyPortError(
+            f"runtime staging directory is missing: {path}"
+        ) from error
+    expected_prefix = f".{installation_id}.staging-"
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or resolved.parent != installation_root
+        or not resolved.name.startswith(expected_prefix)
+    ):
+        raise SupplyPortError(f"runtime staging directory is unsafe: {path}")
     return resolved
 
 

@@ -1,8 +1,10 @@
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,7 +58,11 @@ class FakeRuntimeManager:
         self.calls: list[tuple[object, ...]] = []
 
     def install_tested(
-        self, bundle_id: str, installation_root: Path
+        self,
+        bundle_id: str,
+        installation_root: Path,
+        *,
+        before_publish=None,
     ) -> RuntimeInstallation:
         self.calls.append(("install_tested", bundle_id, installation_root))
         runtime = bundle_id.split("-", 1)[0]
@@ -72,7 +78,13 @@ class FakeRuntimeManager:
             "tested",
             bundle_id=bundle_id,
         )
-        installation.root.mkdir(parents=True)
+        stage = (
+            installation.root.parent / f".{installation.installation_id}.staging-fake"
+        )
+        stage.mkdir(parents=True)
+        if before_publish is not None:
+            before_publish(stage, installation)
+        stage.replace(installation.root)
         return installation
 
     def install_custom(
@@ -82,6 +94,7 @@ class FakeRuntimeManager:
         *,
         python: str,
         installation_root: Path,
+        before_publish=None,
     ) -> RuntimeInstallation:
         self.calls.append(
             ("install_custom", runtime, version, python, installation_root)
@@ -89,7 +102,13 @@ class FakeRuntimeManager:
         installation = self._installation(
             f"{runtime}-{version}-custom", runtime, version, "custom"
         )
-        installation.root.mkdir(parents=True)
+        stage = (
+            installation.root.parent / f".{installation.installation_id}.staging-fake"
+        )
+        stage.mkdir(parents=True)
+        if before_publish is not None:
+            before_publish(stage, installation)
+        stage.replace(installation.root)
         return installation
 
     def adopt_custom(self, runtime: str, root: Path) -> RuntimeInstallation:
@@ -127,6 +146,7 @@ class FakeRuntimeFiles:
 
     def remove(self, root: Path) -> None:
         self.removed.append(root)
+        shutil.rmtree(root)
 
 
 @dataclass
@@ -353,6 +373,38 @@ port = 8766
         self.assertEqual(result["lock_sha256"], bundle.lock_sha256)
         self.assertEqual(result["preview"]["operation"], "install")
 
+    def test_runtime_startup_reconciles_while_holding_the_transition_lock(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        held: list[Path] = []
+
+        @contextmanager
+        def observe_lock(path):
+            held.append(path)
+            try:
+                yield
+            finally:
+                held.pop()
+
+        def reconcile(port):
+            self.assertEqual(
+                held,
+                [port._installation_root / ".mastic-transition.lock"],
+            )
+
+        with (
+            patch(
+                "mastic.infrastructure.supply_ports.private_file_lock",
+                side_effect=observe_lock,
+            ),
+            patch.object(
+                RuntimeSupplyPort,
+                "_reconcile_runtime_transitions",
+                autospec=True,
+                side_effect=reconcile,
+            ),
+        ):
+            RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
     def test_runtime_install_initializes_supported_v1_desired_state(self) -> None:
         store = ConfigStore(self.root / "fresh.toml", validate_config)
         manager = FakeRuntimeManager(self.root / "runtimes")
@@ -378,6 +430,9 @@ port = 8766
                 "runtime.install",
                 {"runtime": "optiq", "version": "0.3", "channel": "custom"},
             )
+
+        published = self.root / "runtimes" / "optiq-0.3-custom"
+        self.assertTrue((published / ".mastic-runtime-owner.json").is_file())
 
         result = port.execute(
             "runtime.install",
@@ -592,22 +647,55 @@ mtp = true
         tombstone = installation.root.parent / ".optiq-old.removing"
 
         installation.root.replace(tombstone)
+        marker = tombstone / ".mastic-runtime-owner.json"
+        transition = installation.root.parent / ".optiq-old.removing.json"
+        marker.replace(transition)
         RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
         self.assertTrue(installation.root.is_dir())
         self.assertFalse(tombstone.exists())
 
         installation.root.replace(tombstone)
+        marker = tombstone / ".mastic-runtime-owner.json"
+        marker.replace(transition)
         port._remove_runtime_record("optiq-old")
         RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
         self.assertFalse(installation.root.exists())
         self.assertFalse(tombstone.exists())
+
+    def test_runtime_remove_recovers_after_partial_tombstone_deletion(self) -> None:
+        class InterruptedRemoval:
+            def remove(self, root: Path) -> None:
+                (root / "partial").unlink()
+                raise OSError("interrupted deletion")
+
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        installation = manager._installation("optiq-old", "optiq", "0.2", "tested")
+        RuntimeSupplyPort.persist_runtime(self.store, installation)
+        port = RuntimeSupplyPort(
+            manager,
+            self.store,
+            self.root / "runtimes",
+            filesystem=InterruptedRemoval(),
+        )
+        self._mark_owned(port, installation)
+        (installation.root / "partial").write_text("partial", encoding="utf-8")
+
+        with self.assertRaisesRegex(OSError, "interrupted deletion"):
+            port.execute("runtime.remove", {"resource": "optiq-old", "confirmed": True})
+
+        RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        self.assertFalse(installation.root.exists())
+        self.assertFalse((installation.root.parent / ".optiq-old.removing").exists())
+        self.assertFalse(
+            (installation.root.parent / ".optiq-old.removing.json").exists()
+        )
 
     def test_runtime_remove_recovery_never_deletes_an_unowned_tombstone(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
         tombstone = self.root / "runtimes" / ".unowned.removing"
         tombstone.mkdir(parents=True)
 
-        with self.assertRaisesRegex(SupplyPortError, "ownership marker"):
+        with self.assertRaisesRegex(SupplyPortError, "ownership evidence"):
             RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
 
         self.assertTrue(tombstone.is_dir())
