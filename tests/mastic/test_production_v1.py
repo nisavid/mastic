@@ -220,6 +220,28 @@ class ProductionCompositionTests(unittest.TestCase):
             _composition_transition(second).path,
         )
 
+    def test_transition_lock_uses_the_validated_physical_coordination_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            physical = root / "coordination"
+            physical.mkdir()
+            alias = root / "coordination-alias"
+            alias.symlink_to(physical, target_is_directory=True)
+            paths = MasticPaths(
+                root / "config",
+                root / "state",
+                root / "data",
+                root / "logs",
+                coordination_dir=alias,
+            )
+
+            self.assertEqual(
+                _setup_transition(paths).path,
+                (physical / "setup-removal.lock").resolve(strict=False),
+            )
+
     def test_local_read_composition_remains_available_during_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
