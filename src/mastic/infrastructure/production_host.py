@@ -8,7 +8,8 @@ import plistlib
 import shutil
 import stat
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -250,8 +251,10 @@ def application_target_port(
     config_store: ConfigStore[MasticConfig],
     *,
     credential: GatewayCredential | None = None,
+    transition: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> ApplicationTargetOperationPort:
     gateway_credential = credential or GatewayCredential(paths.gateway_credential)
+    setup_transition = transition if transition is not None else nullcontext
 
     def resolve_application_executable(name: str) -> Path:
         return _application_canary_executable(
@@ -406,6 +409,14 @@ def application_target_port(
 
         config_store.edit(edit)
 
+    @contextmanager
+    def target_transition(name: str) -> Iterator[None]:
+        with setup_transition():
+            with private_file_lock(
+                paths.state_dir / "application-targets" / f"{name}.transition.lock"
+            ):
+                yield
+
     return ApplicationTargetOperationPort(
         factory,
         configuration,
@@ -416,9 +427,7 @@ def application_target_port(
         ),
         settings=settings,
         record=record,
-        transition=lambda name: private_file_lock(
-            paths.state_dir / "application-targets" / f"{name}.transition.lock"
-        ),
+        transition=target_transition,
     )
 
 

@@ -4,11 +4,13 @@ import asyncio
 import json
 import os
 import plistlib
+import shutil
 import socket
 import stat
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -29,6 +31,7 @@ from mastic.infrastructure.production import (
     _SetupSupervisorOwner,
     _sampling_matches_service_model,
     _setup_resolver,
+    _setup_transition,
     compose_daemon,
     compose_local,
     make_launchd,
@@ -37,6 +40,7 @@ from mastic.infrastructure.production_host import (
     AbsoluteUvRunner,
     GatewayVerificationPort,
     OwnedStateRemover,
+    application_target_port,
     coherent_application_target_context,
     configured_model_installations,
     default_sampling,
@@ -167,6 +171,149 @@ class ProductionCompositionTests(unittest.TestCase):
                 )
 
             self.assertGreaterEqual(prepare.call_count, 1)
+
+    def test_local_composition_waits_for_removal_before_recreating_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            transition = _setup_transition(paths)
+            prepare_started = threading.Event()
+            original_prepare = MasticPaths.prepare
+
+            def observed_prepare(observed: MasticPaths) -> None:
+                prepare_started.set()
+                original_prepare(observed)
+
+            with (
+                patch.object(MasticPaths, "prepare", observed_prepare),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with transition():
+                    for path in (
+                        paths.config_dir,
+                        paths.state_dir,
+                        paths.data_dir,
+                        paths.log_dir,
+                    ):
+                        shutil.rmtree(path)
+                    composition = pool.submit(
+                        compose_local,
+                        paths=paths,
+                        home=home,
+                        executable=Path("/usr/bin/python3"),
+                    )
+
+                    self.assertFalse(prepare_started.wait(0.1))
+                    self.assertFalse(composition.done())
+                    self.assertFalse(paths.state_dir.exists())
+
+                production = composition.result(timeout=2)
+
+            self.assertIsNotNone(production.application)
+            self.assertTrue(prepare_started.is_set())
+            self.assertTrue(paths.config_dir.exists())
+            self.assertTrue(paths.state_dir.exists())
+            self.assertTrue(paths.data_dir.exists())
+            self.assertTrue(paths.log_dir.exists())
+            self.assertTrue(paths.state_db.exists())
+
+    def test_real_application_target_mutation_takes_setup_lock_before_target_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            store = ConfigStore(paths.config_file, validate_config)
+            store.import_text(
+                """\
+schema_version = 1
+
+[gateway]
+host = "127.0.0.1"
+port = 8766
+
+[runtimes."optiq@0.3.3"]
+definition = "optiq"
+version = "0.3.3"
+provenance = "tested"
+root = "/tmp/optiq"
+launcher = ["/tmp/optiq/bin/optiq", "serve"]
+capabilities = ["model"]
+
+[models.qwen]
+repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
+revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+
+[aliases.qwen]
+installation = "qwen"
+
+[services.coding]
+model_alias = "qwen"
+runtime = "optiq@0.3.3"
+route = "coding"
+"""
+            )
+            transition = _setup_transition(paths)
+            target = application_target_port(
+                home,
+                paths,
+                store,
+                transition=transition,
+            )
+            with transition():
+                target.execute(
+                    "application-target.configure",
+                    {
+                        "application_target": "hindsight",
+                        "service": "coding",
+                        "profile": "memory",
+                    },
+                )
+            profile = home / ".hindsight/profiles/memory.env"
+            self.assertTrue(profile.exists())
+            target_lock_started = threading.Event()
+
+            from mastic.infrastructure.config_store import (
+                private_file_lock as real_private_file_lock,
+            )
+
+            def observed_target_lock(path):
+                target_lock_started.set()
+                return real_private_file_lock(path)
+
+            with (
+                patch(
+                    "mastic.infrastructure.production_host.private_file_lock",
+                    side_effect=observed_target_lock,
+                ),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with transition():
+                    removal = pool.submit(
+                        target.execute,
+                        "application-target.remove",
+                        {"application_target": "hindsight"},
+                    )
+
+                    self.assertFalse(target_lock_started.wait(0.1))
+                    self.assertFalse(removal.done())
+                    self.assertTrue(profile.exists())
+
+                result = removal.result(timeout=2)
+
+            self.assertTrue(result["changed"])
+            self.assertTrue(target_lock_started.is_set())
+            self.assertFalse(profile.exists())
 
     def test_setup_remote_owner_activates_only_at_execution_boundary(self) -> None:
         activator = _Activator()
