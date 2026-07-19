@@ -629,7 +629,11 @@ def _compose_local_locked(
     )
     setup_evidence = OperationalSetupEvidenceStore(state_store)
     setup_plans = OperationalSetupPlanStore(state_store)
-    setup_outcomes = DurableSetupOutcomeProvider(setup_plans, setup_evidence)
+    setup_outcomes = DurableSetupOutcomeProvider(
+        setup_plans,
+        setup_evidence,
+        application_targets=application_targets,
+    )
     setup = SetupOperationPort(
         _setup_resolver(),
         preflight=SystemSetupPreflight(paths),

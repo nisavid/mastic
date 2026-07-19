@@ -391,6 +391,31 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertEqual(json.loads(result.output)["result"]["state"], "stopped")
 
+    def test_check_returns_nonzero_for_application_target_drift(self) -> None:
+        issue = {
+            "code": "application_target_drifted",
+            "application_target": "hindsight",
+            "state": "drifted",
+            "message": "Hindsight profile differs from mastic ownership.",
+            "next_actions": ["mastic application-target configure hindsight --help"],
+        }
+        self.dispatcher.results["check"] = {
+            "state": "failed",
+            "completion": "complete",
+            "readiness": "unverified",
+            "application_target_readiness": {"hindsight": "unverified"},
+            "issues": [issue],
+            "checks": [{"name": "application-target:hindsight", "state": "unverified"}],
+            "next_actions": issue["next_actions"],
+        }
+
+        result = self.runner.invoke(self.app, ["check", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        report = json.loads(result.output)["result"]
+        self.assertEqual(report["state"], "failed")
+        self.assertIn(issue, report["issues"])
+
     def test_explicit_tui_command_uses_injected_launcher(self) -> None:
         result = self.runner.invoke(self.app, ["tui"])
 

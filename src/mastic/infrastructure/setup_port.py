@@ -70,6 +70,10 @@ PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
     },
 }
 
+_READY_RESPONSE_SHA256 = (
+    "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d"
+)
+
 
 class OperationOwner(Protocol):
     """One bounded owner of named product operations."""
@@ -186,6 +190,8 @@ class DurableSetupOutcomeProvider:
         plans: SetupPlanStore,
         evidence: EvidenceStore,
         performance_profile: Mapping[str, object] | None = None,
+        *,
+        application_targets: OperationOwner | None = None,
     ) -> None:
         self._plans = plans
         self._evidence = evidence
@@ -194,6 +200,7 @@ class DurableSetupOutcomeProvider:
             if performance_profile is None
             else performance_profile
         )
+        self._application_targets = application_targets
 
     def outcome(self) -> Mapping[str, object]:
         try:
@@ -205,11 +212,64 @@ class DurableSetupOutcomeProvider:
         try:
             normalized = _validated_plan(plan)
             evidence = tuple(self._evidence.load("setup"))
-            return _durable_setup_outcome(
+            outcome = _durable_setup_outcome(
                 normalized, evidence, self._performance_profile
             )
+            return self._reconcile_application_targets(normalized, outcome)
         except (KeyError, OSError, RuntimeError, TypeError, ValueError):
             return _conservative_setup_outcome(malformed=True)
+
+    def _reconcile_application_targets(
+        self,
+        plan: Mapping[str, object],
+        outcome: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if self._application_targets is None:
+            return outcome
+        raw_targets = plan["application_targets"]
+        assert isinstance(raw_targets, Sequence)
+        readiness = dict(_target_readiness(outcome))
+        issues: list[Mapping[str, object]] = []
+        if not raw_targets:
+            return {**outcome, "application_target_issues": ()}
+        for raw_target in raw_targets:
+            target = str(raw_target)
+            try:
+                inspection = self._application_targets.execute(
+                    "application-target.inspect",
+                    {"application_target": target},
+                )
+            except Exception:
+                readiness[target] = Readiness.UNVERIFIED.value
+                issues.append(_application_target_observation_issue(target))
+                continue
+            if not isinstance(inspection, Mapping):
+                readiness[target] = Readiness.UNVERIFIED.value
+                issues.append(_application_target_observation_issue(target))
+                continue
+            state = inspection.get("state")
+            if state == "healthy":
+                continue
+            if state in {
+                "missing",
+                "drifted",
+                "incompatible",
+                "malformed",
+                "unmanaged",
+            }:
+                readiness[target] = Readiness.UNVERIFIED.value
+                issues.append(
+                    _application_target_health_issue(target, state, inspection)
+                )
+            else:
+                readiness[target] = Readiness.UNVERIFIED.value
+                issues.append(_application_target_observation_issue(target))
+        return {
+            **outcome,
+            "readiness": _combined_readiness(readiness).value,
+            "application_target_readiness": readiness,
+            "application_target_issues": tuple(issues),
+        }
 
 
 PreflightProvider = Callable[[bool], SetupPreflight]
@@ -1197,6 +1257,74 @@ def _conservative_setup_outcome(*, malformed: bool) -> Mapping[str, object]:
     }
 
 
+def _target_readiness(outcome: Mapping[str, object]) -> Mapping[str, str]:
+    value = outcome.get("application_target_readiness")
+    if not isinstance(value, Mapping) or not all(
+        isinstance(target, str) and isinstance(readiness, str)
+        for target, readiness in value.items()
+    ):
+        raise ValueError("application target readiness must be a string mapping")
+    return value  # type: ignore[return-value]
+
+
+def _combined_readiness(target_readiness: Mapping[str, str]) -> Readiness:
+    values = set(target_readiness.values())
+    return next(
+        candidate
+        for candidate in (
+            Readiness.PENDING,
+            Readiness.UNVERIFIED,
+            Readiness.DEGRADED,
+            Readiness.READY,
+        )
+        if candidate.value in values
+    )
+
+
+def _application_target_health_issue(
+    target: str,
+    state: object,
+    inspection: Mapping[str, object],
+) -> Mapping[str, object]:
+    next_actions = _inspection_next_actions(inspection, target)
+    detail = inspection.get("detail")
+    message = (
+        detail
+        if isinstance(detail, str) and detail
+        else f"Application Configuration Target {target!r} is {state}."
+    )
+    return {
+        "code": f"application_target_{state}",
+        "application_target": target,
+        "state": state,
+        "message": message,
+        "next_actions": next_actions,
+    }
+
+
+def _application_target_observation_issue(target: str) -> Mapping[str, object]:
+    return {
+        "code": "application_target_observation_failed",
+        "application_target": target,
+        "state": "unknown",
+        "message": (
+            f"Application Configuration Target {target!r} could not be inspected."
+        ),
+        "next_actions": (f"mastic application-target inspect {target}",),
+    }
+
+
+def _inspection_next_actions(
+    inspection: Mapping[str, object], target: str
+) -> tuple[str, ...]:
+    raw = inspection.get("next_actions")
+    if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
+        actions = tuple(action for action in raw if isinstance(action, str) and action)
+        if actions:
+            return actions
+    return (f"mastic application-target inspect {target}",)
+
+
 def _durable_setup_outcome(
     plan: Mapping[str, object],
     evidence: Sequence[SetupEvidence],
@@ -1237,17 +1365,7 @@ def _durable_setup_outcome(
                 target, outcome, performance_profile
             )
     if target_readiness:
-        values = set(target_readiness.values())
-        readiness = next(
-            candidate
-            for candidate in (
-                Readiness.PENDING,
-                Readiness.UNVERIFIED,
-                Readiness.DEGRADED,
-                Readiness.READY,
-            )
-            if candidate.value in values
-        )
+        readiness = _combined_readiness(target_readiness)
     else:
         verification = next(
             (
@@ -1314,7 +1432,7 @@ def _durable_verification_ready(evidence: SetupEvidence) -> bool:
     return bool(
         isinstance(result, Mapping)
         and result.get("ok") is True
-        and _exact_sha256(digest)
+        and digest == _READY_RESPONSE_SHA256
     )
 
 

@@ -407,6 +407,153 @@ class SetupOperationPortTests(unittest.TestCase):
             malformed["application_target_readiness"], {"codex": "unverified"}
         )
 
+    def test_durable_outcome_reobserves_every_selected_application_target(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": (
+                {"id": "application.canary.codex", "fingerprint": "codex-v1"},
+                {
+                    "id": "application.canary.hindsight",
+                    "fingerprint": "hindsight-v1",
+                },
+            ),
+            "application_targets": ("codex", "hindsight"),
+        }
+        evidence = FakeEvidenceStore()
+        for target in ("codex", "hindsight"):
+            evidence.record(
+                "setup",
+                SetupEvidence(
+                    f"application.canary.{target}",
+                    f"{target}-v1",
+                    StepState.SKIPPED,
+                    "",
+                ),
+            )
+        inspections = FakeOwner(
+            {
+                "application-target.inspect": lambda parameters: {
+                    "state": (
+                        "healthy"
+                        if parameters["application_target"] == "codex"
+                        else "drifted"
+                    ),
+                    "detail": "managed state changed",
+                    "next_actions": [
+                        "mastic application-target configure hindsight --help"
+                    ],
+                    "credential": "must not escape the inspection boundary",
+                }
+            }
+        )
+
+        outcome = DurableSetupOutcomeProvider(
+            plans, evidence, application_targets=inspections
+        ).outcome()
+
+        self.assertEqual(
+            inspections.calls,
+            [
+                (
+                    "application-target.inspect",
+                    {"application_target": "codex"},
+                ),
+                (
+                    "application-target.inspect",
+                    {"application_target": "hindsight"},
+                ),
+            ],
+        )
+        self.assertEqual(outcome["completion"], "complete")
+        self.assertEqual(
+            outcome["application_target_readiness"],
+            {"codex": "unverified", "hindsight": "unverified"},
+        )
+        self.assertEqual(
+            outcome["application_target_issues"],
+            (
+                {
+                    "code": "application_target_drifted",
+                    "application_target": "hindsight",
+                    "state": "drifted",
+                    "message": "managed state changed",
+                    "next_actions": (
+                        "mastic application-target configure hindsight --help",
+                    ),
+                },
+            ),
+        )
+        self.assertNotIn("credential", json.dumps(outcome))
+
+    def test_durable_outcome_fails_closed_when_target_observation_is_unknown(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": ({"id": "application.canary.codex", "fingerprint": "codex-v1"},),
+            "application_targets": ("codex",),
+        }
+        evidence = FakeEvidenceStore()
+        evidence.record(
+            "setup",
+            SetupEvidence(
+                "application.canary.codex",
+                "codex-v1",
+                StepState.SKIPPED,
+                "",
+            ),
+        )
+        inspections = FakeOwner(fail="application-target.inspect")
+
+        outcome = DurableSetupOutcomeProvider(
+            plans, evidence, application_targets=inspections
+        ).outcome()
+
+        self.assertEqual(outcome["completion"], "complete")
+        self.assertEqual(
+            outcome["application_target_readiness"], {"codex": "unverified"}
+        )
+        self.assertEqual(
+            outcome["application_target_issues"][0]["code"],
+            "application_target_observation_failed",
+        )
+        self.assertEqual(
+            outcome["application_target_issues"][0]["next_actions"],
+            ("mastic application-target inspect codex",),
+        )
+
+    def test_durable_gateway_verification_requires_the_exact_contract_digest(self):
+        plans = FakePlanStore()
+        plans.plan = {
+            "plan_identity": "a" * 64,
+            "steps": ({"id": "verify.request", "fingerprint": "verify-v1"},),
+            "application_targets": (),
+        }
+        evidence = FakeEvidenceStore()
+        inspections = FakeOwner(fail="application-target.inspect")
+
+        def outcome_for(digest):
+            evidence.items["setup"] = [
+                SetupEvidence(
+                    "verify.request",
+                    "verify-v1",
+                    StepState.COMPLETE,
+                    json.dumps({"result": {"ok": True, "response_sha256": digest}}),
+                )
+            ]
+            return DurableSetupOutcomeProvider(
+                plans, evidence, application_targets=inspections
+            ).outcome()
+
+        self.assertEqual(
+            outcome_for(
+                "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d"
+            )["readiness"],
+            "ready",
+        )
+        self.assertEqual(outcome_for("b" * 64)["readiness"], "unverified")
+        self.assertEqual(inspections.calls, [])
+
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             plans = OperationalSetupPlanStore(
