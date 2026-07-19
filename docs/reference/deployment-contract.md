@@ -175,6 +175,38 @@ service in response to traffic. Runtime processes are launched from exact
 owned installations with validated argv, capabilities, cached model identity,
 and revision/runtime-scoped trust grants.
 
+Chat output and unadapted streams are forwarded incrementally. Adapted non-SSE
+responses and individual adapted SSE frames are buffered only within configured
+response-adaptation limits. The initial upstream response and idle time between
+upstream reads have a 30-second default timeout; an admitted stream has no
+separate maximum lifetime while reads continue within that bound. Before
+streaming begins, an upstream timeout or failure returns `502` with
+`upstream_unavailable`. A late-adapted Responses SSE failure emits a Responses
+protocol error; an ordinary unadapted stream closes without a second HTTP error
+body. Cleanup still releases request activity.
+
+Gateway telemetry retains bounded, content-free admission, completion,
+active-request, pressure, and service-correlation metrics. It does not retain a
+per-request journal, prompt or response content, authorization headers, or token
+payloads.
+
+## Resource admission and pressure
+
+Per-service admission is bounded and returns a stable retryable response at the
+concurrency limit. Critical memory pressure blocks new starts and sheds new
+Gateway work while admitted requests continue. The in-flight bound limits
+concurrency, not lifetime: automatic recovery adds no total-stream deadline and
+does not force-close a busy run.
+
+The Supervisor may stop least-recently-used idle Service Runs until pressure
+recovers, but never stops a pinned or busy service automatically. If only pinned
+or busy services remain, MASTIC continues shedding new work and presents an
+ordered operator stop sequence. An explicit service stop terminates that run.
+An explicit Supervisor stop allows the configured Gateway drain interval—10
+seconds by default—before terminating remaining runs. After streaming begins,
+an ordinary client observes transport closure; an adapted Responses SSE stream
+may receive its protocol error.
+
 ## Deployment validation
 
 The installed control surface, explicit lifecycle, Application Configuration

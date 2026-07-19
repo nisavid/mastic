@@ -131,39 +131,16 @@ findings or integrity failures.
 
 ## Gateway
 
-The Gateway is a Starlette ASGI application served inside `masticd`. A
-lifespan-managed HTTPX client forwards bounded JSON requests and streams
-upstream responses. Chat output and unadapted streams are forwarded
-incrementally. Namespace-adapted non-SSE responses and individual SSE frames
-are buffered only within configured response-adaptation limits. The Gateway
-uses a 30-second default timeout for the initial upstream response and idle time
-between upstream reads; it does not impose a separate maximum total stream
-lifetime. An admitted stream may therefore continue indefinitely while every
-upstream read arrives within the idle timeout. Critical memory pressure does
-not force-close it; operator intervention is required when the stream delays
-recovery, as described under resource admission and pressure. Before response
-streaming begins, upstream timeout or failure returns `502` with
-`upstream_unavailable`.
-A late adapted Responses SSE failure emits a Responses protocol error; an
-ordinary unadapted stream closes without a second HTTP error body. Upstream
-cleanup still releases request activity. Ordinary Gateway requests retain
-bounded content-free metrics rather than a per-request journal. The Gateway
-binds only to configured loopback addresses and routes the OpenAI-compatible
-`model` field by Inference Service name.
+The Gateway gives applications one stable loopback endpoint while Service Runs
+come and go behind it. It routes the OpenAI-compatible `model` field by
+Inference Service name, streams upstream output where the application protocol
+allows it, and bounds the buffering needed for protocol adaptation.
 
-Every managed profile route and ordinary `/v1` route requires the same private
-bearer credential. MASTIC creates the credential as a user-owned mode-0600 file
-named `gateway.token` in the effective state directory: `MASTIC_STATE_DIR` when
-set, otherwise `mastic` under `XDG_STATE_HOME`, defaulting to
-`~/.local/state/mastic`. MASTIC injects it into owned Application Configuration
-Targets and sends it as `Authorization: Bearer <token>`. Missing and invalid
-credentials both receive `401` with `WWW-Authenticate: Bearer`; the credential
-is never forwarded to an upstream runtime.
-
-Each Service Run receives a private dynamic Upstream Endpoint. The Gateway
-stays healthy when an upstream fails, reports per-service readiness through
-`/v1/models`, and returns stable actionable errors for stopped or unavailable
-services. Requests never start services implicitly.
+Every Application Configuration Target route and every ordinary `/v1` route
+requires the same private bearer credential. MASTIC owns that credential and
+supplies it to the Application Configuration Targets it owns, but never forwards
+it to an inference runtime. A failed upstream does not take down the Gateway,
+and a request never starts a stopped service implicitly.
 
 Application Configuration Targets use workload-profiled Gateway base URLs under
 `/application-targets/<application-target>/profiles/<profile>/v1`. The profile resolves from mastic's
@@ -172,14 +149,15 @@ forwarding, the Gateway replaces the supported generation and chat-template
 fields with that profile's values. This makes the complete request policy
 explicit even when an application cannot express the model profile natively. Runtime
 acceptance still has to prove that the selected inference-engine path honors
-those values. The ordinary
-`/v1` endpoints remain unmodified OpenAI-compatible routes for unmanaged
-applications.
+those values. Ordinary `/v1` endpoints remain OpenAI-compatible routes for
+unmanaged applications and do not apply workload-profile mutations; they still
+require bearer authentication.
 
-Request telemetry records admission, completion, active-request counts, and
-service correlation. Lifecycle and pressure telemetry record state transitions.
-Prompt and response content, authorization headers, and token payloads are not
-recorded.
+The Gateway records enough content-free telemetry to explain admission,
+completion, pressure, and service correlation without retaining prompts,
+responses, authorization headers, or token payloads. See the
+[deployment contract](../reference/deployment-contract.md#gateway-and-runtime-processes)
+for exact routes, credentials, timeouts, stream failures, and file properties.
 
 ## Resource admission and pressure
 
@@ -191,20 +169,16 @@ preview blocks a known no-fit selection and makes uncertain evidence visible
 before confirmation. Per-service admission is bounded and returns a stable retryable
 response at the concurrency limit.
 
-Critical memory pressure immediately blocks new starts and sheds new Gateway
-work while already-admitted requests continue. The in-flight bound limits
-concurrency, not lifetime: automatic pressure recovery adds no total-stream
-deadline and never force-closes a busy run. The Supervisor may stop
-least-recently-used idle Service Runs until pressure recovers, but never stops a
-Pinned Inference Service automatically. If only pinned or busy services remain,
-it keeps shedding work and presents an ordered operator stop sequence. An
-explicit service stop terminates that run; an explicit Supervisor stop allows
-the configured Gateway drain interval, 10 seconds by default, before
-terminating remaining runs. After response streaming begins, an ordinary client
-observes transport closure, while an adapted Responses SSE stream may receive
-its protocol error. Pressure and lifecycle state is visible in CLI and TUI.
-Lifecycle actions are journaled, while content-free Gateway activity is retained
-as bounded metrics; there is no per-request journal.
+Critical memory pressure favors the work already admitted: MASTIC stops
+accepting new starts and Gateway work before considering idle Service Runs for
+reclamation. It does not automatically stop a pinned or busy service. When no
+safe automatic action remains, it presents an ordered operator stop sequence
+instead of hiding the trade-off behind an unsafe eviction.
+
+That policy separates admission bounds from stream lifetime and makes explicit
+shutdown an operator decision. Pressure and lifecycle state remain visible in
+the CLI and TUI. Exact drain intervals and client-visible failure behavior live
+in the [deployment contract](../reference/deployment-contract.md#resource-admission-and-pressure).
 
 ## User interfaces
 
