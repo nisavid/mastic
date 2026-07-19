@@ -109,39 +109,48 @@ class DaemonPhysicalSerializationTests(unittest.TestCase):
                 daemon=True,
             )
 
-            runtime.start()
-            self.assertTrue(tracker.runtime_entered.wait(1))
-            model.start()
-            with router._condition:  # noqa: SLF001 - synchronize admitted work.
-                self.assertTrue(
-                    router._condition.wait_for(  # noqa: SLF001
-                        lambda: router._active_physical == 2,  # noqa: SLF001
-                        timeout=1,
+            started: list[threading.Thread] = []
+            try:
+                runtime.start()
+                started.append(runtime)
+                self.assertTrue(tracker.runtime_entered.wait(1))
+                model.start()
+                started.append(model)
+                with router._condition:  # noqa: SLF001 - synchronize admitted work.
+                    self.assertTrue(
+                        router._condition.wait_for(  # noqa: SLF001
+                            lambda: router._active_physical == 2,  # noqa: SLF001
+                            timeout=1,
+                        )
                     )
-                )
-            self.assertFalse(tracker.model_entered.wait(0.05))
+                self.assertFalse(tracker.model_entered.wait(0.05))
 
-            stopping.start()
-            with router._condition:  # noqa: SLF001 - synchronize stop admission.
-                self.assertTrue(
-                    router._condition.wait_for(  # noqa: SLF001
-                        lambda: router._stopping,  # noqa: SLF001
-                        timeout=1,
+                stopping.start()
+                started.append(stopping)
+                with router._condition:  # noqa: SLF001 - synchronize stop admission.
+                    self.assertTrue(
+                        router._condition.wait_for(  # noqa: SLF001
+                            lambda: router._stopping,  # noqa: SLF001
+                            timeout=1,
+                        )
                     )
-                )
-            with self.assertRaises(ApplicationError) as raised:
-                router.execute("gateway.restart", {}, operation_id="late-gateway-retry")
-            self.assertEqual(raised.exception.code, "supervisor_stopping")
+                with self.assertRaises(ApplicationError) as raised:
+                    router.execute(
+                        "gateway.restart", {}, operation_id="late-gateway-retry"
+                    )
+                self.assertEqual(raised.exception.code, "supervisor_stopping")
 
-            tracker.runtime_release.set()
-            self.assertTrue(tracker.model_entered.wait(1))
-            self.assertFalse(tracker.stop_entered.is_set())
-            tracker.model_release.set()
-            self.assertTrue(tracker.stop_entered.wait(1))
+                tracker.runtime_release.set()
+                self.assertTrue(tracker.model_entered.wait(1))
+                self.assertFalse(tracker.stop_entered.is_set())
+                tracker.model_release.set()
+                self.assertTrue(tracker.stop_entered.wait(1))
+            finally:
+                tracker.runtime_release.set()
+                tracker.model_release.set()
+                for thread in started:
+                    thread.join(1)
 
-            runtime.join(1)
-            model.join(1)
-            stopping.join(1)
             self.assertFalse(runtime.is_alive())
             self.assertFalse(model.is_alive())
             self.assertFalse(stopping.is_alive())
