@@ -350,16 +350,17 @@ def _render_result(
     json_lines: bool,
     plain: bool,
 ) -> None:
+    summary = {
+        "schema_version": result.schema_version,
+        "operation": result.operation,
+        "result": _plain(result.value),
+    }
     if json_lines:
         for event in result.events:
             typer.echo(json.dumps(_plain(event), sort_keys=True, separators=(",", ":")))
         typer.echo(
             json.dumps(
-                {
-                    "schema_version": result.schema_version,
-                    "operation": result.operation,
-                    "result": _plain(result.value),
-                },
+                summary,
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -367,11 +368,7 @@ def _render_result(
     elif json_output:
         typer.echo(
             json.dumps(
-                {
-                    "schema_version": result.schema_version,
-                    "operation": result.operation,
-                    "result": _plain(result.value),
-                },
+                summary,
                 sort_keys=True,
                 separators=(",", ":"),
             )
