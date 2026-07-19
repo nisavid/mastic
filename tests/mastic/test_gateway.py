@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 from starlette.testclient import TestClient
 
 from mastic.infrastructure.gateway import (
+    GatewayAdmission,
     GatewayRequestProfile,
     GatewayRoute,
     create_gateway,
@@ -31,10 +33,10 @@ class FakeActivity:
         self.active: dict[str, int] = {}
         self.events: list[tuple[str, str]] = []
 
-    def begin(self, service: str) -> bool:
-        self.active[service] = self.active.get(service, 0) + 1
-        self.events.append(("begin", service))
-        return True
+    def admit(self, route: GatewayRoute) -> GatewayAdmission:
+        self.active[route.service] = self.active.get(route.service, 0) + 1
+        self.events.append(("begin", route.service))
+        return GatewayAdmission.ACCEPTED
 
     def end(self, service: str) -> None:
         self.active[service] -= 1
@@ -99,6 +101,23 @@ class FakeUpstreamClient:
 
 
 class GatewayTests(unittest.TestCase):
+    def test_default_client_uses_the_response_timeout_as_read_idle_timeout(
+        self,
+    ) -> None:
+        upstream = FakeUpstreamClient()
+        resolver = FakeResolver([])
+
+        with patch(
+            "mastic.infrastructure.gateway.httpx.AsyncClient",
+            return_value=upstream,
+        ) as client_factory:
+            app = create_gateway(resolver, upstream_response_timeout=0.25)
+            with TestClient(app):
+                pass
+
+        timeout = client_factory.call_args.kwargs["timeout"]
+        self.assertEqual(timeout.read, 0.25)
+
     def test_gateway_requires_correct_bearer_for_models_and_inference(self) -> None:
         resolver = FakeResolver(
             [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
@@ -1298,6 +1317,48 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(activity.events, [("begin", "coding"), ("end", "coding")])
         self.assertEqual(activity.active["coding"], 0)
 
+    def test_responses_sse_late_transport_failure_emits_failed_terminal(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        created = (
+            b"event: response.created\n"
+            b'data: {"type":"response.created","response":{"id":"resp-active"},'
+            b'"sequence_number":4}\n\n'
+        )
+        stream = FailingReadStream([created])
+        upstream = FakeUpstreamClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "coding", "stream": True, "input": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(created))
+        failed_frame = response.content[len(created) :]
+        event_line, data_line = failed_frame.strip().splitlines()
+        event = json.loads(data_line.removeprefix(b"data: "))
+        self.assertEqual(event_line, b"event: response.failed")
+        self.assertEqual(event["type"], "response.failed")
+        self.assertEqual(event["sequence_number"], 5)
+        self.assertEqual(event["response"]["id"], "resp-active")
+        self.assertEqual(event["response"]["error"]["code"], "server_error")
+        self.assertTrue(stream.closed)
+        self.assertEqual(activity.active["coding"], 0)
+
     def test_responses_sse_single_chunk_never_buffers_an_oversized_tail(
         self,
     ) -> None:
@@ -1530,9 +1591,9 @@ class GatewayTests(unittest.TestCase):
 
     def test_bounded_admission_rejects_excess_work_before_upstream(self) -> None:
         class RejectingActivity(FakeActivity):
-            def begin(self, service: str) -> bool:
-                self.events.append(("rejected", service))
-                return False
+            def admit(self, route: GatewayRoute) -> GatewayAdmission:
+                self.events.append(("rejected", route.service))
+                return GatewayAdmission.BUSY
 
         resolver = FakeResolver(
             [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]

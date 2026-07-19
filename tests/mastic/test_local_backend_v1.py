@@ -263,6 +263,39 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["pressure"], "unknown")
             self.assertIn("mastic supervisor start", result["next_actions"])
 
+    def test_status_reports_failed_for_unhealthy_top_level_components(self) -> None:
+        for component, component_state in (
+            ("supervisor", "failed"),
+            ("gateway", "unhealthy"),
+        ):
+            with self.subTest(component=component), TemporaryDirectory() as directory:
+                backend, state = self._backend(Path(directory), config=_EMPTY_CONFIG)
+                state.put_snapshot(
+                    {
+                        "kind": "supervisor",
+                        "id": "supervisor",
+                        "version": 1,
+                        "state": component_state
+                        if component == "supervisor"
+                        else "running",
+                    }
+                )
+                state.put_snapshot(
+                    {
+                        "kind": "gateway",
+                        "id": "gateway",
+                        "version": 1,
+                        "state": component_state
+                        if component == "gateway"
+                        else "running",
+                    }
+                )
+
+                status = backend.prepare(OperationRequest("status")).execute()
+
+                self.assertEqual(status["state"], "failed")
+                self.assertIn("mastic doctor", status["next_actions"])
+
     def test_uninitialized_status_and_config_are_actionable_without_a_file(
         self,
     ) -> None:
@@ -721,6 +754,82 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             self.assertEqual(result["resource"]["value"]["gateway"]["port"], 9000)
 
+    def test_config_import_rejects_a_source_changed_after_preview(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend, _ = self._backend(root)
+            source = root / "candidate.toml"
+            source.write_text(_CONFIG.replace("port = 8766", "port = 9000"))
+            preview = backend.prepare(
+                OperationRequest("config.import", {"source": str(source)})
+            ).events[-1]
+
+            source.write_text(_CONFIG.replace("port = 8766", "port = 9001"))
+
+            with self.assertRaisesRegex(ApplicationError, "preview changed") as caught:
+                backend.prepare(
+                    OperationRequest(
+                        "config.import",
+                        {
+                            "source": str(source),
+                            "confirmed": True,
+                            "preview_fingerprint": preview["preview_fingerprint"],
+                        },
+                    )
+                )
+            self.assertEqual(caught.exception.code, "stale_preview")
+
+    def test_config_import_rechecks_source_identity_at_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend, _ = self._backend(root)
+            source = root / "candidate.toml"
+            source.write_text(_CONFIG.replace("port = 8766", "port = 9000"))
+            request = OperationRequest("config.import", {"source": str(source)})
+            preview = backend.prepare(request).events[-1]
+            prepared = backend.prepare(
+                OperationRequest(
+                    "config.import",
+                    {
+                        "source": str(source),
+                        "confirmed": True,
+                        "preview_fingerprint": preview["preview_fingerprint"],
+                    },
+                )
+            )
+
+            source.write_text(_CONFIG.replace("port = 8766", "port = 9001"))
+
+            with self.assertRaisesRegex(ApplicationError, "preview changed") as caught:
+                prepared.execute()
+            self.assertEqual(caught.exception.code, "stale_preview")
+
+    def test_mutation_preview_normalizes_sets_in_canonical_order(self) -> None:
+        class ReverseSet(set):
+            def __iter__(self):
+                return iter(("zeta", "alpha"))
+
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            preview = backend.prepare(
+                OperationRequest(
+                    "service.create",
+                    {
+                        "service": "assistant",
+                        "model_alias": "coding",
+                        "runtime": "optiq-0.2.18",
+                        "route": "assistant",
+                        "options": {"capabilities": ReverseSet()},
+                    },
+                )
+            ).events[-1]
+
+            self.assertEqual(
+                preview["parameters"]["options"]["capabilities"],
+                ["alpha", "zeta"],
+            )
+
     def test_every_confirmed_mutation_is_bound_to_current_config_revision(
         self,
     ) -> None:
@@ -796,8 +905,13 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             self.assertTrue(prepared.requires_supervisor)
             self.assertEqual(
-                [call[0] for call in supervisor.calls],
-                ["service.remove"],
+                supervisor.calls,
+                [
+                    (
+                        "service.remove",
+                        {"resource": "chat", "confirmed": True},
+                    )
+                ],
             )
             self.assertEqual(result["resource"]["service"], "chat")
             remaining = backend.prepare(OperationRequest("service.list")).execute()

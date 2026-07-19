@@ -54,8 +54,8 @@ class HindsightTargetOptions:
     max_concurrent: int = 1
 
     def __post_init__(self) -> None:
-        if type(self.provider) is not str or not self.provider:
-            raise ValueError("Hindsight provider is required")
+        if self.provider != "openai":
+            raise ValueError("Phase 1 Hindsight provider must be openai")
         if type(self.max_concurrent) is not int or self.max_concurrent <= 0:
             raise ValueError("Hindsight max_concurrent must be positive")
 
@@ -90,15 +90,20 @@ class ApplicationTargetConfiguration:
             or port is None
             or endpoint.username is not None
             or endpoint.password is not None
+            or endpoint.path != "/v1"
             or endpoint.query
             or endpoint.fragment
         ):
-            raise ValueError("Gateway endpoint must be a literal HTTP loopback URL")
+            raise ValueError(
+                "Gateway endpoint must be a literal HTTP loopback public /v1 root"
+            )
         if not self.service_name:
             raise ValueError("service_name is required")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.service_name):
             raise ValueError("service_name must be a Gateway route name")
-        if self.context_window is not None and self.context_window <= 0:
+        if self.context_window is not None and (
+            type(self.context_window) is not int or self.context_window <= 0
+        ):
             raise ValueError("context_window must be positive")
         if self.credential_path is not None:
             credential_path = Path(self.credential_path)

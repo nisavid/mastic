@@ -48,6 +48,11 @@ class CommandRunner(Protocol):
 class SubprocessCommandRunner:
     """Execute exact argv directly, never through a shell."""
 
+    def __init__(self, *, timeout_seconds: float = 30.0) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("launchctl command timeout must be positive")
+        self._timeout_seconds = timeout_seconds
+
     def run(self, argv: Sequence[str]) -> CommandResult:
         completed = subprocess.run(
             tuple(argv),
@@ -55,6 +60,7 @@ class SubprocessCommandRunner:
             shell=False,
             capture_output=True,
             text=True,
+            timeout=self._timeout_seconds,
         )
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 

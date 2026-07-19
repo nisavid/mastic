@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from mastic.application.config_schema import validate_config
 from mastic.application.dispatch import ApplicationError, OperationRequest
-from mastic.application.setup import SetupPreflight
+from mastic.application.setup import SetupIntent, SetupPreflight, SetupRequest
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.model_supply import CacheInventory, CachedRevision
 from mastic.infrastructure.gateway_credential import GatewayCredential
@@ -38,7 +38,6 @@ from mastic.infrastructure.production_host import (
     AbsoluteUvRunner,
     GatewayVerificationPort,
     OwnedStateRemover,
-    application_target_request,
     coherent_application_target_context,
     configured_model_installations,
     default_sampling,
@@ -482,6 +481,21 @@ class ProductionCompositionTests(unittest.TestCase):
                 stat.S_IMODE(paths.gateway_credential.stat().st_mode), 0o600
             )
 
+    def test_daemon_graph_resolves_uv_only_when_runtime_work_begins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            with patch(
+                "mastic.infrastructure.production.resolve_uv",
+                side_effect=AssertionError("uv resolved during daemon composition"),
+            ) as resolve:
+                daemon = compose_daemon(paths=paths, home=root)
+
+            self.assertIsInstance(daemon, DaemonService)
+            resolve.assert_not_called()
+
     def test_production_graphs_reject_adoption_inside_owned_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -573,6 +587,7 @@ class ProductionCompositionTests(unittest.TestCase):
             run.call_args.args[0], (str(executable.resolve()), "--version")
         )
         self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 30 * 60)
 
     def test_router_dispatches_all_physical_owner_families(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -668,6 +683,28 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertEqual(stopped[0]["state"], "stopped")
             self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
 
+    def test_failed_daemon_cleanup_stop_reopens_the_router_in_finally(self) -> None:
+        class FailingStop(_Port):
+            def execute(self, operation, parameters):
+                if operation == "supervisor.stop":
+                    raise RuntimeError("stop failed")
+                return super().execute(operation, parameters)
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = _Port({"state": "complete"})
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=model,
+                supervisor=FailingStop(),
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                router.stop()
+            result = router.execute("model.install", {"repository": "owner/model"})
+
+        self.assertEqual(result["state"], "complete")
+
     def test_state_removal_rejects_symlink_even_when_it_resolves_to_owned_path(
         self,
     ) -> None:
@@ -686,7 +723,7 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertTrue(owned.exists())
 
     def test_recommended_setup_blocks_undersized_mac(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
+        with self.assertRaisesRegex(ValueError, "No validated setup profile fits"):
             _setup_resolver().resolve(
                 SetupPreflight(
                     "darwin",
@@ -715,6 +752,7 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(preview.capacity_profile, "balanced")
         self.assertEqual(preview.context_window, 131_072)
         self.assertEqual(preview.service_options["max_context"], 131_072)
+
         self.assertEqual(preview.service_options["max_concurrent"], 6)
         self.assertEqual(preview.service_options["prompt_cache_bytes"], 2 * 1024**3)
         self.assertNotIn("temperature", preview.service_options)
@@ -770,28 +808,42 @@ class ProductionCompositionTests(unittest.TestCase):
             preview.application_target_options["hindsight"]["max_concurrent"], 1
         )
 
+    def test_phase_one_intents_select_the_provisional_validated_capacities(
+        self,
+    ) -> None:
+        facts = SetupPreflight(
+            "darwin",
+            "arm64",
+            memory_bytes=96 * 1024**3,
+            disk_free_bytes=300 * 1024**3,
+            online=True,
+        )
+        resolver = _setup_resolver()
+
+        selected = {
+            intent: resolver.resolve(
+                facts, SetupRequest(intent=intent)
+            ).capacity_profile.name
+            for intent in SetupIntent
+        }
+
+        self.assertEqual(
+            selected,
+            {
+                SetupIntent.BALANCED: "balanced",
+                SetupIntent.DEEP: "long-context",
+                SetupIntent.RESPONSIVE: "balanced",
+            },
+        )
+
     @patch("mastic.infrastructure.production_host.httpx.post")
-    def test_gateway_canaries_use_each_application_target_wire_contract(
+    def test_gateway_verification_uses_the_public_chat_completions_contract(
         self, post
     ) -> None:
         post.return_value.is_success = True
-        post.return_value.json.side_effect = [
-            {"choices": [{"message": {"content": "mastic ready"}}]},
-            {
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": "mastic gateway contract ok",
-                            }
-                        ],
-                    }
-                ]
-            },
-            {"choices": [{"message": {"content": "mastic gateway contract ok"}}]},
-        ]
+        post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "mastic ready"}}]
+        }
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -805,45 +857,14 @@ class ProductionCompositionTests(unittest.TestCase):
                     "request": "Respond with exactly: mastic ready",
                 },
             )
-            codex = application_target_request(
-                "codex",
-                "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1",
-                "coding",
-                {},
-                credential=credential,
-            )
-            hindsight = application_target_request(
-                "hindsight",
-                "http://127.0.0.1:8766/application-targets/hindsight/profiles/retain/v1",
-                "coding",
-                {},
-                credential=credential,
-            )
 
         self.assertEqual(result["text"], "mastic ready")
-        self.assertEqual(codex["text"], "mastic gateway contract ok")
-        self.assertEqual(hindsight["text"], "mastic gateway contract ok")
         self.assertEqual(
-            [call.args[0] for call in post.call_args_list],
-            [
-                "http://127.0.0.1:8766/v1/chat/completions",
-                "http://127.0.0.1:8766/application-targets/codex/profiles/coding/v1/responses",
-                "http://127.0.0.1:8766/application-targets/hindsight/profiles/retain/v1/chat/completions",
-            ],
+            post.call_args.args[0], "http://127.0.0.1:8766/v1/chat/completions"
         )
         self.assertEqual(
-            [call.kwargs["headers"]["authorization"] for call in post.call_args_list],
-            [f"Bearer {token}", f"Bearer {token}", f"Bearer {token}"],
+            post.call_args.kwargs["headers"]["authorization"], f"Bearer {token}"
         )
-        self.assertEqual(
-            post.call_args_list[1].kwargs["json"]["input"],
-            "Respond with exactly: mastic gateway contract ok",
-        )
-        self.assertNotIn("messages", post.call_args_list[1].kwargs["json"])
-        self.assertEqual(
-            post.call_args_list[2].kwargs["json"]["messages"][0]["role"], "user"
-        )
-        self.assertNotIn("input", post.call_args_list[2].kwargs["json"])
 
     def test_launch_supply_keeps_config_key_but_uses_exact_revision_identity(
         self,

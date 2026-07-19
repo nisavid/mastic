@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -18,9 +19,15 @@ from urllib.parse import urlsplit
 
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import (
+    Completion,
     ExactSetupSelection,
     MutationExecutionError,
     MutationStep,
+    NoValidatedFitError,
+    PHASE1_APPLICATION_VERSIONS,
+    PHASE1_PERFORMANCE_PROFILE_ID,
+    PHASE1_PERFORMANCE_PROFILE_VERSION,
+    Readiness,
     RemovalInventory,
     ResolvedRemoval,
     SetupEvidence,
@@ -30,6 +37,38 @@ from mastic.application.setup import (
     SetupRequest,
     StepState,
 )
+
+
+_GIB = 1024**3
+PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
+    "id": PHASE1_PERFORMANCE_PROFILE_ID,
+    "version": PHASE1_PERFORMANCE_PROFILE_VERSION,
+    "status": "provisional",
+    "host": {
+        "platform": "darwin",
+        "machine": "arm64",
+        "minimum_memory_bytes": 48 * _GIB,
+        "macos_major_versions": (15, 26),
+    },
+    "plan": {
+        # Empirical validation must publish the exact production Plan digest
+        # before this provisional profile may make readiness claims.
+        "selection_sha256": "8bedb6280a52b8433da54a485e43b537714980511ae312cd81b8a82769402b56",
+        "application_versions": dict(PHASE1_APPLICATION_VERSIONS),
+    },
+    "metrics": {
+        "codex.native_canary.duration_seconds": {
+            "unit": "seconds",
+            "expected": {"maximum": 60.0},
+            "degraded": {"minimum_exclusive": 60.0},
+        },
+        "hindsight.native_canary.duration_seconds": {
+            "unit": "seconds",
+            "expected": {"maximum": 180.0},
+            "degraded": {"minimum_exclusive": 180.0},
+        },
+    },
+}
 
 
 class OperationOwner(Protocol):
@@ -100,25 +139,41 @@ class SetupOperationPort:
         runtime: OperationOwner,
         model: OperationOwner,
         config: OperationOwner,
+        applications: OperationOwner,
         application_targets: OperationOwner,
         supervisor: OperationOwner,
         verifier: OperationOwner,
         evidence: EvidenceStore,
         removal_inventory: RemovalInventoryProvider,
+        performance_profile: Mapping[str, object] | None = None,
     ) -> None:
         self._resolver = resolver
         self._preflight = preflight
         self._runtime = runtime
         self._model = model
         self._config = config
+        self._applications = applications
         self._application_targets = application_targets
         self._supervisor = supervisor
         self._verifier = verifier
         self._evidence = evidence
         self._removal_inventory = removal_inventory
+        selected_profile = (
+            PHASE1_HOST_PERFORMANCE_PROFILE
+            if performance_profile is None
+            else performance_profile
+        )
+        copied_profile = _plain(selected_profile)
+        if not isinstance(copied_profile, Mapping):
+            raise ValueError("performance profile must be an object")
+        _validate_performance_profile(copied_profile)
+        self._performance_profile = copied_profile
 
     def preview(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
-        resolved = self._resolve_setup(parameters)
+        try:
+            resolved = self._resolve_setup(parameters)
+        except NoValidatedFitError as error:
+            return _no_validated_fit(error)
         return self._setup_preview(resolved)
 
     def execute(
@@ -128,7 +183,10 @@ class SetupOperationPort:
             raise ApplicationError(
                 "operation_unavailable", f"{operation} is not a setup operation"
             )
-        resolved = self._resolve_setup(parameters)
+        try:
+            resolved = self._resolve_setup(parameters)
+        except NoValidatedFitError as error:
+            return _no_validated_fit(error)
         preview = self._setup_preview(resolved)
         if parameters.get("confirmed") is not True or not parameters.get(
             "preview_fingerprint"
@@ -153,10 +211,19 @@ class SetupOperationPort:
         def execute_step(step: MutationStep) -> SetupEvidence:
             result = self._execute_setup_step(resolved, step, material)
             results[step.id] = result
-            material[step.id] = result
+            material[(step.id, step.fingerprint)] = result
             return SetupEvidence.complete(
                 step,
-                _json({"result": _content_free_result(step.id, result)}),
+                _json(
+                    {
+                        "result": _content_free_result(
+                            resolved,
+                            step.id,
+                            result,
+                            self._performance_profile,
+                        )
+                    }
+                ),
             )
 
         try:
@@ -167,6 +234,11 @@ class SetupOperationPort:
                 record=lambda item: self._evidence.record("setup", item),
             )
         except MutationExecutionError as error:
+            completion, readiness, target_readiness = _setup_outcome(
+                resolved,
+                tuple(self._evidence.load("setup")),
+                self._performance_profile,
+            )
             raise ApplicationError(
                 "setup_interrupted",
                 str(error),
@@ -174,17 +246,27 @@ class SetupOperationPort:
                     "rerun the same exact setup preview to resume",
                     "mastic operation list",
                 ),
+                details={
+                    "state": "interrupted",
+                    "complete": False,
+                    "completion": completion,
+                    "readiness": readiness,
+                    "application_target_readiness": target_readiness,
+                    "failed_step": error.step_id,
+                },
             ) from error
+        completion, readiness, target_readiness = _setup_outcome(
+            resolved,
+            execution.evidence,
+            self._performance_profile,
+        )
         return {
             **preview,
             "state": "complete",
             "complete": execution.complete,
-            "completion": "complete" if execution.complete else "partial",
-            "readiness": "unverified",
-            "application_target_readiness": {
-                target: "unverified"
-                for target in resolved.selection.application_targets
-            },
+            "completion": completion,
+            "readiness": readiness,
+            "application_target_readiness": target_readiness,
             "results": _plain(results),
             "evidence": [_plain(item) for item in execution.evidence],
         }
@@ -243,6 +325,7 @@ class SetupOperationPort:
             prior = tuple(self._evidence.load("setup"))
             capacity = parameters.get("capacity")
             capacity_name = str(capacity) if capacity is not None else None
+            intent = str(parameters.get("intent", "balanced"))
             if profile == "exact":
                 missing = _missing_exact_selection(parameters)
                 if missing:
@@ -254,7 +337,10 @@ class SetupOperationPort:
             else:
                 baseline = self._resolver.resolve(
                     facts,
-                    SetupRequest(capacity_profile=capacity_name),
+                    SetupRequest(
+                        capacity_profile=capacity_name,
+                        intent=intent,
+                    ),
                     evidence=prior,
                 )
                 if capacity_name is None and baseline.capacity_profile is not None:
@@ -264,26 +350,41 @@ class SetupOperationPort:
             request = SetupRequest(
                 selection=selection if explicit_selection else None,
                 capacity_profile=capacity_name,
+                intent=intent,
+                skip_canaries=_strings(parameters.get("skip_canaries", ())),
                 noninteractive=bool(parameters.get("noninteractive", False)),
                 confirmed=parameters.get("confirmed") is True,
             )
             return self._resolver.resolve(facts, request, evidence=prior)
+        except NoValidatedFitError:
+            raise
         except ValueError as error:
             raise ApplicationError("invalid_setup", str(error)) from error
 
     def _setup_preview(self, resolved: ResolvedSetup) -> Mapping[str, object]:
         preview = self._resolver.preview(resolved)
+        completion, readiness, target_readiness = _setup_outcome(
+            resolved,
+            tuple(self._evidence.load("setup")),
+            self._performance_profile,
+        )
         identity = _preview_identity(
             resolved.steps,
             {
                 "profile": resolved.profile_name,
+                "intent": resolved.intent.value,
                 "selection": _selection_value(resolved.selection),
                 "offline": resolved.offline,
             },
         )
         return {
             "state": "review_required",
+            "complete": completion == Completion.COMPLETE.value,
+            "completion": completion,
+            "readiness": readiness,
+            "application_target_readiness": target_readiness,
             "profile": preview.profile_name,
+            "intent": resolved.intent.value,
             "capacity": (
                 {
                     "profile": preview.capacity_profile,
@@ -324,13 +425,14 @@ class SetupOperationPort:
             "preflight": _plain(resolved.preflight),
             "steps": [_plain(step) for step in preview.steps],
             "offline_note": preview.offline_note,
+            "performance_profile": _plain(self._performance_profile),
         }
 
     def _execute_setup_step(
         self,
         resolved: ResolvedSetup,
         step: MutationStep,
-        material: Mapping[str, object],
+        material: Mapping[tuple[str, str], object],
     ) -> Mapping[str, object]:
         selection = resolved.selection
         if step.id == "preflight":
@@ -365,7 +467,7 @@ class SetupOperationPort:
             )
             _validate_model_result(selection, result)
             if selection.trust_grants:
-                runtime = _material_result(material, "runtime.install")
+                runtime = _material_result(resolved, material, "runtime.install")
                 self._config.execute(
                     "model.trust",
                     {
@@ -378,8 +480,8 @@ class SetupOperationPort:
                 )
             return result
         if step.id == "service.configure":
-            runtime = _material_result(material, "runtime.install")
-            _material_result(material, "model.install")
+            runtime = _material_result(resolved, material, "runtime.install")
+            _material_result(resolved, material, "model.install")
             return self._config.execute(
                 "service.create",
                 {
@@ -404,6 +506,17 @@ class SetupOperationPort:
                     "confirmed": True,
                 },
             )
+        if step.id == "application.install":
+            result = self._applications.execute(
+                "application.install",
+                {
+                    "application_targets": selection.application_targets,
+                    "offline": resolved.offline,
+                    "confirmed": True,
+                },
+            )
+            _validate_application_install_result(selection, result)
+            return result
         if step.id == "application-target.configure":
             configured = {}
             for application_target in selection.application_targets:
@@ -429,7 +542,10 @@ class SetupOperationPort:
             return self._supervisor.execute(
                 "service.start", {"resource": selection.service_name}
             )
-        if step.id in {"gateway.contract.codex", "gateway.contract.hindsight"}:
+        if step.id in {
+            "application.canary.codex",
+            "application.canary.hindsight",
+        }:
             target = str(step.inputs["target"])
             result = self._application_targets.execute(
                 "application-target.test",
@@ -442,11 +558,12 @@ class SetupOperationPort:
             if (
                 not isinstance(response, Mapping)
                 or response.get("ok") is not True
-                or response.get("text") != "mastic gateway contract ok"
+                or response.get("exact_contract") is not True
             ):
                 raise RuntimeError(
-                    f"the {target} managed Gateway contract did not return the exact response"
+                    f"the {target} application-native canary did not return the exact contract"
                 )
+            _duration_seconds(response)
             return result
         if step.id == "verify.request":
             result = self._verifier.execute("verify.request", step.inputs)
@@ -502,6 +619,16 @@ class SetupOperationPort:
                     {"application_target": application_target, "confirmed": True},
                 )
             return results
+        if step.id == "application.remove":
+            return self._applications.execute(
+                "application.remove",
+                {
+                    "applications": tuple(
+                        _strings(step.inputs.get("applications", ()))
+                    ),
+                    "confirmed": True,
+                },
+            )
         if step.id == "state.remove":
             paths = tuple(_strings(step.inputs.get("paths", ())))
             return self._config.execute(
@@ -716,10 +843,28 @@ def _validate_model_result(
         raise RuntimeError("Model Installation did not match the exact Model Revision")
 
 
+def _validate_application_install_result(
+    selection: ExactSetupSelection, result: Mapping[str, object]
+) -> None:
+    installed = result.get("applications")
+    if not isinstance(installed, Mapping):
+        raise RuntimeError("application installer returned no exact application set")
+    versions = {"codex": "0.144.1", "hindsight": "0.8.4"}
+    for target in selection.application_targets:
+        item = installed.get(target)
+        if not isinstance(item, Mapping) or item.get("version") != versions[target]:
+            raise RuntimeError(
+                f"application installer did not return exact {target} {versions[target]}"
+            )
+
+
 def _material_result(
-    material: Mapping[str, object], step_id: str
+    resolved: ResolvedSetup,
+    material: Mapping[tuple[str, str], object],
+    step_id: str,
 ) -> Mapping[str, object]:
-    result = material.get(step_id)
+    step = next((item for item in resolved.steps if item.id == step_id), None)
+    result = material.get((step.id, step.fingerprint)) if step is not None else None
     if not isinstance(result, Mapping):
         raise RuntimeError(
             f"matching {step_id} evidence lacks resumable material; rerun that step"
@@ -727,8 +872,10 @@ def _material_result(
     return result
 
 
-def _restore_material(evidence: Sequence[SetupEvidence]) -> dict[str, object]:
-    restored = {}
+def _restore_material(
+    evidence: Sequence[SetupEvidence],
+) -> dict[tuple[str, str], object]:
+    restored: dict[tuple[str, str], object] = {}
     for item in evidence:
         if item.state is not StepState.COMPLETE or not item.detail:
             continue
@@ -737,22 +884,39 @@ def _restore_material(evidence: Sequence[SetupEvidence]) -> dict[str, object]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, Mapping) and isinstance(payload.get("result"), Mapping):
-            restored[item.step_id] = dict(payload["result"])
+            restored[(item.step_id, item.fingerprint)] = dict(payload["result"])
     return restored
 
 
 def _content_free_result(
-    step_id: str, result: Mapping[str, object]
+    resolved: ResolvedSetup,
+    step_id: str,
+    result: Mapping[str, object],
+    performance_profile: Mapping[str, object],
 ) -> Mapping[str, object]:
-    if step_id.startswith("gateway.contract."):
+    if step_id.startswith("application.canary."):
         response = result.get("response")
         if not isinstance(response, Mapping):
             return {"profile": result.get("profile"), "ok": False}
-        text = str(response.get("text", ""))
+        target = step_id.removeprefix("application.canary.")
+        duration_seconds = _duration_seconds(response)
+        metric = f"{target}.native_canary.duration_seconds"
         return {
             "profile": result.get("profile"),
             "ok": response.get("ok") is True,
-            "response_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "exact_contract": response.get("exact_contract") is True,
+            "phases": response.get("phases", ()),
+            "evidence_sha256": response.get("evidence_sha256"),
+            "performance": {
+                "metric": metric,
+                "value": duration_seconds,
+                "unit": "seconds",
+                "band": _performance_band(
+                    resolved, metric, duration_seconds, performance_profile
+                ),
+                "profile_id": performance_profile.get("id"),
+                "profile_version": performance_profile.get("version"),
+            },
         }
     if step_id != "verify.request":
         return result
@@ -760,6 +924,256 @@ def _content_free_result(
     return {
         "ok": result.get("ok") is True,
         "response_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+
+def _setup_outcome(
+    resolved: ResolvedSetup,
+    evidence: Sequence[SetupEvidence],
+    performance_profile: Mapping[str, object],
+) -> tuple[str, str, Mapping[str, str]]:
+    current = {
+        (item.step_id, item.fingerprint): item
+        for item in evidence
+        if item.state in {StepState.COMPLETE, StepState.SKIPPED}
+    }
+    terminal = all((step.id, step.fingerprint) in current for step in resolved.steps)
+    completion = Completion.COMPLETE if terminal else Completion.PARTIAL
+    target_readiness: dict[str, str] = {}
+    for target in resolved.selection.application_targets:
+        step = next(
+            item for item in resolved.steps if item.id == f"application.canary.{target}"
+        )
+        outcome = current.get((step.id, step.fingerprint))
+        if outcome is None:
+            target_readiness[target] = Readiness.PENDING.value
+        elif outcome.state is StepState.SKIPPED:
+            target_readiness[target] = Readiness.UNVERIFIED.value
+        else:
+            target_readiness[target] = _evidenced_canary_readiness(
+                resolved,
+                target,
+                outcome,
+                performance_profile,
+            )
+    if target_readiness:
+        values = set(target_readiness.values())
+        if Readiness.PENDING.value in values:
+            readiness = Readiness.PENDING
+        elif Readiness.UNVERIFIED.value in values:
+            readiness = Readiness.UNVERIFIED
+        elif Readiness.DEGRADED.value in values:
+            readiness = Readiness.DEGRADED
+        else:
+            readiness = Readiness.READY
+    else:
+        verification = next(
+            (item for item in resolved.steps if item.id == "verify.request"),
+            None,
+        )
+        readiness = (
+            Readiness.READY
+            if verification is not None
+            and (verification.id, verification.fingerprint) in current
+            else Readiness.PENDING
+        )
+    return completion.value, readiness.value, target_readiness
+
+
+def _duration_seconds(response: Mapping[str, object]) -> float:
+    raw = response.get("duration_seconds")
+    if type(raw) not in {int, float} or not math.isfinite(raw) or raw < 0:
+        raise RuntimeError(
+            "the application-native canary did not return a finite nonnegative duration"
+        )
+    return float(raw)
+
+
+def _performance_plan_fingerprint(selection: ExactSetupSelection) -> str:
+    return hashlib.sha256(
+        _json(
+            {
+                "selection": _selection_value(selection),
+                "application_versions": PHASE1_APPLICATION_VERSIONS,
+            }
+        ).encode()
+    ).hexdigest()
+
+
+def _macos_major(version: str) -> int | None:
+    major, _, _ = version.partition(".")
+    if not major.isdecimal():
+        return None
+    return int(major)
+
+
+def _validate_performance_profile(profile: Mapping[str, object]) -> None:
+    if not isinstance(profile.get("id"), str) or not profile["id"]:
+        raise ValueError("performance profile id must be a nonempty string")
+    if type(profile.get("version")) is not int or profile["version"] <= 0:
+        raise ValueError("performance profile version must be a positive integer")
+    if profile.get("status") not in {"provisional", "validated"}:
+        raise ValueError("performance profile status must be provisional or validated")
+    host = profile.get("host")
+    plan = profile.get("plan")
+    metrics = profile.get("metrics")
+    if not isinstance(host, Mapping):
+        raise ValueError("performance profile host must be an object")
+    if not isinstance(plan, Mapping):
+        raise ValueError("performance profile plan must be an object")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("performance profile metrics must be an object")
+    if host.get("platform") != "darwin" or host.get("machine") != "arm64":
+        raise ValueError("performance profile host must be darwin arm64")
+    if (
+        type(host.get("minimum_memory_bytes")) is not int
+        or host["minimum_memory_bytes"] <= 0
+    ):
+        raise ValueError(
+            "performance profile host minimum_memory_bytes must be positive"
+        )
+    macos_versions = host.get("macos_major_versions")
+    if (
+        not isinstance(macos_versions, Sequence)
+        or isinstance(macos_versions, (str, bytes))
+        or not macos_versions
+        or any(type(item) is not int or item <= 0 for item in macos_versions)
+    ):
+        raise ValueError(
+            "performance profile host macos_major_versions must be positive integers"
+        )
+    selection_sha256 = plan.get("selection_sha256")
+    if (
+        not isinstance(selection_sha256, str)
+        or len(selection_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in selection_sha256)
+    ):
+        raise ValueError("performance profile plan requires an exact selection sha256")
+    application_versions = plan.get("application_versions")
+    if not isinstance(application_versions, Mapping) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(version, str)
+        or not version
+        for name, version in (
+            application_versions.items()
+            if isinstance(application_versions, Mapping)
+            else ()
+        )
+    ):
+        raise ValueError(
+            "performance profile plan application_versions must be nonempty strings"
+        )
+    for metric in (
+        "codex.native_canary.duration_seconds",
+        "hindsight.native_canary.duration_seconds",
+    ):
+        band = metrics.get(metric)
+        if not isinstance(band, Mapping):
+            raise ValueError(f"performance profile requires metric {metric}")
+        expected = band.get("expected")
+        if not isinstance(expected, Mapping):
+            raise ValueError(f"performance profile metric {metric} requires expected")
+        maximum = expected.get("maximum")
+        if (
+            type(maximum) not in {int, float}
+            or not math.isfinite(maximum)
+            or maximum < 0
+        ):
+            raise ValueError(
+                f"performance profile metric {metric} maximum must be nonnegative"
+            )
+
+
+def _performance_band(
+    resolved: ResolvedSetup,
+    metric: str,
+    value: float,
+    performance_profile: Mapping[str, object],
+) -> str:
+    if performance_profile.get("status") != "validated":
+        return Readiness.UNVERIFIED.value
+    host = performance_profile.get("host")
+    plan = performance_profile.get("plan")
+    metrics = performance_profile.get("metrics")
+    assert isinstance(host, Mapping)
+    assert isinstance(plan, Mapping)
+    assert isinstance(metrics, Mapping)
+    if (
+        resolved.preflight.platform != host["platform"]
+        or resolved.preflight.machine != host["machine"]
+        or resolved.preflight.memory_bytes < host["minimum_memory_bytes"]
+        or _macos_major(resolved.preflight.os_version)
+        not in host.get("macos_major_versions", ())
+        or plan.get("application_versions") != dict(PHASE1_APPLICATION_VERSIONS)
+        or plan.get("selection_sha256")
+        != _performance_plan_fingerprint(resolved.selection)
+    ):
+        return Readiness.UNVERIFIED.value
+    raw_band = metrics.get(metric)
+    if not isinstance(raw_band, Mapping):
+        return Readiness.UNVERIFIED.value
+    expected = raw_band.get("expected")
+    if not isinstance(expected, Mapping):
+        return Readiness.UNVERIFIED.value
+    maximum = expected.get("maximum")
+    if type(maximum) not in {int, float}:
+        return Readiness.UNVERIFIED.value
+    if value <= float(maximum):
+        return "expected"
+    return Readiness.DEGRADED.value
+
+
+def _evidenced_canary_readiness(
+    resolved: ResolvedSetup,
+    target: str,
+    evidence: SetupEvidence,
+    performance_profile: Mapping[str, object],
+) -> str:
+    try:
+        payload = json.loads(evidence.detail)
+    except json.JSONDecodeError:
+        return Readiness.UNVERIFIED.value
+    if not isinstance(payload, Mapping):
+        return Readiness.UNVERIFIED.value
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        return Readiness.UNVERIFIED.value
+    performance = result.get("performance")
+    if not isinstance(performance, Mapping):
+        return Readiness.UNVERIFIED.value
+    if performance.get("profile_id") != performance_profile.get(
+        "id"
+    ) or performance.get("profile_version") != performance_profile.get("version"):
+        return Readiness.UNVERIFIED.value
+    metric = f"{target}.native_canary.duration_seconds"
+    if performance.get("metric") != metric:
+        return Readiness.UNVERIFIED.value
+    try:
+        value = _duration_seconds({"duration_seconds": performance.get("value")})
+    except RuntimeError:
+        return Readiness.UNVERIFIED.value
+    band = _performance_band(resolved, metric, value, performance_profile)
+    if performance.get("band") != band:
+        return Readiness.UNVERIFIED.value
+    if band == "expected":
+        return Readiness.READY.value
+    if band == Readiness.DEGRADED.value:
+        return Readiness.DEGRADED.value
+    return Readiness.UNVERIFIED.value
+
+
+def _no_validated_fit(error: NoValidatedFitError) -> Mapping[str, object]:
+    outcome = error.outcome
+    return {
+        "state": outcome.state,
+        "complete": True,
+        "completion": "complete",
+        "confirmation_required": False,
+        "readiness": "unverified",
+        "limiting_evidence": outcome.limiting_evidence,
+        "remediation": list(outcome.remediation),
+        "mutation_count": 0,
     }
 
 

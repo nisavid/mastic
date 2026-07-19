@@ -8,7 +8,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -35,6 +35,9 @@ from mastic.infrastructure.application_target_integrations import (
     LocalApplicationTargetIntegrationFactory,
     OwnershipDiscoveryPolicy,
 )
+from mastic.infrastructure.application_target_canaries import (
+    NativeApplicationTargetCanary,
+)
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.gateway_credential import GatewayCredential
 from mastic.infrastructure.launchd import LaunchdAdapter
@@ -53,17 +56,48 @@ from mastic.infrastructure.state_store import OperationalStateStore
 class AbsoluteUvRunner:
     """Run RuntimeManager's uv commands through one verified absolute executable."""
 
-    def __init__(self, executable: Path) -> None:
+    def __init__(self, executable: Path, *, timeout_seconds: float = 30 * 60) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("uv command timeout must be positive")
         resolved = executable.expanduser().resolve(strict=True)
         metadata = resolved.stat()
         if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
             raise ValueError("uv executable must be an executable regular file")
         self._executable = resolved
+        self._timeout_seconds = timeout_seconds
 
     def run(self, argv: tuple[str, ...]) -> None:
         if not argv or argv[0] != "uv":
             raise ValueError("runtime installation runner accepts only uv commands")
-        subprocess.run((str(self._executable), *argv[1:]), check=True, shell=False)
+        subprocess.run(
+            (str(self._executable), *argv[1:]),
+            check=True,
+            shell=False,
+            timeout=self._timeout_seconds,
+        )
+
+
+class LazyUvRunner:
+    """Resolve and verify uv only when a Runtime Installation needs it."""
+
+    def __init__(
+        self,
+        resolver: Callable[[], Path],
+        *,
+        timeout_seconds: float = 30 * 60,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("uv command timeout must be positive")
+        self._resolver = resolver
+        self._timeout_seconds = timeout_seconds
+        self._runner: AbsoluteUvRunner | None = None
+
+    def run(self, argv: tuple[str, ...]) -> None:
+        if self._runner is None:
+            self._runner = AbsoluteUvRunner(
+                self._resolver(), timeout_seconds=self._timeout_seconds
+            )
+        self._runner.run(argv)
 
 
 class ProductionLaunchdAdapter(LaunchdAdapter):
@@ -166,6 +200,7 @@ class SystemSetupPreflight:
             memory_bytes=int(memory.total),
             disk_free_bytes=shutil.disk_usage(self._paths.data_dir).free,
             online=False if offline else self._online_probe(),
+            os_version=platform.mac_ver()[0],
         )
 
 
@@ -366,12 +401,12 @@ def application_target_port(
     return ApplicationTargetOperationPort(
         factory,
         configuration,
-        request=lambda target, endpoint, route, payload: application_target_request(
-            target,
-            endpoint,
-            route,
-            payload,
-            credential=gateway_credential,
+        canary=NativeApplicationTargetCanary(
+            home,
+            uv_executable=paths.data_dir / "bootstrap-uv" / "uv",
+            resolve_executable=lambda name: _application_canary_executable(
+                name, home, paths.data_dir / "application-bin"
+            ),
         ),
         settings=settings,
         record=record,
@@ -379,6 +414,21 @@ def application_target_port(
             paths.state_dir / "application-targets" / f"{name}.transition.lock"
         ),
     )
+
+
+def _application_canary_executable(name: str, home: Path, managed_bin: Path) -> Path:
+    for candidate in (managed_bin / name, home / ".local/bin" / name):
+        if candidate.is_file():
+            resolved = candidate.resolve(strict=True)
+            if resolved.is_file() and os.access(resolved, os.X_OK):
+                return resolved
+    discovered = shutil.which(name)
+    if discovered is None:
+        raise FileNotFoundError(name)
+    resolved = Path(discovered).resolve(strict=True)
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise ValueError(f"invalid executable: {name}")
+    return resolved
 
 
 def _application_target_provider(value: object, target: str) -> str:
@@ -409,98 +459,14 @@ def coherent_application_target_context(
     return requested_value or service_value
 
 
-def application_target_request(
-    target: str,
-    endpoint: str,
-    route: str,
-    payload: Mapping[str, object],
-    *,
-    credential: GatewayCredential | None = None,
-) -> Mapping[str, object]:
-    if target == "codex":
-        path = "/responses"
-        body = {
-            **dict(payload),
-            "model": route,
-            "input": "Respond with exactly: mastic gateway contract ok",
-        }
-    elif target == "hindsight":
-        path = "/chat/completions"
-        body = {
-            **dict(payload),
-            "model": route,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Respond with exactly: mastic gateway contract ok",
-                }
-            ],
-        }
-    else:
-        raise ValueError(f"unsupported Application Configuration Target: {target}")
-    response = httpx.post(
-        endpoint.rstrip("/") + path,
-        json=body,
-        headers=(
-            {"authorization": credential.authorization_header()}
-            if credential is not None
-            else None
-        ),
-        timeout=120.0,
-        follow_redirects=False,
-        trust_env=False,
-    )
-    response.raise_for_status()
-    value = response.json()
-    if not isinstance(value, Mapping):
-        raise RuntimeError("Gateway returned a non-object response")
-    try:
-        if target == "codex":
-            output = value["output"]
-            if not isinstance(output, list):
-                raise TypeError("Responses output must be a list")
-            message = next(
-                item
-                for item in output
-                if isinstance(item, Mapping) and item.get("type") == "message"
-            )
-            content = message["content"]
-            if not isinstance(content, list):
-                raise TypeError("Responses message content must be a list")
-            text = next(
-                item["text"]
-                for item in content
-                if isinstance(item, Mapping) and item.get("type") == "output_text"
-            )
-        else:
-            choices = value["choices"]
-            if not isinstance(choices, list):
-                raise TypeError("Chat Completions choices must be a list")
-            first = choices[0]
-            if not isinstance(first, Mapping):
-                raise TypeError("Chat Completions choice must be an object")
-            message = first["message"]
-            if not isinstance(message, Mapping):
-                raise TypeError("Chat Completions message must be an object")
-            text = message["content"]
-    except (KeyError, IndexError, StopIteration, TypeError) as error:
-        contract = "Responses" if target == "codex" else "Chat Completions"
-        raise RuntimeError(
-            f"Gateway returned an invalid {contract} response"
-        ) from error
-    return {
-        "ok": response.is_success,
-        "text": str(text).strip(),
-        "response": dict(value),
-    }
-
-
 def removal_inventory(
     paths: MasticPaths,
     launchd: LaunchdAdapter,
     config_store: ConfigStore[MasticConfig],
     supply: ModelSupply,
     home: Path,
+    *,
+    application_inventory: Mapping[str, tuple[str, ...]] | None = None,
 ) -> RemovalInventory:
     config = (
         config_store.load().value
@@ -525,6 +491,7 @@ def removal_inventory(
         if path.exists()
     )
     cache = supply.inventory()
+    app_inventory = application_inventory or {"owned": (), "retained": ()}
     return RemovalInventory(
         running_services=running,
         registered=launchd.status().registered,
@@ -536,6 +503,8 @@ def removal_inventory(
         shared_cache_paths=tuple(str(item.snapshot_path) for item in cache.revisions),
         shared_cache_bytes=sum(item.size_on_disk for item in cache.revisions),
         unrelated_settings=(str(home / ".codex"), str(home / ".hindsight")),
+        owned_applications=app_inventory.get("owned", ()),
+        retained_applications=app_inventory.get("retained", ()),
     )
 
 

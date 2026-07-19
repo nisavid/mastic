@@ -175,14 +175,7 @@ class LocalOperationBackend:
         if request.parameters.get("confirmed") is True:
             supplied = request.parameters.get("preview_fingerprint")
             if supplied != owner_fingerprint:
-                raise ApplicationError(
-                    "stale_preview",
-                    "The mutation preview changed or was not reviewed; resolve it again.",
-                    next_actions=(
-                        f"mastic {request.name.replace('.', ' ')} --help",
-                        "review the newly resolved preview before confirming",
-                    ),
-                )
+                raise _stale_preview(request.name)
         requires_supervisor = (
             request.name
             in (_SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS)
@@ -215,7 +208,9 @@ class LocalOperationBackend:
             "config_revision": config_revision,
             "parameters": parameters,
         }
-        if request.name == "model.install":
+        if request.name == "config.import":
+            resolved["candidate_sha256"] = _config_import_digest(request.parameters)
+        elif request.name == "model.install":
             resolve = getattr(self._model_supply, "resolve", None)
             if callable(resolve):
                 revision = resolve(
@@ -408,15 +403,19 @@ class LocalOperationBackend:
             for item in services
             if (item["run"] or {}).get("state") in {"failed", "unhealthy"}
         ]
+        component_failed = any(
+            component.get("state") in {"failed", "unhealthy"}
+            for component in (supervisor, gateway)
+        )
         state = (
             "failed"
-            if failed
+            if failed or component_failed
             else ("stopped" if supervisor.get("state") == "stopped" else "ok")
         )
         next_actions = []
         if supervisor.get("state") == "stopped":
             next_actions.append("mastic supervisor start")
-        if failed:
+        if failed or component_failed:
             next_actions.append("mastic doctor")
         details: dict[str, object] = {}
         if name == "check":
@@ -1073,9 +1072,9 @@ class LocalOperationBackend:
         elif name == "service.remove":
             resource = str(parameters.get("resource", ""))
             removed = self._supervisor.execute(
-                "service.remove", {"application_target": resource, "confirmed": True}
+                "service.remove", {"resource": resource, "confirmed": True}
             )
-            configured = self._local_mutation(request)
+            configured = self._local_mutation(request, preview)
             value = {
                 "service": resource,
                 "lifecycle": removed,
@@ -1094,7 +1093,7 @@ class LocalOperationBackend:
         elif name in {"application-target.configure", "application-target.remove"}:
             value = self._application_targets.execute(name, parameters)
         elif name in _LOCAL_MUTATIONS:
-            value = self._local_mutation(request)
+            value = self._local_mutation(request, preview)
         else:
             raise ApplicationError(
                 "operation_unavailable", f"{name} has no mutation owner"
@@ -1228,14 +1227,18 @@ class LocalOperationBackend:
             ),
         )
 
-    def _local_mutation(self, request: OperationRequest) -> Mapping[str, object]:
+    def _local_mutation(
+        self,
+        request: OperationRequest,
+        preview: Mapping[str, object],
+    ) -> Mapping[str, object]:
         name = request.name
         parameters = request.parameters
         if name == "config.import":
-            text = parameters.get("text")
-            if text is None:
-                text = _read_config_source(str(parameters["source"]))
-            return _plain(self._config_store.import_text(str(text)))
+            text = _config_import_text(parameters)
+            if preview.get("candidate_sha256") != _text_digest(text):
+                raise _stale_preview(name)
+            return _plain(self._config_store.import_text(text))
         if name == "config.restore":
             return _plain(self._config_store.restore(str(parameters["revision"])))
         if name == "model.trust":
@@ -1430,6 +1433,32 @@ def _read_config_source(source: str, *, max_bytes: int = 1024 * 1024) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _config_import_text(parameters: Mapping[str, object]) -> str:
+    text = parameters.get("text")
+    if text is None:
+        return _read_config_source(str(parameters["source"]))
+    return str(text)
+
+
+def _text_digest(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _config_import_digest(parameters: Mapping[str, object]) -> str:
+    return _text_digest(_config_import_text(parameters))
+
+
+def _stale_preview(operation: str) -> ApplicationError:
+    return ApplicationError(
+        "stale_preview",
+        "The mutation preview changed or was not reviewed; resolve it again.",
+        next_actions=(
+            f"mastic {operation.replace('.', ' ')} --help",
+            "review the newly resolved preview before confirming",
+        ),
+    )
+
+
 def _result(operation: str, **value: object) -> Mapping[str, object]:
     return {"schema_version": 1, "operation": operation, **value}
 
@@ -1470,7 +1499,15 @@ def _plain(value: object) -> object:
         }
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list, frozenset, set)):
+    if isinstance(value, (frozenset, set)):
+        items = [_plain(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ),
+        )
+    if isinstance(value, (tuple, list)):
         return [_plain(item) for item in value]
     if isinstance(value, Path):
         return str(value)

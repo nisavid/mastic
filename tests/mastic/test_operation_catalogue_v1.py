@@ -12,33 +12,82 @@ class OperationCatalogueTests(unittest.TestCase):
     def setUp(self) -> None:
         self.catalogue = build_operation_catalogue()
 
-    def test_contains_the_complete_approved_command_tree(self) -> None:
-        required = {
+    def test_contains_exactly_the_complete_approved_command_tree(self) -> None:
+        approved = {
             "setup",
             "remove",
             "status",
             "check",
             "doctor",
-            "supervisor.start",
-            "supervisor.stop",
-            "gateway.routes",
-            "runtime.available",
-            "runtime.install",
-            "model.search",
-            "model.install",
-            "model.adopt",
-            "model.cache.evict",
-            "service.create",
-            "service.start",
-            "service.stop",
-            "operation.inspect",
-            "application-target.configure",
-            "config.restore",
             "logs",
             "metrics",
             "tui",
+            "supervisor.status",
+            "supervisor.start",
+            "supervisor.stop",
+            "supervisor.restart",
+            "supervisor.logs",
+            "supervisor.inspect",
+            "gateway.status",
+            "gateway.inspect",
+            "gateway.routes",
+            "gateway.configure",
+            "gateway.restart",
+            "gateway.logs",
+            "gateway.metrics",
+            "runtime.list",
+            "runtime.available",
+            "runtime.inspect",
+            "runtime.install",
+            "runtime.adopt",
+            "runtime.update",
+            "runtime.rollback",
+            "runtime.remove",
+            "runtime.prune",
+            "runtime.doctor",
+            "model.search",
+            "model.list",
+            "model.inspect",
+            "model.install",
+            "model.adopt",
+            "model.verify",
+            "model.repair",
+            "model.update",
+            "model.rollback",
+            "model.uninstall",
+            "model.trust",
+            "model.cache.list",
+            "model.cache.inspect",
+            "model.cache.evict",
+            "model.cache.prune",
+            "service.list",
+            "service.create",
+            "service.inspect",
+            "service.edit",
+            "service.start",
+            "service.stop",
+            "service.restart",
+            "service.remove",
+            "service.logs",
+            "service.metrics",
+            "service.check",
+            "operation.list",
+            "operation.inspect",
+            "application-target.list",
+            "application-target.inspect",
+            "application-target.configure",
+            "application-target.test",
+            "application-target.remove",
+            "config.path",
+            "config.show",
+            "config.validate",
+            "config.diff",
+            "config.history",
+            "config.export",
+            "config.import",
+            "config.restore",
         }
-        self.assertTrue(required.issubset(self.catalogue))
+        self.assertEqual(set(self.catalogue), approved)
 
     def test_reads_never_activate_the_supervisor(self) -> None:
         for operation in self.catalogue.values():
@@ -140,8 +189,12 @@ class OperationCatalogueTests(unittest.TestCase):
             parameter.name: parameter
             for parameter in self.catalogue["setup"].parameters
         }
+        self.assertEqual(setup["intent"].accepted, ("balanced", "deep", "responsive"))
+        self.assertIn("advanced", setup["capacity"].help.casefold())
         self.assertEqual(setup["service_options"].value_type, "json")
         self.assertEqual(setup["application_targets"].value_type, "json")
+        self.assertEqual(setup["skip_canaries"].value_type, "json")
+        self.assertIn("Unverified", setup["skip_canaries"].help)
         self.assertEqual(setup["activation"].accepted, ("manual", "supervisor"))
 
     def test_cli_and_tui_capabilities_are_derived_from_same_entries(self) -> None:

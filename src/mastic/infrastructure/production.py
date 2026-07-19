@@ -18,12 +18,14 @@ from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
     RecommendedProfile,
+    SetupIntent,
     SetupResolver,
 )
 from mastic.infrastructure.composition import (
     ApplicationComposition,
     compose_application,
 )
+from mastic.infrastructure.application_supply import ApplicationSupply
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.control_client import UnixControlClient
 from mastic.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
@@ -53,8 +55,8 @@ from mastic.infrastructure.operation_ports import (
 )
 from mastic.infrastructure.paths_v1 import MasticPaths, resolve_paths
 from mastic.infrastructure.production_host import (
-    AbsoluteUvRunner,
     GatewayVerificationPort,
+    LazyUvRunner,
     OwnedStateRemover,
     ProductionLaunchdAdapter,
     SystemSetupPreflight,
@@ -445,18 +447,33 @@ def compose_local(
     )
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
+    applications = ApplicationSupply(
+        resolved_home,
+        paths.data_dir / "bootstrap-artifacts" / "application-targets-v1",
+        paths.state_dir,
+        uv_executable=paths.data_dir / "bootstrap-uv" / "uv",
+        python_executable=(paths.data_dir / "bootstrap-python" / "bin" / "python3.11"),
+        application_tool_dir=paths.data_dir / "application-tools",
+        application_bin_dir=paths.data_dir / "application-bin",
+    )
     setup = SetupOperationPort(
         _setup_resolver(),
         preflight=SystemSetupPreflight(paths),
         runtime=activating_remote,
         model=activating_remote,
         config=config_owner,
+        applications=applications,
         application_targets=application_targets,
         supervisor=setup_supervisor,
         verifier=GatewayVerificationPort(credential),
         evidence=OperationalSetupEvidenceStore(state_store),
         removal_inventory=lambda: removal_inventory(
-            paths, launchd, config_store, hub_supply, resolved_home
+            paths,
+            launchd,
+            config_store,
+            hub_supply,
+            resolved_home,
+            application_inventory=applications.inventory(),
         ),
     )
     application = compose_application(
@@ -545,7 +562,7 @@ def compose_daemon(
     catalogue = RuntimeCatalogue.load_builtin()
     runtime_manager = RuntimeManager(
         catalogue,
-        runner=AbsoluteUvRunner(resolve_uv(resolved_home)),
+        runner=LazyUvRunner(lambda: resolve_uv(resolved_home)),
         probe=SubprocessRuntimeProbe(),
     )
     runtime = RuntimeSupplyPort(
@@ -779,4 +796,12 @@ def _setup_resolver() -> SetupResolver:
         ),
         capacity_profiles=capacities,
         default_capacity_profile="balanced",
+        # Phase 1 has validation evidence for one interactive profile and one
+        # longer-context profile. Responsive therefore shares balanced until a
+        # separately validated low-latency capacity profile exists.
+        intent_capacity_profiles={
+            SetupIntent.BALANCED: "balanced",
+            SetupIntent.DEEP: "long-context",
+            SetupIntent.RESPONSIVE: "balanced",
+        },
     )

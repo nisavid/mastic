@@ -181,6 +181,7 @@ class MasticApp(App[None]):
         self.current_view = "home"
         self.selected_operation: str | None = None
         self.pending_parameters: Mapping[str, object] | None = None
+        self._workspace_generation = 0
 
     @property
     def available_operations(self) -> tuple[str, ...]:
@@ -260,6 +261,7 @@ class MasticApp(App[None]):
         workspace.styles.padding = (1, 1) if width < 80 else (1, 2)
 
     async def open_operation(self, name: str) -> None:
+        self._workspace_generation += 1
         operation = self.catalogue[name]
         self.selected_operation = name
         self.pending_parameters = None
@@ -362,16 +364,17 @@ class MasticApp(App[None]):
     @work(exclusive=False, group="operation-execution")
     async def execute_operation(self, name: str, **parameters: object) -> None:
         """Execute one palette or contextual operation through shared dispatch."""
+        self._workspace_generation += 1
+        workspace_generation = self._workspace_generation
         self._set_operation_busy(True, name)
         try:
             result = await asyncio.to_thread(
                 self.dispatcher.execute, OperationRequest(name, parameters)
             )
         except ApplicationError as error:
-            actions = "\n".join(f"  → {action}" for action in error.next_actions)
-            body = f"{error.code}\n\n{error.message}"
-            if actions:
-                body += f"\n\nNext actions\n{actions}"
+            if workspace_generation != self._workspace_generation:
+                return
+            body = self._render_application_error(error)
             self.query_one("#view-title", Static).update(
                 f"{name.replace('.', '  ›  ')} · failed"
             )
@@ -380,8 +383,12 @@ class MasticApp(App[None]):
             self._set_operation_busy(False, name)
             return
         except Exception:
+            if workspace_generation != self._workspace_generation:
+                return
             self._set_operation_busy(False, name)
             raise
+        if workspace_generation != self._workspace_generation:
+            return
         self.notify(
             f"{name}: complete"
             + (" · Supervisor started" if result.supervisor_started else ""),
@@ -418,6 +425,7 @@ class MasticApp(App[None]):
         self.set_focus(self.query_one("#operation-submit", Button))
 
     def show_view(self, name: str) -> None:
+        self._workspace_generation += 1
         self.selected_operation = None
         self.pending_parameters = None
         self.query_one("#operation-form", Vertical).styles.display = "none"
@@ -456,23 +464,27 @@ class MasticApp(App[None]):
     async def _preview_operation(
         self, operation: Operation, parameters: Mapping[str, object]
     ) -> None:
+        workspace_generation = self._workspace_generation
         self._set_operation_busy(True, operation.name)
         try:
             preview = await asyncio.to_thread(
                 self.dispatcher.preview, OperationRequest(operation.name, parameters)
             )
         except ApplicationError as error:
-            actions = "\n".join(f"  → {action}" for action in error.next_actions)
-            body = f"{error.code}\n\n{error.message}"
-            if actions:
-                body += f"\n\nNext actions\n{actions}"
+            if workspace_generation != self._workspace_generation:
+                return
+            body = self._render_application_error(error)
             self.query_one("#view-body", Static).update(body)
             self.notify(error.message, title="Preview failed", severity="error")
             self._set_operation_busy(False, operation.name)
             return
         except Exception:
+            if workspace_generation != self._workspace_generation:
+                return
             self._set_operation_busy(False, operation.name)
             raise
+        if workspace_generation != self._workspace_generation:
+            return
         pending = dict(parameters)
         fingerprint = preview.value.get("preview_fingerprint")
         if isinstance(fingerprint, str):
@@ -670,7 +682,7 @@ class MasticApp(App[None]):
             "runtimes": ("Runtime Installations", "runtime.list"),
             "models": ("Models", "model.list"),
             "operations": ("Durable operations", "operation.list"),
-            "application_targets": (
+            "application-targets": (
                 "Application Configuration Targets",
                 "application-target.list",
             ),
@@ -683,11 +695,7 @@ class MasticApp(App[None]):
                 result = self.dispatcher.execute(OperationRequest(operation))
                 body = self._render_result(result.value)
             except ApplicationError as error:
-                body = f"{error.code}\n\n{error.message}"
-                if error.next_actions:
-                    body += "\n\nNext actions\n" + "\n".join(
-                        f"  → {action}" for action in error.next_actions
-                    )
+                body = self._render_application_error(error)
             return title, body
         return name.replace("-", " ").title(), "No data."
 
@@ -721,6 +729,16 @@ class MasticApp(App[None]):
             f"Gateway route\n{service.route or service.name}\n\n"
             f"Pressure policy\n{'📌 Pinned · never auto-stopped' if service.pinned else 'LRU idle eviction allowed'}"
         )
+
+    @classmethod
+    def _render_application_error(cls, error: ApplicationError) -> str:
+        body = f"{error.code}\n\n{error.message}"
+        if error.details:
+            body += f"\n\nDetails\n{cls._render_result(error.details)}"
+        if error.next_actions:
+            actions = "\n".join(f"  → {action}" for action in error.next_actions)
+            body += f"\n\nNext actions\n{actions}"
+        return body
 
     @classmethod
     def _render_result(cls, value: Mapping[str, object]) -> str:

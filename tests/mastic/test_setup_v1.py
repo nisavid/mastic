@@ -12,6 +12,8 @@ from mastic.application.setup import (
     SetupResolver,
     SetupPreflight,
     SetupRequest,
+    SetupIntent,
+    NoValidatedFitError,
     StepState,
     _fingerprint,
 )
@@ -91,6 +93,45 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(native.capacity_profile, "native-context")
         self.assertEqual(native.context_window, 262_144)
         self.assertEqual(native.service_options["max_concurrent"], 3)
+
+    def test_phase_one_intents_select_a_provisional_capacity_policy(self) -> None:
+        capacities = (
+            CapacityProfile("balanced", "Balanced", 131_072, 6, 1, 1, "Balanced"),
+            CapacityProfile("deep", "Deep", 262_144, 3, 1, 1, "Deep"),
+            CapacityProfile("responsive", "Responsive", 65_536, 7, 1, 1, "Responsive"),
+        )
+        resolver = SetupResolver(
+            (self.workstation,),
+            capacity_profiles=capacities,
+            intent_capacity_profiles={
+                SetupIntent.BALANCED: "balanced",
+                SetupIntent.DEEP: "deep",
+                SetupIntent.RESPONSIVE: "responsive",
+            },
+        )
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+
+        balanced = resolver.resolve(facts, SetupRequest())
+        deep = resolver.resolve(facts, SetupRequest(intent=SetupIntent.DEEP))
+        responsive = resolver.resolve(
+            facts, SetupRequest(intent=SetupIntent.RESPONSIVE)
+        )
+
+        self.assertEqual(balanced.intent, SetupIntent.BALANCED)
+        self.assertEqual(balanced.capacity_profile.name, "balanced")
+        self.assertEqual(deep.capacity_profile.name, "deep")
+        self.assertEqual(responsive.capacity_profile.name, "responsive")
+
+    def test_no_recommended_fit_is_a_typed_no_mutation_outcome(self) -> None:
+        undersized = SetupPreflight("darwin", "arm64", GIB, GIB, True)
+
+        with self.assertRaises(NoValidatedFitError) as raised:
+            self.resolver.resolve(undersized)
+
+        outcome = raised.exception.outcome
+        self.assertEqual(outcome.state, "no_validated_fit")
+        self.assertIn("memory", outcome.limiting_evidence)
+        self.assertTrue(outcome.remediation)
 
     def test_selected_application_target_context_cannot_exceed_service_capacity(
         self,
@@ -270,7 +311,9 @@ class SetupV1Tests(unittest.TestCase):
             online=True,
         )
 
-        with self.assertRaisesRegex(ValueError, "no recommended setup profile fits"):
+        with self.assertRaisesRegex(
+            NoValidatedFitError, "No validated setup profile fits"
+        ):
             self.resolver.resolve(undersized)
 
         exact = self.resolver.resolve(
@@ -292,18 +335,14 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         canary = resolved.steps[-1]
-        self.assertEqual(canary.id, "gateway.contract.codex")
-        self.assertEqual(
-            dict(canary.inputs),
-            {
-                "target": "codex",
-                "profile": "coding",
-                "service": "coding",
-                "route": "coding",
-                "endpoint": "http://127.0.0.1:8766/v1",
-                "request": "Respond with exactly: mastic gateway contract ok",
-            },
-        )
+        self.assertEqual(canary.id, "application.canary.codex")
+        self.assertEqual(canary.inputs["target"], "codex")
+        self.assertEqual(canary.inputs["profile"], "coding")
+        self.assertEqual(canary.inputs["service"], "coding")
+        self.assertEqual(canary.inputs["route"], "coding")
+        self.assertEqual(canary.inputs["endpoint"], "http://127.0.0.1:8766/v1")
+        self.assertFalse(canary.inputs["skip"])
+        self.assertEqual(len(str(canary.inputs["dependency_fingerprint"])), 64)
 
     def test_selected_hindsight_target_has_its_own_resumable_canary_step(self) -> None:
         exact = replace(
@@ -318,19 +357,15 @@ class SetupV1Tests(unittest.TestCase):
         )
 
         canary = resolved.steps[-1]
-        self.assertEqual(canary.id, "gateway.contract.hindsight")
-        self.assertEqual(
-            dict(canary.inputs),
-            {
-                "target": "hindsight",
-                "configuration_profile": "project-memory",
-                "profile": "retain",
-                "service": "coding",
-                "route": "coding",
-                "endpoint": "http://127.0.0.1:8766/v1",
-                "request": "Respond with exactly: mastic gateway contract ok",
-            },
-        )
+        self.assertEqual(canary.id, "application.canary.hindsight")
+        self.assertEqual(canary.inputs["target"], "hindsight")
+        self.assertEqual(canary.inputs["configuration_profile"], "project-memory")
+        self.assertEqual(canary.inputs["profile"], "retain")
+        self.assertEqual(canary.inputs["service"], "coding")
+        self.assertEqual(canary.inputs["route"], "coding")
+        self.assertEqual(canary.inputs["endpoint"], "http://127.0.0.1:8766/v1")
+        self.assertFalse(canary.inputs["skip"])
+        self.assertEqual(len(str(canary.inputs["dependency_fingerprint"])), 64)
 
     def test_service_identity_and_options_are_exact_immutable_preview_inputs(
         self,
@@ -500,10 +535,88 @@ class SetupV1Tests(unittest.TestCase):
 
         self.assertNotIn("model.install", executed)
         self.assertEqual(
-            executed[-2:], ["gateway.contract.codex", "gateway.contract.hindsight"]
+            executed[-2:],
+            ["application.canary.codex", "application.canary.hindsight"],
         )
-        self.assertEqual(result.evidence[-1].step_id, "gateway.contract.hindsight")
+        self.assertEqual(result.evidence[-1].step_id, "application.canary.hindsight")
         self.assertTrue(result.complete)
+
+    def test_explicitly_skipped_canary_is_terminal_and_never_executes(self) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+        resolved = self.resolver.resolve(
+            facts,
+            SetupRequest(skip_canaries=("hindsight",)),
+        )
+        hindsight = next(
+            step for step in resolved.steps if step.id == "application.canary.hindsight"
+        )
+        executed: list[str] = []
+
+        result = self.resolver.apply(
+            resolved,
+            lambda step: executed.append(step.id) or SetupEvidence.complete(step),
+        )
+
+        self.assertEqual(hindsight.state, StepState.SKIPPED)
+        self.assertNotIn(hindsight.id, executed)
+        evidence = next(
+            item for item in result.evidence if item.step_id == hindsight.id
+        )
+        self.assertEqual(evidence.state, StepState.SKIPPED)
+        self.assertTrue(result.complete)
+
+    def test_skip_canaries_must_be_unique_selected_targets(self) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+
+        with self.assertRaisesRegex(ValueError, "skip_canaries must be unique"):
+            self.resolver.resolve(
+                facts,
+                SetupRequest(skip_canaries=("codex", "codex")),
+            )
+        with self.assertRaisesRegex(
+            ValueError, "selected Application Configuration Targets"
+        ):
+            self.resolver.resolve(
+                facts,
+                SetupRequest(
+                    selection=replace(
+                        self.workstation.selection,
+                        application_targets=("codex",),
+                        application_target_options={},
+                    ),
+                    skip_canaries=("hindsight",),
+                ),
+            )
+
+    def test_canary_evidence_is_invalidated_by_runtime_and_target_inputs(self) -> None:
+        facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
+        initial = self.resolver.resolve(facts)
+        initial_canary = next(
+            step for step in initial.steps if step.id == "application.canary.codex"
+        )
+        evidence = SetupEvidence.complete(initial_canary)
+        changed = replace(
+            self.workstation.selection,
+            model_revision="3" * 40,
+            application_target_options={
+                "codex": {
+                    "sampling_profiles": {"coding": {"temperature": 0.2, "top_p": 0.9}}
+                },
+                "hindsight": {"profile": "default"},
+            },
+        )
+
+        resolved = self.resolver.resolve(
+            facts,
+            SetupRequest(selection=changed),
+            evidence=(evidence,),
+        )
+        changed_canary = next(
+            step for step in resolved.steps if step.id == "application.canary.codex"
+        )
+
+        self.assertEqual(changed_canary.state, StepState.READY)
+        self.assertNotEqual(changed_canary.fingerprint, initial_canary.fingerprint)
 
     def test_changed_supervisor_protocol_invalidates_old_activation_evidence(
         self,
@@ -597,6 +710,22 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(resolved.retained_paths, inventory.shared_cache_paths)
         self.assertEqual(resolved.retained_settings, inventory.unrelated_settings)
         self.assertIn("coding", resolved.references)
+
+    def test_removal_includes_only_owned_applications_and_lists_adopted_apps(
+        self,
+    ) -> None:
+        resolved = self.resolver.resolve_removal(
+            RemovalInventory(
+                owned_applications=("hindsight",),
+                retained_applications=("codex",),
+            )
+        )
+
+        self.assertEqual(
+            tuple(step.id for step in resolved.steps), ("application.remove",)
+        )
+        self.assertEqual(resolved.steps[0].inputs["applications"], ("hindsight",))
+        self.assertEqual(resolved.retained_settings, ("codex",))
 
     def test_removal_execution_is_independent_of_setup_execution(self) -> None:
         resolved = self.resolver.resolve_removal(

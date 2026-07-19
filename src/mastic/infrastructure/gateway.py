@@ -10,6 +10,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -72,9 +73,15 @@ class GatewayRouteResolver(Protocol):
 class GatewayActivity(Protocol):
     """Track in-flight work so pressure policy never evicts a busy service."""
 
-    def begin(self, service: str) -> bool: ...
+    def admit(self, route: GatewayRoute) -> GatewayAdmission: ...
 
     def end(self, service: str) -> None: ...
+
+
+class GatewayAdmission(StrEnum):
+    ACCEPTED = "accepted"
+    BUSY = "busy"
+    UNAVAILABLE = "unavailable"
 
 
 class _UpstreamStreamingResponse(StreamingResponse):
@@ -155,7 +162,7 @@ def create_gateway(
         lambda: httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=10.0,
-                read=None,
+                read=upstream_response_timeout,
                 write=30.0,
                 pool=5.0,
             ),
@@ -355,8 +362,19 @@ def create_gateway(
                 parameter="model",
             )
 
-        admitted = activity is None or activity.begin(service)
-        if not admitted:
+        admission = (
+            GatewayAdmission.ACCEPTED if activity is None else activity.admit(route)
+        )
+        if admission is GatewayAdmission.UNAVAILABLE:
+            return _error_response(
+                503,
+                "service_unavailable",
+                f"Inference Service {service!r} changed while the request was being admitted.",
+                action=f"Run mastic service inspect {service} and retry.",
+                parameter="model",
+                retryable=True,
+            )
+        if admission is GatewayAdmission.BUSY:
             return _error_response(
                 429,
                 "service_busy",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from ipaddress import ip_address
+import math
 from pathlib import Path
 import re
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from mastic.domain.resources import (
     ModelRevision,
     ResourceName,
     RuntimeFamily,
+    validate_runtime_installation_id,
 )
 
 
@@ -131,6 +133,10 @@ def _gateway(raw: Mapping[str, object]) -> GatewaySettings:
 def _runtimes(raw: Mapping[str, object]) -> dict[str, ConfiguredRuntime]:
     result = {}
     for installation_id, value in raw.items():
+        try:
+            validate_runtime_installation_id(installation_id)
+        except ValueError as error:
+            raise ConfigSchemaError(str(error)) from error
         table = _table(value, f"runtime {installation_id!r}")
         _reject_unknown(
             f"runtime {installation_id!r}",
@@ -448,10 +454,12 @@ def _safe_sampling_name(value: str) -> bool:
 
 
 def _option_value(value: object) -> bool:
-    if type(value) in {str, int, float, bool}:
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) in {str, int, bool}:
         return True
     return isinstance(value, list) and all(
-        type(item) in {str, int, float, bool} for item in value
+        type(item) in {str, int, float, bool} and _option_value(item) for item in value
     )
 
 

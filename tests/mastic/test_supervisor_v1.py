@@ -15,6 +15,7 @@ from mastic.infrastructure.supervisor_v1 import (
     PreparedLaunch,
     ProcessIdentity,
     Supervisor,
+    _launch_identity,
 )
 
 
@@ -101,6 +102,7 @@ class FakeProcess:
     pid: int
     running: bool = True
     ignores_terminate: bool = False
+    ignores_kill: bool = False
     terminate_calls: int = 0
     kill_calls: int = 0
 
@@ -114,7 +116,8 @@ class FakeProcess:
 
     def kill(self):
         self.kill_calls += 1
-        self.running = False
+        if not self.ignores_kill:
+            self.running = False
 
     def wait(self, timeout):
         if self.running:
@@ -390,6 +393,21 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(self.gateway.running)
         self.assertIn(("drain", 2), self.gateway.calls)
 
+    def test_unconfirmed_termination_preserves_owned_process_identity(self) -> None:
+        transition = self.supervisor.start_service("coding")
+        process = self.processes.processes[transition.run.pid]  # type: ignore[index]
+        process.ignores_terminate = True
+        process.ignores_kill = True
+
+        with self.assertRaisesRegex(RuntimeError, "could not be confirmed stopped"):
+            self.supervisor.stop_service("coding")
+
+        current = self.supervisor.service_status("coding")
+        self.assertEqual(current.state, ServiceRunState.STOPPING)
+        latest = self.store.snapshot_items[-1]
+        self.assertEqual(latest["process_identity"], f"birth-{process.pid}")
+        self.assertTrue(process.running)
+
     def test_supervisor_restart_restores_gateway_admission_for_ready_service(self):
         self.supervisor.start_service("coding")
 
@@ -452,6 +470,28 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(removed.run.state, ServiceRunState.STOPPED)
         self.assertNotIn("coding", self.gateway.routes)
 
+    def test_service_removal_drops_the_public_route_not_the_resource_name(self) -> None:
+        service = _service("worker", route="coding-route")
+        supervisor = Supervisor(
+            desired_state=FakeDesiredState(service),
+            runtime_supply=self.runtime,
+            state_store=self.store,
+            gateway=self.gateway,
+            processes=self.processes,
+            probe=self.probe,
+            memory_pressure=self.pressure,
+            clock=self.clock,
+            readiness_timeout=3,
+            drain_timeout=2,
+            terminate_timeout=1,
+        )
+        supervisor.start_service("worker")
+
+        supervisor.remove_service("worker")
+
+        self.assertNotIn("coding-route", self.gateway.routes)
+        self.assertIn(("remove_route", "coding-route"), self.gateway.calls)
+
     def test_one_service_failure_does_not_stop_another(self) -> None:
         coding = self.supervisor.start_service("coding")
         memory = self.supervisor.start_service("memory")
@@ -469,6 +509,11 @@ class SupervisorTests(unittest.TestCase):
         process = FakeProcess(1234)
         self.processes.processes[1234] = process
         self.probe.identities[1234] = identity
+        launch = self.runtime.prepare_launch(
+            self.desired.service("coding"),
+            "127.0.0.1",
+            49199,  # type: ignore[arg-type]
+        )
         self.store.snapshot_items.append(
             {
                 "kind": "service_run",
@@ -479,6 +524,7 @@ class SupervisorTests(unittest.TestCase):
                 "state": "ready",
                 "pid": 1234,
                 "process_identity": "birth-1234",
+                "launch_identity": _launch_identity(launch),
                 "upstream_port": 49199,
             }
         )
@@ -494,6 +540,47 @@ class SupervisorTests(unittest.TestCase):
         other.start()
         self.assertEqual(self.processes.attached, [])
         self.assertTrue(process.running)
+
+    def test_recovery_requires_current_launch_identity_and_live_readiness(self) -> None:
+        identity = ProcessIdentity(1234, "birth-1234")
+        process = FakeProcess(1234)
+        self.processes.processes[1234] = process
+        self.probe.identities[1234] = identity
+        service = self.desired.service("coding")
+        launch = self.runtime.prepare_launch(service, "127.0.0.1", 49199)  # type: ignore[arg-type]
+        snapshot = {
+            "kind": "service_run",
+            "id": "coding/run-old",
+            "version": 1,
+            "service": "coding",
+            "run_id": "run-old",
+            "state": "ready",
+            "pid": 1234,
+            "process_identity": "birth-1234",
+            "launch_identity": _launch_identity(launch),
+            "upstream_port": 49199,
+        }
+        self.store.snapshot_items.append(snapshot)
+        self.probe.ready = False
+
+        not_ready = self._new_supervisor().start()
+
+        self.assertEqual(not_ready.runs, ())
+        self.assertFalse(process.running)
+
+        replacement = FakeProcess(2345)
+        self.processes.processes[2345] = replacement
+        replacement_identity = ProcessIdentity(2345, "birth-2345")
+        self.probe.identities[2345] = replacement_identity
+        self.probe.ready = True
+        self.runtime.revision = "v2"
+        changed = {**snapshot, "pid": 2345, "process_identity": "birth-2345"}
+        self.store.snapshot_items.append(changed)
+
+        mismatched = self._new_supervisor().start()
+
+        self.assertEqual(mismatched.runs, ())
+        self.assertFalse(replacement.running)
 
     def test_critical_pressure_stops_lru_idle_unpinned_but_never_pinned_or_busy(self):
         self.desired.items["pinned"] = _service("pinned", pinned=True)

@@ -133,10 +133,14 @@ class HostIntegrationTests(unittest.TestCase):
             log.write_text("one\ntwo\nthree\n")
             log.chmod(0o600)
             (root / "unsafe.log").symlink_to(log)
+            oversized = root / "oversized.log"
+            oversized.write_text("x" * 64)
+            oversized.chmod(0o600)
 
-            rows = PrivateLogReader(root, max_lines=2).read("service", "coding")
+            rows = PrivateLogReader(root, max_lines=2, max_bytes=32).read("service")
 
             self.assertEqual([row["message"] for row in rows], ["two", "three"])
+            self.assertEqual({row["source"] for row in rows}, {"coding.log"})
             self.assertTrue(stat.S_ISREG(log.stat().st_mode))
 
     def test_metrics_adapter_filters_scope_and_resource(self) -> None:

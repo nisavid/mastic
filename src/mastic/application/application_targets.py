@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from enum import StrEnum
 import math
 import re
 from types import MappingProxyType
@@ -16,6 +17,25 @@ _REQUIRED_SAMPLING_PROFILES = MappingProxyType(
         "hindsight": frozenset({"verification", "retain", "reflect", "consolidation"}),
     }
 )
+
+
+class ApplicationTargetDriftIntent(StrEnum):
+    """One explicit response to externally changed managed state."""
+
+    REAPPLY = "reapply"
+    ADOPT = "adopt"
+    RELINQUISH = "relinquish"
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationTargetDriftOutcome:
+    """Application-neutral effects of one completed drift resolution."""
+
+    application_target: str
+    drift_resolution: ApplicationTargetDriftIntent
+    external_configuration_changed: bool
+    desired_state_changed: bool
+    ownership_changed: bool
 
 
 @dataclass(frozen=True, slots=True)

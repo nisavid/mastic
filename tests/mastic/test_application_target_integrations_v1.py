@@ -44,10 +44,26 @@ class ApplicationTargetOperationPort(ProductionApplicationTargetOperationPort):
         record=lambda _name, _value: None,
         transition=lambda _name: nullcontext(),
     ) -> None:
+        class RequestCanary:
+            def run(
+                self,
+                target,
+                configuration,
+                _settings,
+                *,
+                profile,
+            ):
+                return request(
+                    target,
+                    configuration.gateway_endpoint,
+                    configuration.service_name,
+                    {"profile": profile},
+                )
+
         super().__init__(
             adapter,
             configuration,
-            request=request,
+            canary=RequestCanary(),
             settings=settings,
             record=record,
             transition=transition,
@@ -55,6 +71,99 @@ class ApplicationTargetOperationPort(ProductionApplicationTargetOperationPort):
 
 
 class ClientIntegrationV1Tests(unittest.TestCase):
+    def test_hindsight_adopts_valid_nonsecret_drift_without_rewriting_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.hindsight_configuration)
+            original_manifest = adapter.manifest_path.read_bytes()
+            adopted_profiles = dict(self.hindsight_configuration.sampling_profiles)
+            adopted_profiles["reflect"] = replace(
+                adopted_profiles["reflect"], temperature=0.4
+            )
+            adopted_configuration = replace(
+                self.hindsight_configuration,
+                sampling_profiles=adopted_profiles,
+                target=HindsightTargetOptions(provider="openai", max_concurrent=2),
+            )
+            adapter.apply(adopted_configuration)
+            adapter.manifest_path.write_bytes(original_manifest)
+            external_before = adapter.config_path.read_bytes()
+
+            observed = adapter.observe_drift(self.hindsight_configuration)
+            result = adapter.adopt_drift(adopted_configuration)
+
+            self.assertEqual(observed["max_concurrent"], 2)
+            self.assertEqual(
+                observed["sampling_profiles"]["reflect"]["temperature"], 0.4
+            )
+            self.assertTrue(result.changed)
+            self.assertEqual(adapter.config_path.read_bytes(), external_before)
+            self.assertEqual(adapter.inspect()["state"], "healthy")
+
+    def test_hindsight_adoption_blocks_secret_drift_without_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            credential = root / "gateway.token"
+            token = "a" * 64
+            credential.write_text(token, encoding="utf-8")
+            credential.chmod(0o600)
+            configuration = replace(
+                self.hindsight_configuration, credential_path=credential
+            )
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env", root / "owner.json", root / "backup"
+            )
+            adapter.apply(configuration)
+            profile = adapter.config_path.read_text(encoding="utf-8").replace(
+                f"HINDSIGHT_API_LLM_API_KEY={token}",
+                "HINDSIGHT_API_LLM_API_KEY=external-secret",
+            )
+            adapter.config_path.write_text(profile, encoding="utf-8")
+
+            with self.assertRaises(ApplicationTargetIntegrationConflict) as blocked:
+                adapter.adopt_drift(configuration)
+
+            self.assertNotIn("external-secret", str(blocked.exception))
+            self.assertNotIn("external-secret", repr(adapter.inspect()))
+
+    def test_codex_adopts_valid_drift_and_relinquishes_without_external_writes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = CodexApplicationTargetIntegration(
+                root / "config.toml", root / "owner.json", root / "backup"
+            )
+            adapter.apply(self.codex_configuration)
+            original_manifest = adapter.manifest_path.read_bytes()
+            adopted_configuration = replace(
+                self.codex_configuration,
+                service_name="review",
+                context_window=16384,
+            )
+            adapter.apply(adopted_configuration)
+            adapter.manifest_path.write_bytes(original_manifest)
+            external_before = adapter.config_path.read_bytes()
+
+            observed = adapter.observe_drift(self.codex_configuration)
+            adopted = adapter.adopt_drift(adopted_configuration)
+            relinquished = adapter.relinquish()
+
+            self.assertEqual(
+                observed,
+                {"service": "review", "context_window": 16384, "provider": "mlx-local"},
+            )
+            self.assertTrue(adopted.changed)
+            self.assertTrue(relinquished.changed)
+            self.assertEqual(adapter.config_path.read_bytes(), external_before)
+            self.assertFalse(adapter.manifest_path.exists())
+            self.assertFalse(adapter.backup_path.exists())
+
     def setUp(self) -> None:
         self.codex_configuration = ApplicationTargetConfiguration(
             gateway_endpoint="http://127.0.0.1:8766/v1",
@@ -117,6 +226,44 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             },
             target=HindsightTargetOptions(provider="openai", max_concurrent=1),
         )
+
+    def test_hindsight_provider_is_the_exact_phase_one_provider(self) -> None:
+        for provider in (
+            "anthropic",
+            "openai\nINJECTED=yes",
+            "openai\rbad",
+            "openai=bad",
+        ):
+            with self.subTest(provider=provider), self.assertRaises(ValueError):
+                HindsightTargetOptions(provider=provider)
+
+    def test_application_target_context_is_a_positive_integer(self) -> None:
+        for value in (False, True, 0, -1, "32768", 3.5):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "context_window must be positive"),
+            ):
+                ApplicationTargetConfiguration(
+                    gateway_endpoint="http://127.0.0.1:8766/v1",
+                    service_name="coding",
+                    context_window=value,  # type: ignore[arg-type]
+                )
+
+    def test_application_target_endpoint_is_the_public_v1_root(self) -> None:
+        for endpoint in (
+            "http://127.0.0.1:8766",
+            "http://127.0.0.1:8766/",
+            "http://127.0.0.1:8766/private/v1",
+            "http://127.0.0.1:8766/v1/responses",
+        ):
+            with (
+                self.subTest(endpoint=endpoint),
+                self.assertRaisesRegex(ValueError, "public /v1 root"),
+            ):
+                ApplicationTargetConfiguration(
+                    gateway_endpoint=endpoint,
+                    service_name="coding",
+                )
 
     def _codex_with_model(
         self, model: CodexModelMetadata, **changes: object
@@ -362,6 +509,33 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                         ],
                     )
 
+    def test_codex_inspect_reports_malformed_config_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = CodexApplicationTargetIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "backup",
+                catalog_path=root / "catalog.json",
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+            adapter.apply(
+                self._codex_with_model(
+                    CodexModelMetadata("coding", "Coding", "Local model")
+                )
+            )
+            adapter.config_path.write_text(
+                "[broken\nsecret = 'do not expose'", encoding="utf-8"
+            )
+
+            report = adapter.inspect()
+
+            self.assertEqual(report["state"], "malformed")
+            self.assertEqual(report["detail"], "Codex config TOML is malformed.")
+            self.assertNotIn("do not expose", repr(report))
+
     def test_legacy_codex_migration_restores_preexisting_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -429,6 +603,44 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             self.assertEqual(config.read_text(), 'unrelated = "keep"\n')
             self.assertEqual(catalog.read_text(), '{"models":[{"slug":"user"}]}\n')
             self.assertFalse((root / "owner.json").exists())
+
+    def test_codex_records_pending_ownership_before_replacing_managed_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "owner.json"
+            observed: list[tuple[str, str]] = []
+
+            def replace(path: Path, payload: bytes) -> None:
+                ownership = json.loads(manifest.read_text(encoding="utf-8"))
+                observed.append((path.name, ownership["state"]))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+
+            adapter = CodexApplicationTargetIntegration(
+                root / "config.toml",
+                manifest,
+                root / "config.backup",
+                replace=replace,
+                catalog_path=root / "catalog.json",
+                catalog_backup_path=root / "catalog.backup",
+                bundled_catalog=self._bundled_codex_catalog,
+                catalog_validator=lambda _path: None,
+            )
+
+            adapter.apply(
+                self._codex_with_model(
+                    CodexModelMetadata("coding", "Coding", "Local model")
+                )
+            )
+
+            self.assertTrue(observed)
+            self.assertEqual({state for _path, state in observed}, {"pending"})
+            self.assertEqual(
+                json.loads(manifest.read_text(encoding="utf-8"))["state"],
+                "applied",
+            )
 
     def test_codex_catalog_remove_failure_rolls_back_all_owned_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

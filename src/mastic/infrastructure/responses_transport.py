@@ -215,6 +215,8 @@ async def _iter_adapted_sse_after_first(
                 return
     except ResponseAdaptationTooLarge:
         yield _response_adaptation_failed_sse(state)
+    except (httpx.HTTPError, OSError, TimeoutError):
+        yield _response_transport_failed_sse(state)
 
 
 def _adapt_sse_frame(
@@ -241,12 +243,30 @@ async def _empty_chunks() -> AsyncIterator[bytes]:
 
 
 def _response_adaptation_failed_sse(state: _ResponsesSSEState) -> bytes:
+    return _response_failed_sse(
+        state,
+        code="response_adaptation_too_large",
+        message="MASTIC could not safely adapt the upstream response.",
+    )
+
+
+def _response_transport_failed_sse(state: _ResponsesSSEState) -> bytes:
+    return _response_failed_sse(
+        state,
+        code="upstream_unavailable",
+        message="The upstream service stopped while returning the response.",
+    )
+
+
+def _response_failed_sse(
+    state: _ResponsesSSEState, *, code: str, message: str
+) -> bytes:
     if state.response_id is None:
         event_name = "error"
         payload: dict[str, Any] = {
             "type": "error",
-            "code": "response_adaptation_too_large",
-            "message": "MASTIC could not safely adapt the upstream response.",
+            "code": code,
+            "message": message,
             "param": None,
             "sequence_number": state.next_sequence_number,
         }
@@ -262,7 +282,7 @@ def _response_adaptation_failed_sse(state: _ResponsesSSEState) -> bytes:
                 "completed_at": None,
                 "error": {
                     "code": "server_error",
-                    "message": "MASTIC could not safely adapt the upstream response.",
+                    "message": message,
                 },
                 "incomplete_details": None,
                 "instructions": None,

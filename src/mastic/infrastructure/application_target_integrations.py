@@ -96,13 +96,9 @@ class LocalApplicationTargetIntegrationFactory:
             else OwnershipDiscoveryPolicy.STRICT
         )
         ownership = self._ownership.discover(policy, integration="hindsight")
-        desired_profile = (
-            parameters.get("profile")
-            if operation == "application-target.configure"
-            else settings.profile
-            if settings is not None
-            else None
-        )
+        desired_profile = settings.profile if settings is not None else None
+        if operation == "application-target.configure":
+            desired_profile = parameters.get("profile") or desired_profile
         owned = self._ownership.reconcile_hindsight(
             desired_profile,
             ownership,

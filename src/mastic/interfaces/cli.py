@@ -130,8 +130,6 @@ def _add_command(
         parameters = _coerce_parameters(operation.parameters, parameters)
         _validate_accepted(operation.parameters, parameters)
         if operation.confirmation:
-            if not confirmed and (json_output or json_lines):
-                raise typer.Abort()
             try:
                 preview = dispatcher.preview(
                     OperationRequest(operation.name, parameters)
@@ -142,6 +140,14 @@ def _add_command(
             fingerprint = preview.value.get("preview_fingerprint")
             if isinstance(fingerprint, str):
                 parameters["preview_fingerprint"] = fingerprint
+            if not confirmed and (json_output or json_lines):
+                _render_result(
+                    preview,
+                    json_output=json_output,
+                    json_lines=json_lines,
+                    plain=False,
+                )
+                return
             if not confirmed:
                 Console().print("[bold]Resolved mutation preview[/bold]")
                 Console().print(Pretty(_plain(preview.value), expand_all=True))
@@ -309,6 +315,26 @@ def _invoke(
     except ApplicationError as error:
         _render_error(error, json_output=json_output or json_lines)
         raise typer.Exit(1) from error
+    _render_result(
+        result,
+        json_output=json_output,
+        json_lines=json_lines,
+        plain=plain,
+    )
+    if operation in {"check", "service.check"} and result.value.get("state") not in {
+        "ok",
+        "ready",
+    }:
+        raise typer.Exit(1)
+
+
+def _render_result(
+    result,
+    *,
+    json_output: bool,
+    json_lines: bool,
+    plain: bool,
+) -> None:
     if json_lines:
         for event in result.events:
             typer.echo(json.dumps(_plain(event), sort_keys=True, separators=(",", ":")))
@@ -331,23 +357,21 @@ def _invoke(
         typer.echo(json.dumps(_plain(result.value), sort_keys=True, indent=2))
     else:
         Console().print(Pretty(_plain(result.value), expand_all=True))
-    if operation in {"check", "service.check"} and result.value.get("state") not in {
-        "ok",
-        "ready",
-    }:
-        raise typer.Exit(1)
 
 
 def _render_error(error: ApplicationError, *, json_output: bool) -> None:
     if json_output:
+        rendered_error: dict[str, object] = {
+            "code": error.code,
+            "message": error.message,
+            "next_actions": list(error.next_actions),
+        }
+        if error.details:
+            rendered_error["details"] = _plain(error.details)
         typer.echo(
             json.dumps(
                 {
-                    "error": {
-                        "code": error.code,
-                        "message": error.message,
-                        "next_actions": list(error.next_actions),
-                    },
+                    "error": rendered_error,
                     "schema_version": 1,
                 },
                 sort_keys=True,
@@ -356,6 +380,11 @@ def _render_error(error: ApplicationError, *, json_output: bool) -> None:
         )
         return
     typer.echo(f"Error: {error.message}", err=True)
+    for name, value in error.details.items():
+        rendered = (
+            value if isinstance(value, str | int | float | bool) else _plain(value)
+        )
+        typer.echo(f"{name}: {rendered}", err=True)
     for action in error.next_actions:
         typer.echo(f"Next: {action}", err=True)
 

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -423,6 +424,17 @@ route = "coding"
                 {"resource": "optiq-old", "channel": "custom"},
             )
 
+    def test_runtime_rollback_requires_an_explicit_target(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        current = manager._installation("optiq-current", "optiq", "0.3", "tested")
+        previous = manager._installation("optiq-previous", "optiq", "0.2", "tested")
+        RuntimeSupplyPort.persist_runtime(self.store, current)
+        RuntimeSupplyPort.persist_runtime(self.store, previous)
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        with self.assertRaisesRegex(SupplyPortError, "target is required"):
+            port.execute("runtime.rollback", {"resource": "optiq-current"})
+
     def test_runtime_update_and_rollback_reject_incompatible_service_options(self):
         manager = FakeRuntimeManager(self.root / "runtimes")
         current = RuntimeInstallation(
@@ -665,6 +677,32 @@ route = "coding"
             installed["installation_name"],
         )
 
+    def test_model_install_rejects_an_existing_name_for_another_revision(self) -> None:
+        supply = FakeModelSupply(self.root / "cache")
+        port = ModelSupplyPort(supply, self.store, self.security)
+        installed = port.execute(
+            "model.install",
+            {
+                "repository": "mlx-community/Qwen",
+                "revision": "main",
+                "alias": "coding",
+            },
+        )
+
+        with self.assertRaisesRegex(SupplyPortError, "installation name collision"):
+            port.execute(
+                "model.install",
+                {
+                    "repository": "mlx-community/Qwen",
+                    "revision": "next",
+                    "alias": "coding",
+                    "installation": installed["installation_name"],
+                },
+            )
+
+        desired = self.store.load().value.models[installed["installation_name"]]
+        self.assertEqual(desired.revision.revision, _SHA_A)
+
     def test_model_adopt_verifies_exact_external_bytes_and_never_owns_them(
         self,
     ) -> None:
@@ -724,6 +762,51 @@ route = "coding"
             [],
         )
         self.assertTrue(snapshot.exists())
+
+    def test_adopted_model_persists_and_revalidates_snapshot_identity(self) -> None:
+        snapshot = self.root / "external-snapshot"
+        snapshot.mkdir()
+        config_path = snapshot / "config.json"
+        payload = b'{"model_type":"qwen"}'
+        config_path.write_bytes(payload)
+        files = (
+            RepositoryFile(
+                "config.json",
+                len(payload),
+                lfs_sha256=hashlib.sha256(payload).hexdigest(),
+            ),
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(repository_files=files), self.security_state
+        )
+        port = ModelSupplyPort(
+            FakeModelSupply(self.root / "cache"), self.store, security
+        )
+        observation = inspect_adopted_snapshot(snapshot)
+        adopted = port.execute(
+            "model.adopt",
+            {
+                "repository": "owner/external-model",
+                "revision": _SHA_A,
+                "path": str(snapshot),
+                "alias": "external",
+                "snapshot_fingerprint": observation.fingerprint,
+            },
+        )
+
+        assessment = security.require("owner/external-model", _SHA_A)
+        self.assertEqual(
+            assessment["adopted_snapshot"]["fingerprint"], observation.fingerprint
+        )
+        metadata = config_path.stat()
+        os.utime(
+            config_path,
+            ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000),
+        )
+
+        installation = port._supplied_installation(adopted["installation_name"])
+        with self.assertRaisesRegex(SupplyPortError, "identity changed"):
+            port.verify_installation(installation)
 
     def test_model_adopt_rejects_changed_missing_and_unsafe_snapshots(self) -> None:
         snapshot = self.root / "external-snapshot"
@@ -1099,16 +1182,37 @@ route = "coding"
                 },
             )
 
+        with self.assertRaisesRegex(SupplyPortError, "referenced"):
+            port.execute(
+                "model.cache.move",
+                {
+                    "resource": _SHA_A,
+                    "destination": str(self.root / "new-cache"),
+                    "cleanup_source": True,
+                    "confirmed": True,
+                },
+            )
+
+        unreferenced = CachedRevision(
+            "other/model@" + _SHA_B,
+            "other/model",
+            _SHA_B,
+            self.root / "cache" / _SHA_B,
+            33,
+            "local-observed",
+            True,
+        )
+        supply.revisions += (unreferenced,)
         result = port.execute(
             "model.cache.move",
             {
-                "resource": _SHA_A,
+                "resource": _SHA_B,
                 "destination": str(self.root / "new-cache"),
                 "cleanup_source": True,
                 "confirmed": True,
             },
         )
-        self.assertEqual(result["preview"]["bytes_to_copy"], 17)
+        self.assertEqual(result["preview"]["bytes_to_copy"], 33)
         self.assertEqual(len(mover.executed), 1)
         self.assertTrue(mover.executed[0].cleanup_source)
 
@@ -1137,4 +1241,3 @@ route = "coding"
 
 if __name__ == "__main__":
     unittest.main()
-    (ExactRevisionModelSecurity,)

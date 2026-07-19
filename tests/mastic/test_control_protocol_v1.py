@@ -21,6 +21,83 @@ from mastic.infrastructure.control_protocol import (
 
 
 class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_idle_connection_is_closed_with_a_stable_timeout(self) -> None:
+        async def handle(request, emit_progress):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(
+                Path(directory) / "masticd.sock",
+                handle,
+                connection_idle_timeout=0.01,
+            )
+            await server.start()
+            self.addAsyncCleanup(server.close)
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            self.addAsyncCleanup(self._close_writer, writer)
+
+            response = await asyncio.wait_for(read_message(reader), timeout=1)
+            self.assertEqual(response["error"]["code"], "connection_timeout")
+
+    async def test_rejects_connections_above_the_configured_bound(self) -> None:
+        async def handle(request, emit_progress):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(
+                Path(directory) / "masticd.sock",
+                handle,
+                connection_idle_timeout=1,
+                max_connections=1,
+            )
+            await server.start()
+            self.addAsyncCleanup(server.close)
+            first_reader, first_writer = await asyncio.open_unix_connection(
+                server.socket_path
+            )
+            self.addAsyncCleanup(self._close_writer, first_writer)
+            await asyncio.sleep(0)
+            second_reader, second_writer = await asyncio.open_unix_connection(
+                server.socket_path
+            )
+            self.addAsyncCleanup(self._close_writer, second_writer)
+
+            response = await asyncio.wait_for(read_message(second_reader), timeout=1)
+            self.assertEqual(response["error"]["code"], "connection_limit")
+            del first_reader
+
+    async def test_idle_timeout_does_not_interrupt_an_active_operation(self) -> None:
+        async def handle(request, emit_progress):
+            await asyncio.sleep(0.03)
+            return {"state": "ready"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(
+                Path(directory) / "masticd.sock",
+                handle,
+                connection_idle_timeout=0.01,
+            )
+            await server.start()
+            self.addAsyncCleanup(server.close)
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            self.addAsyncCleanup(self._close_writer, writer)
+            await self._negotiate(reader, writer)
+            await write_message(
+                writer,
+                {
+                    "type": "request",
+                    "protocol": PROTOCOL_NAME,
+                    "version": PROTOCOL_VERSION,
+                    "request_id": "req-long",
+                    "operation_id": "op-long",
+                    "operation": "service.start",
+                    "parameters": {},
+                },
+            )
+
+            result = await asyncio.wait_for(read_message(reader), timeout=1)
+            self.assertEqual(result["type"], "result")
+
     async def test_client_negotiates_and_receives_progress_then_result(self) -> None:
         async def handle(request, emit_progress):
             self.assertEqual(request.operation, "service.start")

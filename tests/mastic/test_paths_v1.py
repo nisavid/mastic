@@ -6,6 +6,24 @@ from mastic.infrastructure.paths_v1 import resolve_paths
 
 
 class PathsV1Tests(unittest.TestCase):
+    def test_rejects_blank_or_relative_path_inputs(self) -> None:
+        for key in (
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "MASTIC_CONFIG_DIR",
+            "MASTIC_STATE_DIR",
+            "MASTIC_DATA_DIR",
+            "MASTIC_LOG_DIR",
+        ):
+            for value in ("", "relative/path"):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesRegex(ValueError, "absolute"):
+                        resolve_paths(home=Path("/home/user"), environment={key: value})
+
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            resolve_paths(home=Path("relative/home"), environment={})
+
     def test_defaults_are_product_named_and_keep_desired_operational_and_logs_separate(
         self,
     ) -> None:

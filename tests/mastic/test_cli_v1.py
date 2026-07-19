@@ -13,6 +13,7 @@ class _Dispatcher:
     def __init__(self) -> None:
         self.requests = []
         self.previews = []
+        self.results = {}
 
     def preview(self, request):
         self.previews.append(request)
@@ -32,13 +33,17 @@ class _Dispatcher:
                 "repair_required",
                 "OptiQ capability conflict",
                 next_actions=("mastic runtime update optiq",),
+                details={"completion": "partial", "readiness": "pending"},
             )
         return OperationResult(
             request.name,
-            {
-                "operation": request.name,
-                "parameters": dict(request.parameters),
-            },
+            self.results.get(
+                request.name,
+                {
+                    "operation": request.name,
+                    "parameters": dict(request.parameters),
+                },
+            ),
         )
 
 
@@ -154,13 +159,15 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(self.dispatcher.requests[-1].name, "model.cache.evict")
         self.assertTrue(self.dispatcher.requests[-1].parameters["confirmed"])
 
-    def test_destructive_command_requires_prompt_or_explicit_yes(self) -> None:
-        denied = self.runner.invoke(
+    def test_machine_mutation_without_yes_emits_preview_without_execution(self) -> None:
+        preview = self.runner.invoke(
             self.app,
             ["model", "cache", "evict", "qwen-exact", "--json"],
         )
 
-        self.assertNotEqual(denied.exit_code, 0)
+        self.assertEqual(preview.exit_code, 0, preview.output)
+        self.assertEqual(json.loads(preview.output)["state"], "review_required")
+        self.assertEqual(self.dispatcher.previews[-1].name, "model.cache.evict")
         self.assertFalse(self.dispatcher.requests)
 
     def test_interactive_mutation_renders_backend_preview_before_confirmation(
@@ -191,10 +198,14 @@ class CliV1Tests(unittest.TestCase):
             self.app,
             [
                 "setup",
+                "--intent",
+                "deep",
                 "--service-options",
                 '{"kv_config":"kv_config.json","mtp":true}',
                 "--application-targets",
                 '["codex","hindsight"]',
+                "--skip-canaries",
+                '["hindsight"]',
                 "--yes",
                 "--json",
             ],
@@ -203,21 +214,27 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.dispatcher.previews[-1].name, "setup")
         parameters = self.dispatcher.requests[-1].parameters
+        self.assertEqual(parameters["intent"], "deep")
         self.assertEqual(parameters["service_options"]["kv_config"], "kv_config.json")
         self.assertTrue(parameters["service_options"]["mtp"])
         self.assertEqual(parameters["application_targets"], ["codex", "hindsight"])
+        self.assertEqual(parameters["skip_canaries"], ["hindsight"])
         self.assertEqual(parameters["preview_fingerprint"], "sha256:exact")
 
-    def test_setup_help_explains_capacity_choices_and_concurrency(self) -> None:
+    def test_setup_help_leads_with_intent_and_keeps_advanced_capacity(self) -> None:
         result = self.runner.invoke(self.app, ["setup", "--help"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         output = strip_ansi(result.output)
+        self.assertIn("--intent", output)
+        self.assertIn("responsive", output)
+        self.assertIn("deep", output)
         self.assertIn("--capacity", output)
         self.assertIn("balanced", output)
         self.assertIn("long-context", output)
         self.assertIn("native-context", output)
         normalized = " ".join(output.replace("│", " ").split())
+        self.assertIn("advanced", normalized.casefold())
         self.assertIn("simultaneous inference requests", normalized)
         self.assertIn("prefill at 4-7 requests", normalized)
         self.assertIn("8 permits", normalized)
@@ -231,14 +248,60 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("matching durable setup completion evidence", output)
         self.assertIn("not inferred as ready", output)
 
+    def test_json_setup_preserves_independent_degraded_readiness(self) -> None:
+        self.dispatcher.results["setup"] = {
+            "state": "complete",
+            "complete": True,
+            "completion": "complete",
+            "readiness": "degraded",
+            "application_target_readiness": {
+                "codex": "degraded",
+                "hindsight": "ready",
+            },
+            "performance_profile": {
+                "id": "phase1-qwen36-optiq-apple-silicon",
+                "version": 1,
+                "status": "provisional",
+            },
+        }
+
+        result = self.runner.invoke(self.app, ["setup", "--yes", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            json.loads(result.output),
+            {
+                "application_target_readiness": {
+                    "codex": "degraded",
+                    "hindsight": "ready",
+                },
+                "complete": True,
+                "completion": "complete",
+                "performance_profile": {
+                    "id": "phase1-qwen36-optiq-apple-silicon",
+                    "status": "provisional",
+                    "version": 1,
+                },
+                "readiness": "degraded",
+                "state": "complete",
+            },
+        )
+
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])
         self.assertEqual(machine.exit_code, 1)
-        self.assertEqual(json.loads(machine.output)["error"]["code"], "repair_required")
+        machine_error = json.loads(machine.output)["error"]
+        self.assertEqual(machine_error["code"], "repair_required")
+        self.assertEqual(
+            machine_error["details"],
+            {"completion": "partial", "readiness": "pending"},
+        )
 
         human = self.runner.invoke(self.app, ["doctor"])
         self.assertEqual(human.exit_code, 1)
         self.assertIn("OptiQ capability conflict", human.output)
+        self.assertIn("completion: partial", human.output)
+        self.assertIn("readiness: pending", human.output)
         self.assertIn("mastic runtime update optiq", human.output)
 
     def test_check_returns_nonzero_when_the_reported_state_is_unhealthy(self) -> None:

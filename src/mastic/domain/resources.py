@@ -11,7 +11,15 @@ from typing import Mapping
 
 _RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _INSTALLATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]*\Z")
-_IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}\Z")
+_IMMUTABLE_REVISION = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
+
+
+def validate_runtime_installation_id(value: object) -> str:
+    """Return one path-safe Runtime Installation identity."""
+
+    if not isinstance(value, str) or _INSTALLATION_ID.fullmatch(value) is None:
+        raise ValueError("runtime installation ID contains unsafe characters")
+    return value
 
 
 class ResourceName(str):
@@ -53,8 +61,7 @@ class RuntimeInstallation:
     capabilities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        if _INSTALLATION_ID.fullmatch(self.installation_id) is None:
-            raise ValueError("runtime installation ID contains unsafe characters")
+        validate_runtime_installation_id(self.installation_id)
         if not self.version or not self.provenance:
             raise ValueError("runtime version and provenance are required")
 
@@ -121,8 +128,7 @@ class InferenceService:
     options: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if _INSTALLATION_ID.fullmatch(self.runtime_installation) is None:
-            raise ValueError("runtime installation ID contains unsafe characters")
+        validate_runtime_installation_id(self.runtime_installation)
         object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
 
 

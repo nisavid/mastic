@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import selectors
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib.resources import files
@@ -128,7 +130,7 @@ class SubprocessRuntimeProbe:
             "import importlib.metadata; "
             f"print(importlib.metadata.version({definition.package!r}))",
         )
-        version_result = self._execute(version_command)
+        version_result = self._execute(version_command, output_name="version")
         if getattr(version_result, "returncode", 1) != 0:
             raise RuntimeSupplyError(
                 f"runtime version probe failed: {self._detail(version_result)}"
@@ -155,7 +157,7 @@ class SubprocessRuntimeProbe:
             *launcher_relative[1:],
             "--help",
         )
-        help_result = self._execute(help_command)
+        help_result = self._execute(help_command, output_name="help")
         if getattr(help_result, "returncode", 1) != 0:
             raise RuntimeSupplyError(
                 f"runtime help probe failed: {self._detail(help_result)}"
@@ -165,8 +167,6 @@ class SubprocessRuntimeProbe:
             + "\n"
             + str(getattr(help_result, "stderr", ""))
         )
-        if len(output.encode()) > self._max_output:
-            raise RuntimeSupplyError("runtime help probe output exceeds the size limit")
         return RuntimeProbeResult(
             version=version,
             launcher_relative=launcher_relative,
@@ -175,9 +175,14 @@ class SubprocessRuntimeProbe:
             ),
         )
 
-    def _execute(self, argv: tuple[str, ...]):
+    def _execute(self, argv: tuple[str, ...], *, output_name: str):
+        if self._run is subprocess.run:
+            try:
+                return self._execute_bounded(argv, output_name=output_name)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RuntimeSupplyError("runtime probe command failed") from error
         try:
-            return self._run(
+            result = self._run(
                 argv,
                 check=False,
                 shell=False,
@@ -187,6 +192,73 @@ class SubprocessRuntimeProbe:
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeSupplyError("runtime probe command failed") from error
+        output_size = len(str(getattr(result, "stdout", "")).encode()) + len(
+            str(getattr(result, "stderr", "")).encode()
+        )
+        if output_size > self._max_output:
+            raise RuntimeSupplyError(
+                f"runtime {output_name} probe output exceeds the size limit"
+            )
+        return result
+
+    def _execute_bounded(
+        self, argv: tuple[str, ...], *, output_name: str
+    ) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen(  # noqa: S603 - exact argv, never a shell.
+            argv,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        selector = selectors.DefaultSelector()
+        streams = {"stdout": process.stdout, "stderr": process.stderr}
+        chunks: dict[str, bytearray] = {
+            "stdout": bytearray(),
+            "stderr": bytearray(),
+        }
+        deadline = time.monotonic() + self._timeout
+        try:
+            for name, stream in streams.items():
+                if stream is not None:
+                    selector.register(stream, selectors.EVENT_READ, name)
+            total = 0
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, self._timeout)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired(argv, self._timeout)
+                for key, _mask in events:
+                    chunk = key.fileobj.read(
+                        min(64 * 1024, self._max_output - total + 1)
+                    )
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    chunks[str(key.data)].extend(chunk)
+                    total += len(chunk)
+                    if total > self._max_output:
+                        raise RuntimeSupplyError(
+                            f"runtime {output_name} probe output exceeds the size limit"
+                        )
+            returncode = process.wait(max(0.0, deadline - time.monotonic()))
+        except Exception:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
+        finally:
+            selector.close()
+            for stream in streams.values():
+                if stream is not None:
+                    stream.close()
+        return subprocess.CompletedProcess(
+            argv,
+            returncode,
+            stdout=chunks["stdout"].decode(errors="replace"),
+            stderr=chunks["stderr"].decode(errors="replace"),
+        )
 
     @staticmethod
     def _detail(result: object) -> str:
@@ -281,6 +353,12 @@ class RuntimeLaunchBuilder:
         options: Mapping[str, object] | None = None,
     ) -> tuple[str, ...]:
         definition = self._catalogue.definition(installation.runtime)
+        reserved = {"model", "host", "port"} & set(options or ())
+        if reserved:
+            raise ValueError(
+                "reserved launch option cannot be overridden: "
+                + ", ".join(sorted(reserved))
+            )
         requested: dict[str, object] = {
             "model": model,
             "host": host,

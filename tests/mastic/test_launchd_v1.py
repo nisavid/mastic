@@ -6,11 +6,14 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from mastic.infrastructure.launchd import (
     CommandResult,
     LaunchdAdapter,
     LaunchdConfigurationError,
+    SubprocessCommandRunner,
 )
 
 
@@ -44,6 +47,15 @@ class LaunchdAdapterTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @patch("mastic.infrastructure.launchd.subprocess.run")
+    def test_system_launchctl_commands_have_a_finite_timeout(self, run) -> None:
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        result = SubprocessCommandRunner().run(("launchctl", "print", "gui/501/x"))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(run.call_args.kwargs["timeout"], 30.0)
 
     def test_preview_is_an_inactive_per_user_launch_agent(self) -> None:
         preview = plistlib.loads(self.adapter.preview())

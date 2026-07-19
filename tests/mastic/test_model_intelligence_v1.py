@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mastic.infrastructure.model_intelligence import (
     CacheObservation,
@@ -146,6 +147,17 @@ class ModelIntelligenceTests(unittest.TestCase):
 
         self.assertEqual(projections, {5_737_807_872})
 
+    def test_quantized_kv_bytes_round_partial_bytes_up(self) -> None:
+        self.assertEqual(
+            optiq_kv_bytes(
+                {"head_dim": 1, "num_key_value_heads": 1},
+                [{"layer_idx": 0, "bits": 3}],
+                context_tokens=1,
+                concurrency=1,
+            ),
+            1,
+        )
+
     def test_machine_inventory_reports_unified_memory_capacity(self) -> None:
         inventory = PsutilMachineInventory(
             lambda: SimpleNamespace(total=64 * GIB, available=48 * GIB)
@@ -190,6 +202,53 @@ class ModelIntelligenceTests(unittest.TestCase):
         self.assertEqual(fetcher.calls[0][1], SHA)
         self.assertEqual(fetcher.calls[0][3], 2048)
         self.assertEqual(payload.path, "config.json")
+
+    def test_hugging_face_adapter_rejects_an_untrusted_intermediate_redirect(
+        self,
+    ) -> None:
+        class Response:
+            status_code = 302
+            url = "https://huggingface.co/acme/Model/resolve/" + SHA + "/config.json"
+            headers = {"location": "https://attacker.example/metadata"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def raise_for_status(self):
+                return None
+
+            def iter_bytes(self):
+                yield b"{}"
+
+        class Client:
+            calls = []
+
+            def __init__(self, **_options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def stream(self, _method, url, **_options):
+                self.calls.append(url)
+                return Response()
+
+        repository = HuggingFaceModelRepository(
+            api=_HubApi(), cache_inventory=_CacheInventory()
+        )
+
+        with (
+            patch("httpx.Client", Client),
+            self.assertRaisesRegex(ModelIntelligenceError, "untrusted URL"),
+        ):
+            repository.fetch_metadata("acme/Model", SHA, "config.json", max_bytes=32)
+        self.assertEqual(len(Client.calls), 1)
 
     def test_inspects_arbitrary_repository_at_an_exact_revision_before_install(
         self,
@@ -571,4 +630,3 @@ class ModelIntelligenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-    (HuggingFaceModelRepository,)

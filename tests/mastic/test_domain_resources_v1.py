@@ -66,6 +66,36 @@ class ResourceIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "immutable commit SHA"):
             ModelRevision("org/model", "main")
 
+    def test_model_revisions_require_exact_sha_lengths(self) -> None:
+        for length in (40, 64):
+            with self.subTest(length=length):
+                self.assertEqual(
+                    ModelRevision("org/model", "a" * length).revision,
+                    "a" * length,
+                )
+        for length in (39, 41, 63, 65):
+            with (
+                self.subTest(length=length),
+                self.assertRaisesRegex(ValueError, "immutable commit SHA"),
+            ):
+                ModelRevision("org/model", "a" * length)
+
+    def test_runtime_installation_ids_reject_non_strings_consistently(self) -> None:
+        with self.assertRaisesRegex(ValueError, "installation ID"):
+            RuntimeInstallation(
+                installation_id=None,  # type: ignore[arg-type]
+                family=RuntimeFamily.OPTIQ,
+                version="0.3.3",
+                provenance="tested",
+            )
+        with self.assertRaisesRegex(ValueError, "installation ID"):
+            InferenceService(
+                name=ResourceName("coding"),
+                model_alias=ResourceName("coding-model"),
+                runtime_installation=None,  # type: ignore[arg-type]
+                route=ResourceName("coding"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

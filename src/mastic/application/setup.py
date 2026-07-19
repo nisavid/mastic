@@ -28,12 +28,49 @@ from mastic.domain.resources import ActivationPolicy, ResourceName
 
 # Bump whenever setup must recycle masticd to load a changed control/schema contract.
 SUPERVISOR_SETUP_PROTOCOL = 2
+PHASE1_PERFORMANCE_PROFILE_ID = "phase1-qwen36-optiq-apple-silicon"
+PHASE1_PERFORMANCE_PROFILE_VERSION = 1
+PHASE1_APPLICATION_VERSIONS = MappingProxyType(
+    {"codex": "0.144.1", "hindsight": "0.8.4"}
+)
 
 
 class StepState(StrEnum):
     READY = "ready"
     COMPLETE = "complete"
+    SKIPPED = "skipped"
     BLOCKED = "blocked"
+
+
+class SetupIntent(StrEnum):
+    BALANCED = "balanced"
+    DEEP = "deep"
+    RESPONSIVE = "responsive"
+
+
+class Completion(StrEnum):
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+
+
+class Readiness(StrEnum):
+    PENDING = "pending"
+    UNVERIFIED = "unverified"
+    READY = "ready"
+    DEGRADED = "degraded"
+
+
+@dataclass(frozen=True, slots=True)
+class NoValidatedFit:
+    state: str
+    limiting_evidence: str
+    remediation: tuple[str, ...]
+
+
+class NoValidatedFitError(ValueError):
+    def __init__(self, outcome: NoValidatedFit) -> None:
+        super().__init__(outcome.limiting_evidence)
+        self.outcome = outcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +80,7 @@ class SetupPreflight:
     memory_bytes: int
     disk_free_bytes: int
     online: bool
+    os_version: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,8 +336,19 @@ class RecommendedProfile:
 class SetupRequest:
     selection: ExactSetupSelection | None = None
     capacity_profile: str | None = None
+    intent: SetupIntent = SetupIntent.BALANCED
+    skip_canaries: tuple[str, ...] = ()
     noninteractive: bool = False
     confirmed: bool = False
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "intent", SetupIntent(self.intent))
+        except (TypeError, ValueError) as error:
+            raise ValueError("intent must be balanced, deep, or responsive") from error
+        object.__setattr__(self, "skip_canaries", tuple(self.skip_canaries))
+        if len(set(self.skip_canaries)) != len(self.skip_canaries):
+            raise ValueError("skip_canaries must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +376,10 @@ class SetupEvidence:
     def complete(cls, step: MutationStep, detail: str = "") -> SetupEvidence:
         return cls(step.id, step.fingerprint, StepState.COMPLETE, detail)
 
+    @classmethod
+    def skipped(cls, step: MutationStep, detail: str = "") -> SetupEvidence:
+        return cls(step.id, step.fingerprint, StepState.SKIPPED, detail)
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedSetup:
@@ -337,6 +390,7 @@ class ResolvedSetup:
     offline: bool
     editable: bool
     confirmation_required: bool
+    intent: SetupIntent = SetupIntent.BALANCED
     capacity_profile: CapacityProfile | None = None
 
 
@@ -389,6 +443,8 @@ class RemovalInventory:
     shared_cache_bytes: int = 0
     references: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     unrelated_settings: tuple[str, ...] = ()
+    owned_applications: tuple[str, ...] = ()
+    retained_applications: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "running_services", tuple(self.running_services))
@@ -400,6 +456,10 @@ class RemovalInventory:
         object.__setattr__(self, "product_owned_paths", tuple(self.product_owned_paths))
         object.__setattr__(self, "shared_cache_paths", tuple(self.shared_cache_paths))
         object.__setattr__(self, "unrelated_settings", tuple(self.unrelated_settings))
+        object.__setattr__(self, "owned_applications", tuple(self.owned_applications))
+        object.__setattr__(
+            self, "retained_applications", tuple(self.retained_applications)
+        )
         object.__setattr__(
             self,
             "references",
@@ -432,6 +492,7 @@ class SetupResolver:
         *,
         capacity_profiles: Sequence[CapacityProfile] = (),
         default_capacity_profile: str | None = None,
+        intent_capacity_profiles: Mapping[SetupIntent, str] | None = None,
     ) -> None:
         profiles = tuple(
             sorted(recommended_profiles, key=lambda item: item.minimum_memory_bytes)
@@ -450,6 +511,24 @@ class SetupResolver:
         ):
             raise ValueError("default capacity profile must name a configured profile")
         self._default_capacity_profile = default_capacity_profile
+        self._intent_capacity_profiles = {
+            SetupIntent(intent): capacity
+            for intent, capacity in (intent_capacity_profiles or {}).items()
+        }
+        if self._intent_capacity_profiles:
+            missing = set(SetupIntent) - set(self._intent_capacity_profiles)
+            if missing:
+                raise ValueError(
+                    "intent capacity policy requires balanced, deep, and responsive"
+                )
+            unknown = set(self._intent_capacity_profiles.values()) - set(
+                self._capacity_profiles
+            )
+            if unknown:
+                raise ValueError(
+                    "intent capacity policy names unknown capacity profiles: "
+                    + ", ".join(sorted(unknown))
+                )
 
     @property
     def capacity_profiles(self) -> tuple[CapacityProfile, ...]:
@@ -478,7 +557,9 @@ class SetupResolver:
             selection = request.selection
         capacity_name = request.capacity_profile
         if capacity_name is None and request.selection is None:
-            capacity_name = self._default_capacity_profile
+            capacity_name = self._intent_capacity_profiles.get(
+                request.intent, self._default_capacity_profile
+            )
         capacity = self._capacity_profiles.get(capacity_name) if capacity_name else None
         if capacity_name and capacity is None:
             accepted = ", ".join(self._capacity_profiles) or "none"
@@ -488,6 +569,14 @@ class SetupResolver:
         if capacity is not None:
             selection = self._apply_capacity(selection, capacity)
         selection.validate_exact()
+        unknown_skips = sorted(
+            set(request.skip_canaries) - set(selection.application_targets)
+        )
+        if unknown_skips:
+            raise ValueError(
+                "skip_canaries must name selected Application Configuration Targets: "
+                + ", ".join(unknown_skips)
+            )
         if request.noninteractive:
             if request.selection is None:
                 raise ValueError(
@@ -496,23 +585,22 @@ class SetupResolver:
             if not request.confirmed:
                 raise ValueError("noninteractive setup must be explicitly confirmed")
 
-        evidence_by_step = {item.step_id: item for item in evidence}
-        specifications = self._setup_specs(preflight, selection)
+        evidence_by_step = {(item.step_id, item.fingerprint): item for item in evidence}
+        specifications = self._setup_specs(preflight, selection, request.skip_canaries)
         steps: list[MutationStep] = []
         dependency_blocked = False
         for step_id, title, inputs, network_required in specifications:
             fingerprint = _fingerprint(step_id, inputs)
-            prior = evidence_by_step.get(step_id)
-            if (
-                prior is not None
-                and prior.state is StepState.COMPLETE
-                and prior.fingerprint == fingerprint
-            ):
+            prior = evidence_by_step.get((step_id, fingerprint))
+            if prior is not None and prior.state is StepState.COMPLETE:
                 state = StepState.COMPLETE
                 reason = "Matching completion evidence is present."
             elif dependency_blocked:
                 state = StepState.BLOCKED
                 reason = "A required earlier step is blocked."
+            elif inputs.get("skip") is True:
+                state = StepState.SKIPPED
+                reason = "The user explicitly skipped this required application canary."
             elif network_required and not preflight.online:
                 state = StepState.BLOCKED
                 reason = "The machine is offline and no matching completion evidence is present."
@@ -534,6 +622,7 @@ class SetupResolver:
             offline=not preflight.online,
             editable=not request.noninteractive,
             confirmation_required=not request.confirmed,
+            intent=request.intent,
             capacity_profile=capacity,
         )
 
@@ -631,7 +720,16 @@ class SetupResolver:
                 prior = SetupEvidence.complete(step)
                 known[(step.id, step.fingerprint)] = prior
                 ordered.append(prior)
-            if prior is not None and prior.state is StepState.COMPLETE:
+            if step.state is StepState.SKIPPED and prior is None:
+                prior = SetupEvidence.skipped(step, step.reason)
+                known[(step.id, step.fingerprint)] = prior
+                ordered.append(prior)
+                if record is not None:
+                    record(prior)
+            if prior is not None and prior.state in {
+                StepState.COMPLETE,
+                StepState.SKIPPED,
+            }:
                 continue
             if step.state is StepState.BLOCKED:
                 raise MutationExecutionError(step.id, step.reason)
@@ -683,6 +781,14 @@ class SetupResolver:
                     {"application_targets": inventory.application_target_integrations},
                 )
             )
+        if inventory.owned_applications:
+            specs.append(
+                (
+                    "application.remove",
+                    "Remove only MASTIC-owned application installations",
+                    {"applications": inventory.owned_applications},
+                )
+            )
         if inventory.product_owned_paths:
             specs.append(
                 (
@@ -703,7 +809,10 @@ class SetupResolver:
             freed_bytes_estimate=inventory.product_owned_bytes,
             retained_paths=inventory.shared_cache_paths,
             retained_bytes_estimate=inventory.shared_cache_bytes,
-            retained_settings=inventory.unrelated_settings,
+            retained_settings=(
+                *inventory.unrelated_settings,
+                *inventory.retained_applications,
+            ),
         )
 
     def apply_removal(
@@ -727,12 +836,21 @@ class SetupResolver:
         ]
         if not eligible:
             smallest = self._profiles[0]
-            raise ValueError(
-                "no recommended setup profile fits this Mac: "
-                f"{smallest.name!r} requires at least "
-                f"{smallest.minimum_memory_bytes} bytes of memory and "
-                f"{smallest.minimum_disk_bytes} bytes of free disk; "
-                "use exact setup to select a smaller exact model"
+            raise NoValidatedFitError(
+                NoValidatedFit(
+                    state="no_validated_fit",
+                    limiting_evidence=(
+                        "No validated setup profile fits this Mac: "
+                        f"{smallest.name!r} requires at least "
+                        f"{smallest.minimum_memory_bytes} bytes of memory and "
+                        f"{smallest.minimum_disk_bytes} bytes of free disk."
+                    ),
+                    remediation=(
+                        "free the required disk capacity and retry",
+                        "use a compatible Mac with sufficient memory",
+                        "review an explicit Exploratory or Known Risk route separately",
+                    ),
+                )
             )
         return eligible[-1]
 
@@ -745,7 +863,9 @@ class SetupResolver:
 
     @staticmethod
     def _setup_specs(
-        preflight: SetupPreflight, selection: ExactSetupSelection
+        preflight: SetupPreflight,
+        selection: ExactSetupSelection,
+        skip_canaries: Sequence[str] = (),
     ) -> tuple[tuple[str, str, Mapping[str, object], bool], ...]:
         common = {
             "runtime": selection.runtime_name,
@@ -766,6 +886,7 @@ class SetupResolver:
                 {
                     "platform": preflight.platform,
                     "machine": preflight.machine,
+                    "os_version": preflight.os_version,
                     "memory_bytes": preflight.memory_bytes,
                     "disk_free_bytes": preflight.disk_free_bytes,
                 },
@@ -813,6 +934,19 @@ class SetupResolver:
             ),
             ("service.configure", "Configure the Inference Service", common, False),
             (
+                "application.install",
+                "Install or adopt exact official applications",
+                {
+                    "application_targets": selection.application_targets,
+                    "versions": {
+                        target: PHASE1_APPLICATION_VERSIONS[target]
+                        for target in selection.application_targets
+                    },
+                    "artifact_manifest": "application-targets-v1/manifest.json",
+                },
+                False,
+            ),
+            (
                 "application-target.configure",
                 "Configure selected Application Configuration Targets",
                 {
@@ -827,11 +961,12 @@ class SetupResolver:
             ("service.start", "Start the Inference Service", common, False),
         )
         canaries: list[tuple[str, str, Mapping[str, object], bool]] = []
+        dependency_fingerprint = _verification_dependency_fingerprint(selection)
         if "codex" in selection.application_targets:
             canaries.append(
                 (
-                    "gateway.contract.codex",
-                    "Validate the Codex managed Gateway contract",
+                    "application.canary.codex",
+                    "Validate Codex through its managed application configuration",
                     {
                         "target": "codex",
                         "profile": "coding",
@@ -839,6 +974,12 @@ class SetupResolver:
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
                         "request": "Respond with exactly: mastic gateway contract ok",
+                        "dependency_fingerprint": dependency_fingerprint,
+                        "performance_profile": {
+                            "id": PHASE1_PERFORMANCE_PROFILE_ID,
+                            "version": PHASE1_PERFORMANCE_PROFILE_VERSION,
+                        },
+                        "skip": "codex" in skip_canaries,
                     },
                     False,
                 )
@@ -847,8 +988,8 @@ class SetupResolver:
             hindsight_options = selection.application_target_options["hindsight"]
             canaries.append(
                 (
-                    "gateway.contract.hindsight",
-                    "Validate the Hindsight managed Gateway contract",
+                    "application.canary.hindsight",
+                    "Validate Hindsight with disposable isolated application state",
                     {
                         "target": "hindsight",
                         "configuration_profile": hindsight_options["profile"],
@@ -857,6 +998,12 @@ class SetupResolver:
                         "route": selection.service_route,
                         "endpoint": selection.gateway_endpoint,
                         "request": "Respond with exactly: mastic gateway contract ok",
+                        "dependency_fingerprint": dependency_fingerprint,
+                        "performance_profile": {
+                            "id": PHASE1_PERFORMANCE_PROFILE_ID,
+                            "version": PHASE1_PERFORMANCE_PROFILE_VERSION,
+                        },
+                        "skip": "hindsight" in skip_canaries,
                     },
                     False,
                 )
@@ -871,10 +1018,34 @@ class SetupResolver:
                     "endpoint": selection.gateway_endpoint,
                     "model": selection.service_route,
                     "request": "Respond with exactly: mastic ready",
+                    "dependency_fingerprint": dependency_fingerprint,
                 },
                 False,
             ),
         )
+
+
+def _verification_dependency_fingerprint(
+    selection: ExactSetupSelection,
+) -> str:
+    return _fingerprint(
+        "verification.dependencies",
+        {
+            "runtime": selection.runtime_name,
+            "runtime_version": selection.runtime_version,
+            "runtime_lock_digest": selection.runtime_lock_digest,
+            "model_repository": selection.model_repository,
+            "model_revision": selection.model_revision,
+            "service": selection.service_name,
+            "route": selection.service_route,
+            "activation": selection.activation,
+            "service_options": selection.service_options,
+            "context_window": selection.context_window,
+            "gateway_endpoint": selection.gateway_endpoint,
+            "application_targets": selection.application_targets,
+            "application_target_options": selection.application_target_options,
+        },
+    )
 
 
 def _fingerprint(step_id: str, inputs: Mapping[str, object]) -> str:

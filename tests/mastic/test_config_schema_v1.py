@@ -173,6 +173,33 @@ route = "coding"
                 )
             )
 
+    def test_rejects_unsafe_runtime_installation_ids(self) -> None:
+        unsafe = (
+            VALID
+            + """
+[runtimes."bad id"]
+definition = "optiq"
+version = "0.3.3"
+provenance = "custom"
+root = "/tmp/bad-runtime"
+launcher = ["/tmp/bad-runtime/bin/optiq"]
+capabilities = []
+"""
+        )
+
+        with self.assertRaisesRegex(ConfigSchemaError, "installation ID"):
+            validate_config(tomlkit.parse(unsafe))
+
+    def test_rejects_non_finite_service_option_values(self) -> None:
+        for option in ("ratio = nan", "ratios = [1.0, +inf]"):
+            with (
+                self.subTest(option=option),
+                self.assertRaisesRegex(ConfigSchemaError, "unsupported value"),
+            ):
+                validate_config(
+                    tomlkit.parse(VALID.replace("mtp = true", f"mtp = true\n{option}"))
+                )
+
     def test_adopted_model_requires_an_absolute_external_path(self) -> None:
         adopted = VALID.replace(
             'revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"',
