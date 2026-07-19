@@ -17,6 +17,8 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
+from mastic.application.serialization import to_plain_data
+
 
 class RuntimeSupplyError(ValueError):
     """A runtime supply operation cannot satisfy its contract."""
@@ -679,7 +681,7 @@ def _append_option(argv: list[str], option: OptionDefinition, value: object) -> 
             argv.extend((option.flag, str(item)))
         return
     rendered = (
-        json.dumps(value, sort_keys=True, separators=(",", ":"))
+        json.dumps(to_plain_data(value), sort_keys=True, separators=(",", ":"))
         if isinstance(value, Mapping)
         else str(value)
     )
