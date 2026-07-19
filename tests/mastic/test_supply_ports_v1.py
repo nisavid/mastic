@@ -237,6 +237,7 @@ class FakeCacheMover:
     def __init__(self) -> None:
         self.previews: list[CacheMovePreview] = []
         self.executed: list[CacheMovePreview] = []
+        self.before_cleanup_action = None
 
     def preview(self, revision: CachedRevision, destination: Path) -> CacheMovePreview:
         preview = CacheMovePreview(
@@ -249,7 +250,11 @@ class FakeCacheMover:
         self.previews.append(preview)
         return preview
 
-    def execute(self, preview: CacheMovePreview) -> Path:
+    def execute(self, preview: CacheMovePreview, *, before_cleanup=None) -> Path:
+        if self.before_cleanup_action is not None:
+            self.before_cleanup_action()
+        if preview.cleanup_source and before_cleanup is not None:
+            before_cleanup()
         self.executed.append(preview)
         return preview.destination
 
@@ -677,6 +682,17 @@ route = "coding"
             installed["installation_name"],
         )
 
+    def test_model_port_rejects_non_boolean_flags(self) -> None:
+        port = ModelSupplyPort(
+            FakeModelSupply(self.root / "cache"), self.store, self.security
+        )
+
+        with self.assertRaisesRegex(SupplyPortError, "offline must be a boolean"):
+            port.execute(
+                "model.install",
+                {"repository": "mlx-community/Qwen", "offline": "false"},
+            )
+
     def test_model_install_rejects_an_existing_name_for_another_revision(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
         port = ModelSupplyPort(supply, self.store, self.security)
@@ -807,6 +823,52 @@ route = "coding"
         installation = port._supplied_installation(adopted["installation_name"])
         with self.assertRaisesRegex(SupplyPortError, "identity changed"):
             port.verify_installation(installation)
+
+    def test_adopted_model_rollback_preserves_snapshot_identity_evidence(self) -> None:
+        payload = b"same exact model"
+        files = (
+            RepositoryFile(
+                "weights.bin",
+                len(payload),
+                lfs_sha256=hashlib.sha256(payload).hexdigest(),
+            ),
+        )
+        security = ExactRevisionModelSecurity(
+            FakeModelIntelligence(repository_files=files), self.security_state
+        )
+        port = ModelSupplyPort(
+            FakeModelSupply(self.root / "cache"), self.store, security
+        )
+        installed = []
+        for revision in (_SHA_A, _SHA_B):
+            snapshot = self.root / revision
+            snapshot.mkdir()
+            (snapshot / "weights.bin").write_bytes(payload)
+            observation = inspect_adopted_snapshot(snapshot)
+            installed.append(
+                port.execute(
+                    "model.adopt",
+                    {
+                        "repository": "owner/external-model",
+                        "revision": revision,
+                        "path": str(snapshot),
+                        "alias": "external",
+                        "snapshot_fingerprint": observation.fingerprint,
+                    },
+                )
+            )
+
+        port.execute(
+            "model.rollback",
+            {
+                "resource": "external",
+                "target": installed[0]["installation_name"],
+                "confirmed": True,
+            },
+        )
+
+        assessment = security.require("owner/external-model", _SHA_A)
+        self.assertIn("adopted_snapshot", assessment)
 
     def test_model_adopt_rejects_changed_missing_and_unsafe_snapshots(self) -> None:
         snapshot = self.root / "external-snapshot"
@@ -1099,6 +1161,20 @@ route = "coding"
         self.assertEqual(repaired.revision.commit_sha, _SHA_A)
         self.assertEqual(result["verification"]["status"], "complete")
 
+    def test_model_repair_rejects_missing_cached_revision(self) -> None:
+        supply = FakeModelSupply(self.root / "cache")
+        port = ModelSupplyPort(supply, self.store, self.security)
+        installed = port.execute(
+            "model.install",
+            {"repository": "mlx-community/Qwen", "revision": _SHA_A},
+        )
+        supply.revisions = ()
+
+        with self.assertRaisesRegex(
+            SupplyPortError, "cached Model Revision is missing"
+        ):
+            port.execute("model.repair", {"resource": installed["installation_name"]})
+
     def test_cache_eviction_is_reference_aware_and_requires_confirmation(self) -> None:
         supply = FakeModelSupply(self.root / "cache")
         port = ModelSupplyPort(supply, self.store, self.security)
@@ -1216,6 +1292,42 @@ route = "coding"
         self.assertEqual(len(mover.executed), 1)
         self.assertTrue(mover.executed[0].cleanup_source)
 
+    def test_cache_move_rechecks_references_immediately_before_cleanup(self) -> None:
+        supply = FakeModelSupply(self.root / "cache")
+        mover = FakeCacheMover()
+        port = ModelSupplyPort(supply, self.store, self.security, cache_mover=mover)
+        revision = CachedRevision(
+            "other/model@" + _SHA_B,
+            "other/model",
+            _SHA_B,
+            self.root / "cache" / _SHA_B,
+            33,
+            "local-observed",
+            True,
+        )
+        supply.revisions = (revision,)
+        mover.before_cleanup_action = lambda: port.execute(
+            "model.install",
+            {
+                "repository": "other/model",
+                "revision": _SHA_B,
+                "alias": "late-reference",
+            },
+        )
+
+        with self.assertRaisesRegex(SupplyPortError, "referenced"):
+            port.execute(
+                "model.cache.move",
+                {
+                    "resource": _SHA_B,
+                    "destination": str(self.root / "new-cache"),
+                    "cleanup_source": True,
+                    "confirmed": True,
+                },
+            )
+
+        self.assertEqual(mover.executed, [])
+
     def test_default_cache_mover_content_verifies_before_atomic_publish(self) -> None:
         source = self.root / "source"
         source.mkdir()
@@ -1237,6 +1349,36 @@ route = "coding"
         self.assertEqual(published, destination.resolve())
         self.assertEqual((published / "weights.bin").read_bytes(), b"exact model bytes")
         self.assertTrue(source.exists())
+
+    def test_default_cache_mover_retries_past_an_interrupted_staging_directory(
+        self,
+    ) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        (source / "weights.bin").write_bytes(b"exact model bytes")
+        revision = CachedRevision(
+            "mlx-community/Qwen@" + _SHA_A,
+            "mlx-community/Qwen",
+            _SHA_A,
+            source,
+            17,
+            "local-observed",
+            True,
+        )
+        destination = self.root / "destination"
+        stage = self.root / (
+            ".destination.mastic-staging-"
+            + hashlib.sha256(revision.revision_id.encode()).hexdigest()[:12]
+        )
+        stage.mkdir()
+        (stage / "untrusted").write_text("do not merge")
+
+        published = VerifiedCacheMover().execute(
+            VerifiedCacheMover().preview(revision, destination)
+        )
+
+        self.assertEqual((published / "weights.bin").read_bytes(), b"exact model bytes")
+        self.assertTrue((stage / "untrusted").exists())
 
 
 if __name__ == "__main__":

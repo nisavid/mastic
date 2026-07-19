@@ -17,6 +17,19 @@ from mastic.infrastructure.application_target_integrations import (
 
 
 class NativeApplicationTargetCanaryTests(unittest.TestCase):
+    def test_canary_rejects_profiles_it_does_not_natively_exercise(self) -> None:
+        canary = NativeApplicationTargetCanary(Path("/unused"))
+
+        with self.assertRaises(ApplicationError) as caught:
+            canary.run(
+                "hindsight",
+                ApplicationTargetConfiguration("http://127.0.0.1:8766/v1", "memory"),
+                _settings("hindsight", profile="project"),
+                profile="consolidation",
+            )
+
+        self.assertEqual(caught.exception.code, "application_target_canary_unsupported")
+
     def test_codex_exec_uses_owned_config_and_exact_bounded_output(self) -> None:
         commands = []
 
@@ -91,6 +104,9 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
             def poll(self):
                 self.polls += 1
                 return None if self.polls == 1 else 0
+
+            def wait(self, timeout):
+                return 0
 
         process = Process()
 
@@ -243,6 +259,23 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
             canary._stop_process(process)
 
         self.assertTrue(process.waited)
+
+    def test_hindsight_cleanup_signals_the_group_even_after_leader_exit(self) -> None:
+        class Process:
+            pid = 999_999_999
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout):
+                return 0
+
+        canary = NativeApplicationTargetCanary(Path("/unused"))
+
+        with patch("os.killpg") as kill_group:
+            canary._stop_process(Process())
+
+        kill_group.assert_called_once_with(999_999_999, 15)
 
 
 def _settings(target: str, *, profile: str | None = None) -> ApplicationTargetSettings:

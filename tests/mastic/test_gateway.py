@@ -238,6 +238,37 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(upstream.entered)
         self.assertTrue(upstream.closed)
 
+    def test_profiled_models_lists_only_the_profile_service_and_rejects_unknown_profiles(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [
+                GatewayRoute("coding", "ready", "http://127.0.0.1:49152"),
+                GatewayRoute("vision", "ready", "http://127.0.0.1:49153"),
+            ]
+        )
+        profiles = {
+            ("codex", "coding"): GatewayRequestProfile("coding", {}),
+        }
+        app = create_gateway(
+            resolver,
+            client_factory=FakeUpstreamClient,
+            profile_resolver=lambda target, profile: profiles.get((target, profile)),
+        )
+
+        with TestClient(app) as client:
+            response = client.get(
+                "/application-targets/codex/profiles/coding/v1/models"
+            )
+            missing = client.get(
+                "/application-targets/codex/profiles/missing/v1/models"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.json()["data"]], ["coding"])
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["error"]["code"], "profile_not_found")
+
     def test_chat_and_responses_route_model_field_by_service_name(self) -> None:
         resolver = FakeResolver(
             [

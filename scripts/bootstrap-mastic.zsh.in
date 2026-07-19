@@ -11,6 +11,9 @@ typeset -g MASTIC_WORK_DIR=''
 typeset -g MASTIC_ACTIVE_SWAP_STAGE=''
 typeset -g MASTIC_ACTIVE_SWAP_BACKUP=''
 typeset -g MASTIC_ACTIVE_SWAP_DESTINATION=''
+typeset -gi MASTIC_ACTIVE_SWAP_PID=0
+typeset -ga MASTIC_COMPLETED_SWAPS=()
+typeset -gi MASTIC_BOOTSTRAP_COMMITTED=0
 
 usage() {
   emulate -L zsh
@@ -147,23 +150,74 @@ validate_archive_members() {
 cleanup_bootstrap_state() {
   emulate -L zsh
   setopt no_unset
-  local destination=$MASTIC_ACTIVE_SWAP_DESTINATION
-  local stage=$MASTIC_ACTIVE_SWAP_STAGE
+  local destination=$MASTIC_ACTIVE_SWAP_DESTINATION stage=$MASTIC_ACTIVE_SWAP_STAGE
   local backup=$MASTIC_ACTIVE_SWAP_BACKUP
-  if [[ -n $destination && -n $backup && ! -e $destination && ! -L $destination && ( -e $backup || -L $backup ) ]]; then
-    if ! mv "$backup" "$destination"; then
-      print -ru2 -- "mastic bootstrap: could not restore interrupted destination: $destination"
+  integer index active_recorded=0
+  if (( MASTIC_ACTIVE_SWAP_PID > 0 )); then
+    kill -TERM $MASTIC_ACTIVE_SWAP_PID 2>/dev/null || true
+    wait $MASTIC_ACTIVE_SWAP_PID 2>/dev/null || true
+    MASTIC_ACTIVE_SWAP_PID=0
+  fi
+  index=${#MASTIC_COMPLETED_SWAPS}
+  if (( index >= 2 )) && [[ -n $destination && $MASTIC_COMPLETED_SWAPS[$(( index - 1 ))] == $destination && $MASTIC_COMPLETED_SWAPS[$index] == $backup ]]; then
+    active_recorded=1
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! active_recorded )) && [[ -n $destination ]]; then
+    if [[ -n $backup && ( -e $backup || -L $backup ) ]]; then
+      if [[ -e $destination || -L $destination ]]; then
+        rm -rf -- "$destination" || print -ru2 -- "mastic bootstrap: could not remove interrupted destination: $destination"
+      fi
+      if ! /bin/mv "$backup" "$destination"; then
+        print -ru2 -- "mastic bootstrap: could not restore interrupted destination: $destination"
+      fi
+    elif [[ -n $stage && ! -e $stage && ! -L $stage && ( -e $destination || -L $destination ) ]]; then
+      if ! rm -rf -- "$destination"; then
+        print -ru2 -- "mastic bootstrap: could not remove interrupted destination: $destination"
+      fi
     fi
   fi
   if [[ -n $stage && ( -e $stage || -L $stage ) ]]; then
-    rm -rf -- "$stage"
+    rm -rf -- "$stage" || print -ru2 -- "mastic bootstrap: could not remove interrupted stage: $stage"
   fi
-  if [[ -n $backup && ( -e $backup || -L $backup ) && ( -e $destination || -L $destination ) ]]; then
-    rm -rf -- "$backup"
-  fi
+  index=${#MASTIC_COMPLETED_SWAPS}
+  while (( index >= 2 )); do
+    destination=$MASTIC_COMPLETED_SWAPS[$(( index - 1 ))]
+    backup=$MASTIC_COMPLETED_SWAPS[$index]
+    if (( MASTIC_BOOTSTRAP_COMMITTED )); then
+      if [[ -e $backup || -L $backup ]]; then
+        rm -rf -- "$backup" || print -ru2 -- "mastic bootstrap: could not remove committed backup: $backup"
+      fi
+    else
+      if [[ -e $destination || -L $destination ]]; then
+        rm -rf -- "$destination" || print -ru2 -- "mastic bootstrap: could not remove failed destination: $destination"
+      fi
+      if [[ -e $backup || -L $backup ]]; then
+        if ! /bin/mv "$backup" "$destination"; then
+          print -ru2 -- "mastic bootstrap: could not restore failed destination: $destination"
+        fi
+      fi
+    fi
+    (( index -= 2 ))
+  done
+  MASTIC_ACTIVE_SWAP_DESTINATION=''
+  MASTIC_ACTIVE_SWAP_STAGE=''
+  MASTIC_ACTIVE_SWAP_BACKUP=''
+  MASTIC_COMPLETED_SWAPS=()
   if [[ -n $MASTIC_WORK_DIR && -d $MASTIC_WORK_DIR ]]; then
-    rm -rf -- "$MASTIC_WORK_DIR"
+    rm -rf -- "$MASTIC_WORK_DIR" || print -ru2 -- "mastic bootstrap: could not remove work directory: $MASTIC_WORK_DIR"
   fi
+}
+
+swap_move() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  unsetopt bg_nice
+  integer result_code=0
+  mv "$@" &
+  MASTIC_ACTIVE_SWAP_PID=$!
+  wait $MASTIC_ACTIVE_SWAP_PID || result_code=$?
+  MASTIC_ACTIVE_SWAP_PID=0
+  return $result_code
 }
 
 replace_directory() {
@@ -182,19 +236,47 @@ replace_directory() {
   [[ ! -e $backup ]] || fail "backup path already exists: $backup"
   MASTIC_ACTIVE_SWAP_BACKUP=$backup
   if [[ -e $destination || -L $destination ]]; then
-    mv "$destination" "$backup"
+    swap_move "$destination" "$backup"
   fi
-  if ! mv "$stage" "$destination"; then
+  if ! swap_move "$stage" "$destination"; then
     [[ ! -e $destination && -e $backup ]] && mv "$backup" "$destination"
     fail "could not replace destination: $destination"
     return 1
   fi
   chmod 0700 "$destination"
-  [[ -e $backup ]] && rm -rf -- "$backup"
+  MASTIC_COMPLETED_SWAPS+=("$destination" "$backup")
   MASTIC_ACTIVE_SWAP_DESTINATION=''
   MASTIC_ACTIVE_SWAP_STAGE=''
   MASTIC_ACTIVE_SWAP_BACKUP=''
   return 0
+}
+
+replace_file() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local stage=$1 destination=$2 parent=${2:h} backup
+  [[ -f $stage && ! -L $stage ]] || fail "replacement file must be regular: $stage"
+  mkdir -p -- "$parent"
+  [[ -d $parent && ! -L $parent && -O $parent ]] || fail "destination parent must be a user-owned directory: $parent"
+  chmod 0700 "$parent"
+  backup="$parent/.${destination:t}.mastic-backup.$$"
+  [[ ! -e $backup && ! -L $backup ]] || fail "backup path already exists: $backup"
+  MASTIC_ACTIVE_SWAP_DESTINATION=$destination
+  MASTIC_ACTIVE_SWAP_STAGE=$stage
+  MASTIC_ACTIVE_SWAP_BACKUP=$backup
+  if [[ -e $destination || -L $destination ]]; then
+    swap_move "$destination" "$backup"
+  fi
+  if ! swap_move "$stage" "$destination"; then
+    [[ ! -e $destination && -e $backup ]] && mv "$backup" "$destination"
+    fail "could not replace destination: $destination"
+    return 1
+  fi
+  chmod 0600 "$destination"
+  MASTIC_COMPLETED_SWAPS+=("$destination" "$backup")
+  MASTIC_ACTIVE_SWAP_DESTINATION=''
+  MASTIC_ACTIVE_SWAP_STAGE=''
+  MASTIC_ACTIVE_SWAP_BACKUP=''
 }
 
 main() {
@@ -286,7 +368,7 @@ main() {
   receipt_stage="${receipt}.mastic-bootstrap.$$"
   print -r -- "{\"schema_version\":1,\"closure_sha256\":\"${MASTIC_CLOSURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
   chmod 0600 "$receipt_stage"
-  mv -f "$receipt_stage" "$receipt"
+  replace_file "$receipt_stage" "$receipt"
 
   wheel="$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl"
   UV_TOOL_DIR="$mastic_data_dir/tools" \
@@ -300,6 +382,7 @@ main() {
     --no-python-downloads \
     --force \
     "$wheel"
+  MASTIC_BOOTSTRAP_COMMITTED=1
 
   print -r -- "Installed MASTIC ${MASTIC_VERSION}."
   print -r -- 'Cached exact application artifacts for guided setup; no consuming application was installed.'

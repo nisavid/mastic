@@ -12,12 +12,11 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import fields, is_dataclass
-from enum import Enum
 from typing import Protocol
 from urllib.parse import urlsplit
 
 from mastic.application.dispatch import ApplicationError
+from mastic.application.serialization import to_plain_data as _plain
 from mastic.application.setup import (
     Completion,
     ExactSetupSelection,
@@ -94,6 +93,8 @@ class OperationalState(Protocol):
 
     def snapshots(self, kind: str) -> Sequence[Mapping[str, object]]: ...
 
+    def snapshot_history(self, kind: str) -> Sequence[Mapping[str, object]]: ...
+
 
 class OperationalSetupEvidenceStore:
     """Persist setup evidence as immutable operational-state snapshots."""
@@ -105,19 +106,31 @@ class OperationalSetupEvidenceStore:
         return tuple(
             SetupEvidence(
                 step_id=str(item["id"]),
-                fingerprint=str(item["version"]),
+                fingerprint=str(item.get("fingerprint", item["version"])),
                 state=StepState(str(item["state"])),
                 detail=str(item.get("detail", "")),
             )
-            for item in self._state.snapshots(_evidence_kind(scope))
+            for item in self._state.snapshot_history(_evidence_kind(scope))
         )
 
     def record(self, scope: str, evidence: SetupEvidence) -> Mapping[str, object]:
+        record_version = hashlib.sha256(
+            json.dumps(
+                {
+                    "detail": evidence.detail,
+                    "fingerprint": evidence.fingerprint,
+                    "state": evidence.state.value,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
         return self._state.put_snapshot(
             {
                 "kind": _evidence_kind(scope),
                 "id": evidence.step_id,
-                "version": evidence.fingerprint,
+                "version": record_version,
+                "fingerprint": evidence.fingerprint,
                 "state": evidence.state.value,
                 "detail": evidence.detail,
             }
@@ -234,10 +247,21 @@ class SetupOperationPort:
                 record=lambda item: self._evidence.record("setup", item),
             )
         except MutationExecutionError as error:
+            current_evidence = tuple(self._evidence.load("setup"))
             completion, readiness, target_readiness = _setup_outcome(
                 resolved,
-                tuple(self._evidence.load("setup")),
+                current_evidence,
                 self._performance_profile,
+            )
+            terminal = {
+                (item.step_id, item.fingerprint)
+                for item in current_evidence
+                if item.state in {StepState.COMPLETE, StepState.SKIPPED}
+            }
+            terminal.update(
+                (step.id, step.fingerprint)
+                for step in resolved.steps
+                if step.state in {StepState.COMPLETE, StepState.SKIPPED}
             )
             raise ApplicationError(
                 "setup_interrupted",
@@ -253,6 +277,20 @@ class SetupOperationPort:
                     "readiness": readiness,
                     "application_target_readiness": target_readiness,
                     "failed_step": error.step_id,
+                    "remaining_steps": [
+                        step.id
+                        for step in resolved.steps
+                        if (step.id, step.fingerprint) not in terminal
+                    ],
+                    "observations": {
+                        "preflight": _plain(resolved.preflight),
+                        "completed_steps": [
+                            step.id
+                            for step in resolved.steps
+                            if (step.id, step.fingerprint) in terminal
+                        ],
+                        "application_target_readiness": target_readiness,
+                    },
                 },
             ) from error
         completion, readiness, target_readiness = _setup_outcome(
@@ -319,7 +357,7 @@ class SetupOperationPort:
             raise ApplicationError(
                 "invalid_parameter", "setup profile must be recommended or exact"
             )
-        offline = bool(parameters.get("offline", False))
+        offline = _boolean(parameters, "offline")
         try:
             facts = self._preflight(offline)
             prior = tuple(self._evidence.load("setup"))
@@ -352,7 +390,7 @@ class SetupOperationPort:
                 capacity_profile=capacity_name,
                 intent=intent,
                 skip_canaries=_strings(parameters.get("skip_canaries", ())),
-                noninteractive=bool(parameters.get("noninteractive", False)),
+                noninteractive=_boolean(parameters, "noninteractive"),
                 confirmed=parameters.get("confirmed") is True,
             )
             return self._resolver.resolve(facts, request, evidence=prior)
@@ -1234,17 +1272,10 @@ def _optional_int(value: object) -> int | None:
     return value
 
 
-def _plain(value: object) -> object:
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            field.name: _plain(getattr(value, field.name)) for field in fields(value)
-        }
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return [_plain(item) for item in value]
-    if isinstance(value, Enum):
-        return value.value
+def _boolean(parameters: Mapping[str, object], name: str) -> bool:
+    value = parameters.get(name, False)
+    if type(value) is not bool:
+        raise ApplicationError("invalid_parameter", f"{name} must be a boolean")
     return value
 
 

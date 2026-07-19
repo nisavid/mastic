@@ -84,7 +84,7 @@ def _prepare_private_directory(path: Path) -> None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        path.mkdir(parents=True, mode=0o700)
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
         metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise RuntimeError(f"private mastic path is not a directory: {path}")

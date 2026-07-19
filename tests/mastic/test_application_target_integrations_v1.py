@@ -394,6 +394,44 @@ class ClientIntegrationV1Tests(unittest.TestCase):
                 before,
             )
 
+    def test_codex_refuses_missing_or_modified_ownership_backups(self) -> None:
+        for backup_name in ("config.backup", "catalog.backup"):
+            with (
+                self.subTest(backup=backup_name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                paths = (
+                    root / "config.toml",
+                    root / "owner.json",
+                    root / "config.backup",
+                    root / "catalog.json",
+                    root / "catalog.backup",
+                )
+                adapter = CodexApplicationTargetIntegration(
+                    *paths[:3],
+                    catalog_path=paths[3],
+                    catalog_backup_path=paths[4],
+                    bundled_catalog=self._bundled_codex_catalog,
+                    catalog_validator=lambda _path: None,
+                )
+                adapter.apply(
+                    self._codex_with_model(
+                        CodexModelMetadata("coding", "Coding", "Local model")
+                    )
+                )
+                before = {path: path.read_bytes() for path in paths if path.exists()}
+                (root / backup_name).write_bytes(b"tampered")
+
+                self.assertEqual(adapter.inspect()["state"], "malformed")
+                with self.assertRaisesRegex(
+                    ApplicationTargetIntegrationConflict, "missing or modified"
+                ):
+                    adapter.remove()
+
+                self.assertEqual(paths[0].read_bytes(), before[paths[0]])
+                self.assertEqual(paths[3].read_bytes(), before[paths[3]])
+
     def test_codex_catalog_inspect_reports_and_repair_fixes_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1067,7 +1105,7 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             )
             before = config.read_bytes()
 
-            with self.assertRaises(Exception):
+            with self.assertRaises(tomlkit.exceptions.ParseError):
                 adapter.apply(self.codex_configuration)
             self.assertEqual(config.read_bytes(), before)
 
@@ -1386,6 +1424,50 @@ class ClientIntegrationV1Tests(unittest.TestCase):
             rollback()
 
             self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_hindsight_records_pending_ownership_before_replacing_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "owner.json"
+            observed: list[str] = []
+
+            def replace_profile(path: Path, payload: bytes) -> None:
+                observed.append(
+                    json.loads(manifest.read_text(encoding="utf-8"))["state"]
+                )
+                path.write_bytes(payload)
+
+            adapter = HindsightApplicationTargetIntegration(
+                root / "profile.env",
+                manifest,
+                root / "backup",
+                replace=replace_profile,
+            )
+
+            adapter.apply(self.hindsight_configuration)
+
+            self.assertEqual(observed, ["pending"])
+            self.assertEqual(
+                json.loads(manifest.read_text(encoding="utf-8"))["state"],
+                "applied",
+            )
+
+    def test_hindsight_refuses_a_modified_backup_before_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "profile.env", root / "owner.json", root / "backup")
+            paths[0].write_text("HINDSIGHT_API_LLM_MODEL=cloud\n", encoding="utf-8")
+            adapter = HindsightApplicationTargetIntegration(*paths)
+            adapter.apply(self.hindsight_configuration)
+            profile = paths[0].read_bytes()
+            paths[2].write_bytes(b"tampered")
+
+            with self.assertRaisesRegex(
+                ApplicationTargetIntegrationConflict, "missing or modified"
+            ):
+                adapter.remove()
+
+            self.assertEqual(paths[0].read_bytes(), profile)
 
     def test_hindsight_remove_restores_all_files_after_a_post_replace_failure(
         self,

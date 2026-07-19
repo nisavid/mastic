@@ -38,6 +38,7 @@ PHASE1_APPLICATION_VERSIONS = MappingProxyType(
 class StepState(StrEnum):
     READY = "ready"
     COMPLETE = "complete"
+    FAILED = "failed"
     SKIPPED = "skipped"
     BLOCKED = "blocked"
 
@@ -362,7 +363,11 @@ class MutationStep:
     network_required: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+        object.__setattr__(
+            self,
+            "inputs",
+            _freeze_json_mapping(self.inputs, f"mutation_step.{self.id}.inputs"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +384,10 @@ class SetupEvidence:
     @classmethod
     def skipped(cls, step: MutationStep, detail: str = "") -> SetupEvidence:
         return cls(step.id, step.fingerprint, StepState.SKIPPED, detail)
+
+    @classmethod
+    def failed(cls, step: MutationStep, detail: str = "") -> SetupEvidence:
+        return cls(step.id, step.fingerprint, StepState.FAILED, detail)
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,6 +723,14 @@ class SetupResolver:
     ) -> MutationExecutionResult:
         known = {(item.step_id, item.fingerprint): item for item in evidence}
         ordered = list(evidence)
+
+        def record_failure(step: MutationStep, detail: str) -> None:
+            failed = SetupEvidence.failed(step, detail)
+            known[(step.id, step.fingerprint)] = failed
+            ordered.append(failed)
+            if record is not None:
+                record(failed)
+
         for step in steps:
             prior = known.get((step.id, step.fingerprint))
             if step.state is StepState.COMPLETE and prior is None:
@@ -732,16 +749,19 @@ class SetupResolver:
             }:
                 continue
             if step.state is StepState.BLOCKED:
+                record_failure(step, step.reason)
                 raise MutationExecutionError(step.id, step.reason)
             try:
                 completed = execute(step)
             except Exception as error:
+                record_failure(step, str(error))
                 raise MutationExecutionError(step.id, str(error)) from error
             if (
                 completed.step_id != step.id
                 or completed.fingerprint != step.fingerprint
                 or completed.state is not StepState.COMPLETE
             ):
+                record_failure(step, "executor returned invalid completion evidence")
                 raise MutationExecutionError(
                     step.id, "executor returned invalid completion evidence"
                 )

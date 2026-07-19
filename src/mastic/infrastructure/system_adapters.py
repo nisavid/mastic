@@ -214,12 +214,8 @@ class MacOSProcessLauncher:
                 start_new_session=True,
                 close_fds=True,
             )
-        except Exception:
-            os.close(write_descriptor)
-            raise
         finally:
-            if _descriptor_is_open(write_descriptor):
-                os.close(write_descriptor)
+            os.close(write_descriptor)
         return SubprocessManagedProcess(process, pump)
 
     def attach(self, pid: int) -> PsutilManagedProcess | None:
@@ -720,9 +716,14 @@ class _RotatingLogWriter:
 
 
 def _pump_process_log(descriptor: int, writer: _RotatingLogWriter) -> None:
+    logging_enabled = True
     try:
         while payload := os.read(descriptor, 64 * 1024):
-            writer.write(payload)
+            if logging_enabled:
+                try:
+                    writer.write(payload)
+                except OSError:
+                    logging_enabled = False
     finally:
         os.close(descriptor)
 
@@ -760,11 +761,3 @@ def _validate_optional_private_log(path: Path) -> None:
         raise OSError(f"private service log is not a regular file: {path}")
     if metadata.st_uid != os.getuid():
         raise PermissionError(f"private service log is not user-owned: {path}")
-
-
-def _descriptor_is_open(descriptor: int) -> bool:
-    try:
-        os.fstat(descriptor)
-    except OSError:
-        return False
-    return True

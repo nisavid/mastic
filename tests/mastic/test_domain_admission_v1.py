@@ -37,13 +37,14 @@ class AdmissionPolicyTests(unittest.TestCase):
         services = (
             RunningService("coding", pinned=True, busy=False, last_used_ns=1),
             RunningService("chat", pinned=False, busy=False, last_used_ns=2),
+            RunningService("review", pinned=False, busy=False, last_used_ns=3),
             RunningService("vision", pinned=False, busy=True, last_used_ns=0),
         )
 
         result = PressurePolicy().evaluate(PressureLevel.CRITICAL, services)
 
         self.assertEqual(result.actions[0], PressureAction.SHED_NEW_WORK)
-        self.assertEqual(result.stop_services, ("chat",))
+        self.assertEqual(result.stop_services, ("chat", "review"))
         self.assertNotIn("coding", result.stop_services)
 
     def test_only_pinned_or_busy_services_produces_explicit_stop_sequence(

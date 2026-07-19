@@ -32,6 +32,20 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage: masticd", result.stdout)
 
+    def test_installed_daemon_rejects_help_after_unknown_argument(self) -> None:
+        executable = shutil.which("masticd")
+        self.assertIsNotNone(executable)
+        result = subprocess.run(
+            [executable, "invalid", "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unexpected argument", result.stderr)
+
     def test_status_help_describes_the_status_surface_without_a_server_argument(
         self,
     ) -> None:

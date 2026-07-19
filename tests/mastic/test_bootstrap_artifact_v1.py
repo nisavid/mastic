@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILDER = ROOT / "scripts" / "build-bootstrap.zsh"
+_SUBPROCESS_TIMEOUT = 30
 
 
 class BootstrapArtifactV1Tests(unittest.TestCase):
@@ -30,6 +31,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -40,7 +42,10 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertNotIn("@MASTIC_", script)
             self.assertTrue(output.stat().st_mode & stat.S_IXUSR)
             syntax = subprocess.run(
-                ["zsh", "-n", str(output)], capture_output=True, text=True
+                ["zsh", "-n", str(output)],
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
             self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
@@ -65,6 +70,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
 
             self.assertEqual(completed.returncode, 2)
@@ -135,6 +141,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
             tools = root / "tools"
             tools.mkdir()
@@ -170,6 +177,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
             )
             tools = root / "tools"
             tools.mkdir()
@@ -342,6 +350,14 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 'exec /bin/mv "$@"',
             )
             home = root / "home"
+            previous_uv = home / ".local/share/mastic/bootstrap-uv/uv"
+            previous_uv.parent.mkdir(parents=True)
+            previous_uv.write_bytes(b"existing verified uv")
+            previous_python = (
+                home / ".local/share/mastic/bootstrap-python/bin/python3.11"
+            )
+            previous_python.parent.mkdir(parents=True)
+            previous_python.write_bytes(b"existing verified python")
             existing = (
                 home / ".local/share/mastic/bootstrap-artifacts/application-targets-v1"
             )
@@ -358,6 +374,45 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 (existing / "manifest.json").read_text(encoding="utf-8"),
                 "existing\n",
             )
+            self.assertEqual(previous_uv.read_bytes(), b"existing verified uv")
+            self.assertEqual(previous_python.read_bytes(), b"existing verified python")
+
+    def test_failed_final_install_restores_the_entire_previous_release(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            data = home / ".local/share/mastic"
+            previous = {
+                data / "bootstrap-uv/uv": b"previous uv",
+                data / "bootstrap-python/bin/python3.11": b"previous python",
+                data
+                / "bootstrap-artifacts/application-targets-v1/manifest.json": b"previous manifest",
+                data
+                / "bootstrap-artifacts/bootstrap-receipt.json": b"previous receipt",
+            }
+            for path, content in previous.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            uv_log = root / "uv.log"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_UV_FAIL": "1",
+                    "BOOTSTRAP_UV_LOG": str(uv_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            for path, content in previous.items():
+                self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(list(data.rglob(".*.mastic-backup.*")), [])
+            self.assertEqual(list(data.rglob(".*.mastic-bootstrap.*")), [])
 
     def test_termination_during_swap_restores_destination_and_cleans_staging(
         self,
@@ -385,6 +440,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 143, completed.stderr)
+            self.assertTrue(destination.is_dir(), completed.stderr)
             self.assertEqual((destination / "uv").read_bytes(), b"existing verified uv")
             self.assertEqual(
                 list(destination.parent.glob(".bootstrap-uv.mastic-*")), []
@@ -436,6 +492,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            timeout=_SUBPROCESS_TIMEOUT,
         )
 
     def _host_tools(self, tools: Path, *, machine: str, version: str) -> None:
@@ -469,6 +526,7 @@ class _ArtifactFixture:
         uv = closure_root / "uv/uv"
         uv.write_text(
             "#!/bin/zsh\n"
+            "[[ -n ${BOOTSTRAP_UV_FAIL:-} ]] && exit 97\n"
             'print -r -- "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR" '
             '"$*" >"$BOOTSTRAP_UV_LOG"\n',
             encoding="utf-8",
@@ -510,6 +568,7 @@ class _ArtifactFixture:
             check=True,
             capture_output=True,
             text=True,
+            timeout=_SUBPROCESS_TIMEOUT,
         )
         return root, artifact, release
 

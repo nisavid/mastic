@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import tomlkit
+
 from mastic.infrastructure.config_store import (
     ConfigChange,
     ConfigStore,
@@ -25,6 +27,17 @@ def _hold_private_lock(path: str, acquired, release, attempting=None) -> None:
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_rejects_an_empty_journal_action_before_writing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            store = ConfigStore(path, lambda data: int(data["generation"]))
+
+            with self.assertRaisesRegex(ValueError, "action"):
+                store.save(tomlkit.parse("generation = 1\n"), action=" ")
+
+            self.assertFalse(path.exists())
+            self.assertEqual(store.history(), ())
+
     def test_journal_entries_are_versioned_and_lineage_checked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"

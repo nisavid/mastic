@@ -195,6 +195,27 @@ def create_gateway(
         if denied is not None:
             return denied
         routes = await _await_if_needed(route_resolver.list_routes())
+        application_target_name = request.path_params.get("application_target")
+        profile_name = request.path_params.get("profile")
+        if application_target_name is not None and profile_name is not None:
+            profile = (
+                None
+                if profile_resolver is None
+                else await _await_if_needed(
+                    profile_resolver(str(application_target_name), str(profile_name))
+                )
+            )
+            if profile is None:
+                return _error_response(
+                    404,
+                    "profile_not_found",
+                    f"Application Configuration Target profile {application_target_name}/{profile_name} is not configured.",
+                    action="Reconfigure the Application Configuration Target with MASTIC and retry.",
+                    parameter="profile",
+                )
+            routes = tuple(
+                route for route in routes if route.service == profile.service
+            )
         data = []
         for route in sorted(routes, key=lambda item: item.service):
             item: dict[str, Any] = {

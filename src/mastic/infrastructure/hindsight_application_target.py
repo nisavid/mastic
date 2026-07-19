@@ -149,6 +149,7 @@ class HindsightApplicationTargetIntegration:
         manifest = {
             "schema_version": 1,
             "integration": "hindsight",
+            "state": "applied",
             "config_path": str(self.config_path),
             "config_existed": (
                 bool(prior_manifest.get("config_existed"))
@@ -172,9 +173,13 @@ class HindsightApplicationTargetIntegration:
         try:
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
-            _write_private(self.manifest_path, _json_bytes(manifest))
+            _write_private(
+                self.manifest_path,
+                _json_bytes({**manifest, "state": "pending"}),
+            )
             if changes:
                 self._replace(self.config_path, rendered)
+            _write_private(self.manifest_path, _json_bytes(manifest))
         except Exception:
             _restore_files(snapshot)
             raise
@@ -323,6 +328,7 @@ class HindsightApplicationTargetIntegration:
         manifest = self._manifest(optional=True)
         if not manifest:
             return ApplicationTargetRemovalResult(False, ())
+        self._validated_backup(manifest)
         snapshot = _snapshot_files(
             self.config_path,
             self.manifest_path,
@@ -378,6 +384,7 @@ class HindsightApplicationTargetIntegration:
 
     def restore(self) -> None:
         manifest = self._manifest()
+        backup = self._validated_backup(manifest)
         snapshot = _snapshot_files(
             self.config_path,
             self.manifest_path,
@@ -388,7 +395,6 @@ class HindsightApplicationTargetIntegration:
             raise ApplicationTargetIntegrationConflict(
                 "Hindsight config changed after mastic applied the integration"
             )
-        backup, _ = _read(self.backup_path)
         try:
             if manifest["config_existed"]:
                 self._replace(self.config_path, backup)
@@ -500,7 +506,19 @@ class HindsightApplicationTargetIntegration:
     def _manifest(self, *, optional: bool = False) -> dict[str, object]:
         manifest = _load_manifest(self.manifest_path, "hindsight", optional)
         _validate_manifest_paths(manifest, self.config_path, self.backup_path)
+        if manifest and manifest.get("state", "applied") != "applied":
+            raise ApplicationTargetIntegrationConflict(
+                "Hindsight ownership transition is incomplete"
+            )
         return manifest
+
+    def _validated_backup(self, manifest: Mapping[str, object]) -> bytes:
+        backup, backup_exists = _read(self.backup_path)
+        if not backup_exists or _digest(backup) != manifest.get("before_digest"):
+            raise ApplicationTargetIntegrationConflict(
+                "Hindsight ownership backup is missing or modified"
+            )
+        return backup
 
     def _desired(
         self, configuration: ApplicationTargetConfiguration

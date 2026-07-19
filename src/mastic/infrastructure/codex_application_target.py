@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 import tomlkit
 from tomlkit.toml_document import TOMLDocument
 
+from mastic.application.serialization import to_plain_data as _plain
 from mastic.infrastructure.application_target_contracts import (
     ApplicationTargetApplyResult,
     ApplicationTargetConfiguration,
@@ -32,7 +33,6 @@ from mastic.infrastructure.application_target_persistence import (
     _atomic_replace,
     _digest,
     _json_bytes,
-    _plain,
     _read,
     _restore_files,
     _snapshot_files,
@@ -92,6 +92,9 @@ class CodexApplicationTargetIntegration:
         catalog_ownership_new = catalog_rendered is not None and not isinstance(
             prior_manifest.get("catalog"), dict
         )
+        catalog_ownership_removed = catalog_rendered is None and isinstance(
+            prior_manifest.get("catalog"), dict
+        )
         prior_fields = {
             tuple(item["path"]): item for item in prior_manifest.get("fields", [])
         }
@@ -146,6 +149,7 @@ class CodexApplicationTargetIntegration:
             and not ownership_changed
             and not catalog_changed
             and not catalog_ownership_new
+            and not catalog_ownership_removed
         ):
             return ApplicationTargetApplyResult(
                 False, (), self.backup_path, self.manifest_path
@@ -192,6 +196,8 @@ class CodexApplicationTargetIntegration:
             }
         support = _snapshot_files(self.manifest_path, self.backup_path)
         try:
+            if catalog_ownership_removed:
+                self._validate_backups(prior_manifest)
             if not prior_manifest:
                 _write_private(self.backup_path, raw)
             if catalog_ownership_new:
@@ -203,16 +209,26 @@ class CodexApplicationTargetIntegration:
             if catalog_changed and catalog_rendered is not None:
                 self._replace(self.catalog_path, catalog_rendered)
                 self._catalog_validator(self.catalog_path)
+            if catalog_ownership_removed:
+                previous_catalog = prior_manifest["catalog"]
+                assert isinstance(previous_catalog, Mapping)
+                catalog_backup, _ = _read(self.catalog_backup_path)
+                if previous_catalog.get("existed"):
+                    self._replace(self.catalog_path, catalog_backup)
+                else:
+                    self.catalog_path.unlink(missing_ok=True)
             if changes:
                 self._replace(self.config_path, rendered)
             _write_private(self.manifest_path, _json_bytes(manifest))
+            if catalog_ownership_removed:
+                self.catalog_backup_path.unlink(missing_ok=True)
         except Exception:
             if changes:
                 if existed:
                     _atomic_replace(self.config_path, raw)
                 else:
                     self.config_path.unlink(missing_ok=True)
-            if catalog_changed:
+            if catalog_changed or catalog_ownership_removed:
                 if catalog_existed:
                     _atomic_replace(self.catalog_path, catalog_before)
                 else:
@@ -222,7 +238,11 @@ class CodexApplicationTargetIntegration:
                 self.catalog_backup_path.unlink(missing_ok=True)
             raise
         return ApplicationTargetApplyResult(
-            bool(changes) or ownership_changed or catalog_changed,
+            bool(changes)
+            or ownership_changed
+            or catalog_changed
+            or catalog_ownership_new
+            or catalog_ownership_removed,
             tuple(changes),
             self.backup_path,
             self.manifest_path,
@@ -354,6 +374,7 @@ class CodexApplicationTargetIntegration:
         manifest = self._manifest(optional=True)
         if not manifest:
             return ApplicationTargetRemovalResult(False, ())
+        self._validate_backups(manifest)
         snapshot = _snapshot_files(
             self.config_path,
             self.catalog_path,
@@ -405,6 +426,7 @@ class CodexApplicationTargetIntegration:
 
     def restore(self) -> None:
         manifest = self._manifest()
+        self._validate_backups(manifest)
         snapshot = _snapshot_files(
             self.config_path,
             self.catalog_path,
@@ -463,6 +485,16 @@ class CodexApplicationTargetIntegration:
             return {
                 "state": "unmanaged",
                 "next_actions": ["mastic application-target configure codex"],
+            }
+        try:
+            self._validate_backups(manifest)
+        except (ApplicationTargetIntegrationConflict, OSError, ValueError):
+            return {
+                "state": "malformed",
+                "detail": "Codex ownership backup is missing or modified.",
+                "catalog_path": str(self.catalog_path),
+                "ownership_manifest_path": str(self.manifest_path),
+                "next_actions": _ownership_recovery_next_actions("codex"),
             }
         catalog = manifest.get("catalog")
         if not isinstance(catalog, dict):
@@ -548,6 +580,22 @@ class CodexApplicationTargetIntegration:
                 "Codex ownership transition is incomplete"
             )
         return manifest
+
+    def _validate_backups(self, manifest: Mapping[str, object]) -> None:
+        backup, backup_exists = _read(self.backup_path)
+        if not backup_exists or _digest(backup) != manifest.get("before_digest"):
+            raise ApplicationTargetIntegrationConflict(
+                "Codex ownership backup is missing or modified"
+            )
+        catalog = manifest.get("catalog")
+        if isinstance(catalog, Mapping):
+            catalog_backup, catalog_backup_exists = _read(self.catalog_backup_path)
+            if not catalog_backup_exists or _digest(catalog_backup) != catalog.get(
+                "before_digest"
+            ):
+                raise ApplicationTargetIntegrationConflict(
+                    "Codex model catalog backup is missing or modified"
+                )
 
     def _finish_removal(
         self,
@@ -643,7 +691,11 @@ class CodexApplicationTargetIntegration:
         current, exists = _read(self.catalog_path)
         if exists and _digest(current) != catalog.get("applied_digest"):
             return False, True
-        backup, _ = _read(self.catalog_backup_path)
+        backup, backup_exists = _read(self.catalog_backup_path)
+        if not backup_exists or _digest(backup) != catalog.get("before_digest"):
+            raise ApplicationTargetIntegrationConflict(
+                "Codex model catalog backup is missing or modified"
+            )
         if catalog.get("existed"):
             self._replace(self.catalog_path, backup)
         else:

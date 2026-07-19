@@ -75,13 +75,37 @@ class ResponsesTransportTests(unittest.IsolatedAsyncioTestCase):
         body = await transport.adapt_response_body(
             upstream,
             reconstruction,
-            content_type="application/json",
+            content_type="Application/JSON; Charset=UTF-8",
         )
 
         self.assertEqual(
             body,
             b'{"id":"response-1","output":[{"type":"function_call","name":"add","namespace":"math"}]}',
         )
+
+    def test_request_budget_applies_to_the_exact_serialized_transformation(
+        self,
+    ) -> None:
+        transport = ResponsesTransport(max_request_bytes=270, max_response_bytes=128)
+        payload = {
+            "model": "coding",
+            "input": [],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "math",
+                    "description": "d" * 60,
+                    "tools": [
+                        {"type": "function", "name": "f0", "description": "x"},
+                        {"type": "function", "name": "f1", "description": "x"},
+                    ],
+                }
+            ],
+        }
+        self.assertEqual(len(json.dumps(payload, separators=(",", ":")).encode()), 261)
+
+        with self.assertRaises(RequestTransformationTooLarge):
+            transport.transform_request(payload)
 
     async def test_sse_response_reconstructs_namespaces_and_stops_at_terminal(
         self,

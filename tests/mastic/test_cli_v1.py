@@ -111,7 +111,8 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["operation"], "service.stop")
-        self.assertEqual(payload["parameters"]["resource"], "coding")
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["result"]["parameters"]["resource"], "coding")
 
     def test_service_edit_can_explicitly_clear_a_boolean(self) -> None:
         result = self.runner.invoke(
@@ -166,7 +167,9 @@ class CliV1Tests(unittest.TestCase):
         )
 
         self.assertEqual(preview.exit_code, 0, preview.output)
-        self.assertEqual(json.loads(preview.output)["state"], "review_required")
+        self.assertEqual(
+            json.loads(preview.output)["result"]["state"], "review_required"
+        )
         self.assertEqual(self.dispatcher.previews[-1].name, "model.cache.evict")
         self.assertFalse(self.dispatcher.requests)
 
@@ -271,21 +274,32 @@ class CliV1Tests(unittest.TestCase):
         self.assertEqual(
             json.loads(result.output),
             {
-                "application_target_readiness": {
-                    "codex": "degraded",
-                    "hindsight": "ready",
+                "operation": "setup",
+                "result": {
+                    "application_target_readiness": {
+                        "codex": "degraded",
+                        "hindsight": "ready",
+                    },
+                    "complete": True,
+                    "completion": "complete",
+                    "performance_profile": {
+                        "id": "phase1-qwen36-optiq-apple-silicon",
+                        "status": "provisional",
+                        "version": 1,
+                    },
+                    "readiness": "degraded",
+                    "state": "complete",
                 },
-                "complete": True,
-                "completion": "complete",
-                "performance_profile": {
-                    "id": "phase1-qwen36-optiq-apple-silicon",
-                    "status": "provisional",
-                    "version": 1,
-                },
-                "readiness": "degraded",
-                "state": "complete",
+                "schema_version": 1,
             },
         )
+
+    def test_machine_output_modes_are_mutually_exclusive(self) -> None:
+        result = self.runner.invoke(self.app, ["status", "--json", "--json-lines"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("choose exactly one output mode", result.output)
+        self.assertFalse(self.dispatcher.requests)
 
     def test_machine_errors_are_stable_and_human_errors_offer_next_action(self) -> None:
         machine = self.runner.invoke(self.app, ["doctor", "--json"])
@@ -316,7 +330,7 @@ class CliV1Tests(unittest.TestCase):
         result = self.runner.invoke(self.app, ["check", "--json"])
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertEqual(json.loads(result.output)["state"], "stopped")
+        self.assertEqual(json.loads(result.output)["result"]["state"], "stopped")
 
     def test_explicit_tui_command_uses_injected_launcher(self) -> None:
         result = self.runner.invoke(self.app, ["tui"])

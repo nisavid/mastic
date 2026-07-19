@@ -326,18 +326,33 @@ class Supervisor:
     def stop(self) -> SupervisorStatus:
         """Drain the Gateway, stop every run, stop the Gateway, and fully exit."""
 
+        errors: list[Exception] = []
         with self._lock:
             if self._state == "stopped":
                 return self._status_locked()
             self._state = "stopping"
             operation_id = self._begin_operation_locked("supervisor.stop", "supervisor")
-            self._set_shedding_locked(True)
-            self._gateway.drain(self._drain_timeout)
+            try:
+                self._set_shedding_locked(True)
+                self._gateway.drain(self._drain_timeout)
+            except Exception as error:
+                errors.append(error)
             names = tuple(self._runs)
         for name in names:
-            self.stop_service(name)
+            try:
+                self.stop_service(name)
+            except Exception as error:
+                errors.append(error)
         with self._lock:
-            self._gateway.stop(self._drain_timeout)
+            try:
+                self._gateway.stop(self._drain_timeout)
+            except Exception as error:
+                errors.append(error)
+            if errors:
+                detail = "; ".join(str(error) for error in errors)
+                self._state = "failed"
+                self._finish_operation_locked(operation_id, "failed", error=detail)
+                raise RuntimeError(f"Supervisor stop failed: {detail}") from errors[0]
             self._state = "stopped"
             self._set_shedding_locked(False)
             self._finish_operation_locked(operation_id, "stopped")
@@ -372,8 +387,19 @@ class Supervisor:
         if needs_start:
             self.start()
         with self._lock:
+            current = self._runs.get(name)
+            if current is not None and current.status.state in {
+                ServiceRunState.STARTING,
+                ServiceRunState.READY,
+                ServiceRunState.UNHEALTHY,
+            }:
+                return ServiceTransition("none", current.status, needs_start)
             operation_id = self._begin_operation_locked("service.start", name)
             run_id = self._new_identity_locked("run")
+            run = _Run(
+                ServiceRunStatus(name, run_id, ServiceRunState.STARTING), service
+            )
+            self._runs[name] = run
             try:
                 port = self._processes.allocate_loopback_port("127.0.0.1")
                 launch = self._runtime_supply.prepare_launch(service, "127.0.0.1", port)
@@ -384,19 +410,35 @@ class Supervisor:
                     ServiceRunState.REJECTED,
                     error=str(error),
                 )
-                self._runs[name] = _Run(rejected, service)
+                run.status = rejected
                 self._gateway.set_route(
                     self._gateway_route(service), "unavailable", None
                 )
-                self._persist_run_locked(self._runs[name])
+                self._persist_run_locked(run)
                 self._finish_operation_locked(operation_id, rejected.state.value)
                 return ServiceTransition(operation_id, rejected, needs_start)
+            except Exception as error:
+                failed = ServiceRunStatus(
+                    name,
+                    run_id,
+                    ServiceRunState.FAILED,
+                    error=f"launch preparation failed: {error}",
+                )
+                run.status = failed
+                self._gateway.set_route(
+                    self._gateway_route(service), "unavailable", None
+                )
+                self._persist_run_locked(run)
+                self._finish_operation_locked(
+                    operation_id, failed.state.value, error=failed.error
+                )
+                raise
 
             starting = ServiceRunStatus(
                 name, run_id, ServiceRunState.STARTING, upstream_port=port
             )
-            run = _Run(starting, service, launch=launch)
-            self._runs[name] = run
+            run.status = starting
+            run.launch = launch
             self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._event_locked(operation_id, "launch_prepared", run_id=run_id)
             try:
@@ -423,6 +465,11 @@ class Supervisor:
         endpoint = f"http://127.0.0.1:{port}"
         while self._clock.monotonic() < deadline:
             with self._lock:
+                superseded = self._superseded_start_locked(
+                    run, operation_id, needs_start
+                )
+                if superseded is not None:
+                    return superseded
                 if process.poll() is not None:
                     return self._failed_start_locked(
                         run,
@@ -436,6 +483,11 @@ class Supervisor:
                 ready = False
             if ready:
                 with self._lock:
+                    superseded = self._superseded_start_locked(
+                        run, operation_id, needs_start
+                    )
+                    if superseded is not None:
+                        return superseded
                     run.status = ServiceRunStatus(
                         name,
                         run_id,
@@ -451,6 +503,9 @@ class Supervisor:
                     return ServiceTransition(operation_id, run.status, needs_start)
             self._clock.sleep(self._readiness_poll_interval)
         with self._lock:
+            superseded = self._superseded_start_locked(run, operation_id, needs_start)
+            if superseded is not None:
+                return superseded
             self._terminate_locked(run)
             return self._failed_start_locked(
                 run, operation_id, "readiness timed out", needs_start
@@ -461,9 +516,11 @@ class Supervisor:
 
         with self._lock:
             service = self._desired_state.service(name)
+            run = self._runs.get(name)
+            if service is None and run is not None:
+                service = run.service
             if service is None:
                 raise ServiceNotFoundError(name)
-            run = self._runs.get(name)
             operation_id = self._begin_operation_locked("service.stop", name)
             if run is None or run.status.state in {
                 ServiceRunState.STOPPED,
@@ -489,7 +546,11 @@ class Supervisor:
             )
             self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._persist_run_locked(run)
-            self._terminate_locked(run)
+            try:
+                self._terminate_locked(run)
+            except Exception as error:
+                self._finish_operation_locked(operation_id, "failed", error=str(error))
+                raise
             run.status = ServiceRunStatus(
                 name, run.status.run_id, ServiceRunState.STOPPED
             )
@@ -501,12 +562,14 @@ class Supervisor:
     def drain_service(self, name: str) -> ServiceDrainStatus:
         """Reject new work for one route and wait boundedly for active work."""
 
-        service = self._desired_state.service(name)
-        if service is None:
-            raise ServiceNotFoundError(name)
-        route = self._gateway_route(service)
         with self._lock:
             run = self._runs.get(name)
+            service = self._desired_state.service(name)
+            if service is None and run is not None:
+                service = run.service
+            if service is None:
+                raise ServiceNotFoundError(name)
+            route = self._gateway_route(service)
             endpoint = (
                 f"http://127.0.0.1:{run.status.upstream_port}"
                 if run is not None and run.status.upstream_port is not None
@@ -528,16 +591,36 @@ class Supervisor:
         self.stop_service(name)
         return self.start_service(name)
 
-    def remove_service(self, name: str) -> ServiceTransition:
+    def remove_service(
+        self, name: str, *, previous_route: str | None = None
+    ) -> ServiceTransition:
         """Drain and stop one service, then remove its live Gateway route."""
 
-        service = self._desired_state.service(name)
-        if service is None:
-            raise ServiceNotFoundError(name)
-        self.drain_service(name)
-        stopped = self.stop_service(name)
         with self._lock:
-            self._gateway.remove_route(self._gateway_route(service))
+            run = self._runs.get(name)
+            service = self._desired_state.service(name)
+            if service is None and run is not None:
+                service = run.service
+            route = (
+                self._gateway_route(service) if service is not None else previous_route
+            )
+            if route is None:
+                raise ServiceNotFoundError(name)
+        if service is not None:
+            self.drain_service(name)
+            stopped = self.stop_service(name)
+        else:
+            with self._lock:
+                operation_id = self._begin_operation_locked("service.stop", name)
+                stopped = ServiceTransition(
+                    operation_id,
+                    ServiceRunStatus(
+                        name, self._new_identity_locked("run"), ServiceRunState.STOPPED
+                    ),
+                )
+                self._finish_operation_locked(operation_id, "stopped")
+        with self._lock:
+            self._gateway.remove_route(route)
             self._runs.pop(name, None)
         return stopped
 
@@ -630,6 +713,7 @@ class Supervisor:
         """Converge live routes/runs and pressure without a client request."""
 
         changed: list[tuple[str, InferenceService]] = []
+        activate: list[str] = []
         desired = {str(item.name): item for item in self._desired_state.services()}
         with self._lock:
             self._refresh_exits_locked()
@@ -647,6 +731,8 @@ class Supervisor:
                             )
                         )
                         self._gateway.set_route(route, "stopped", None)
+                        if service.activation is ActivationPolicy.SUPERVISOR:
+                            activate.append(name)
                     else:
                         launch_changed = False
                         if (
@@ -662,16 +748,14 @@ class Supervisor:
                             except (CapabilityValidationError, ValueError):
                                 current_launch = run.launch
                             launch_changed = current_launch != run.launch
-                        if (
-                            run.service != service or launch_changed
-                        ) and not self._gateway.is_busy(
-                            self._gateway_route(run.service)
-                        ):
+                        if run.service != service or launch_changed:
                             changed.append((name, service))
         restarted: list[str] = []
         for name, service in changed:
             self._replace_service_run(name, service)
             restarted.append(name)
+        for name in activate:
+            self.start_service(name)
         pressure = self.reconcile_pressure()
         with self._lock:
             status = self._status_locked()
@@ -758,6 +842,22 @@ class Supervisor:
             old_route = self._gateway_route(run.service)
             new_route = self._gateway_route(desired)
             self._gateway.set_route(old_route, "unavailable", None)
+        deadline = self._clock.monotonic() + self._drain_timeout
+        while self._gateway.is_busy(old_route):
+            if self._clock.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Inference Service {name!r} is still serving an active request"
+                )
+            self._clock.sleep(self._readiness_poll_interval)
+        with self._lock:
+            current = self._runs.get(name)
+            if current is not run:
+                status = (
+                    current.status
+                    if current is not None
+                    else ServiceRunStatus(name, "none", ServiceRunState.STOPPED)
+                )
+                return ServiceTransition("none", status)
             self._terminate_locked(run)
             run.status = ServiceRunStatus(
                 name, run.status.run_id, ServiceRunState.STOPPED
@@ -786,7 +886,12 @@ class Supervisor:
             if isinstance(identifier, str):
                 latest[identifier] = snapshot
         for snapshot in latest.values():
-            if snapshot.get("state") not in {"starting", "ready", "unhealthy"}:
+            if snapshot.get("state") not in {
+                "starting",
+                "ready",
+                "unhealthy",
+                "stopping",
+            }:
                 continue
             service_name = snapshot.get("service")
             pid = snapshot.get("pid")
@@ -803,9 +908,8 @@ class Supervisor:
                 and isinstance(persisted_launch_identity, str)
             ):
                 continue
-            service = self._desired_state.service(service_name)
             identity = ProcessIdentity(pid, birth_token)
-            if service is None or not self._probe.identity_matches(identity):
+            if not self._probe.identity_matches(identity):
                 continue
             process = self._processes.attach(pid)
             if (
@@ -813,6 +917,19 @@ class Supervisor:
                 or process.poll() is not None
                 or not self._probe.identity_matches(identity)
             ):
+                continue
+            service = self._desired_state.service(service_name)
+            if service is None:
+                try:
+                    self._terminate_recovered_process_locked(
+                        process, identity, service_name
+                    )
+                except Exception as error:
+                    self._persist_recovery_result_locked(
+                        snapshot, "stopping", error=str(error), identity=identity
+                    )
+                    raise
+                self._persist_recovery_result_locked(snapshot, "stopped")
                 continue
             recovered = _Run(
                 ServiceRunStatus(
@@ -828,7 +945,10 @@ class Supervisor:
             )
             try:
                 launch = self._runtime_supply.prepare_launch(service, "127.0.0.1", port)
-                launch_matches = _launch_identity(launch) == persisted_launch_identity
+                launch_matches = (
+                    snapshot.get("state") != "stopping"
+                    and _launch_identity(launch) == persisted_launch_identity
+                )
                 ready = launch_matches and self._probe.is_ready(
                     f"http://127.0.0.1:{port}", self._readiness_poll_interval
                 )
@@ -836,7 +956,31 @@ class Supervisor:
                 launch = None
                 ready = False
             if not ready:
-                self._terminate_locked(recovered)
+                recovered.status = ServiceRunStatus(
+                    service_name,
+                    run_id,
+                    ServiceRunState.STOPPING,
+                    port,
+                    pid,
+                )
+                recovered.launch = launch
+                self._runs[service_name] = recovered
+                self._persist_run_locked(recovered)
+                try:
+                    self._terminate_locked(recovered)
+                except Exception as error:
+                    self._persist_recovery_result_locked(
+                        snapshot,
+                        "stopping",
+                        error=str(error),
+                        identity=identity,
+                    )
+                    raise
+                recovered.status = ServiceRunStatus(
+                    service_name, run_id, ServiceRunState.STOPPED
+                )
+                self._persist_run_locked(recovered)
+                self._runs.pop(service_name, None)
                 continue
             status = ServiceRunStatus(
                 service_name, run_id, ServiceRunState.READY, port, pid
@@ -919,6 +1063,59 @@ class Supervisor:
             except (TimeoutError, OSError):
                 pass
 
+    def _terminate_recovered_process_locked(
+        self,
+        process: ManagedProcess,
+        identity: ProcessIdentity,
+        service: str,
+    ) -> None:
+        if not self._probe.identity_matches(identity):
+            raise RuntimeError(
+                f"Inference Service {service!r} process identity changed during recovery"
+            )
+        process.terminate()
+        try:
+            process.wait(self._terminate_timeout)
+        except (TimeoutError, OSError):
+            if not self._probe.identity_matches(identity):
+                raise RuntimeError(
+                    f"Inference Service {service!r} process identity changed during recovery"
+                )
+            process.kill()
+            try:
+                process.wait(self._kill_timeout)
+            except (TimeoutError, OSError) as error:
+                raise RuntimeError(
+                    f"Inference Service {service!r} process could not be confirmed stopped"
+                ) from error
+
+    def _persist_recovery_result_locked(
+        self,
+        source: Mapping[str, object],
+        state: str,
+        *,
+        error: str | None = None,
+        identity: ProcessIdentity | None = None,
+    ) -> None:
+        snapshot: dict[str, object] = {
+            "kind": "service_run",
+            "id": source["id"],
+            "version": self._clock.time_ns(),
+            "service": source["service"],
+            "run_id": source["run_id"],
+            "state": state,
+        }
+        if identity is not None:
+            snapshot["pid"] = identity.pid
+            snapshot["process_identity"] = identity.birth_token
+            for field in ("upstream_port", "launch_identity"):
+                value = source.get(field)
+                if isinstance(value, int | str):
+                    snapshot[field] = value
+        if error is not None:
+            snapshot["error"] = error
+        self._state_store.put_snapshot(snapshot)
+
     def _failed_start_locked(
         self,
         run: _Run,
@@ -937,6 +1134,20 @@ class Supervisor:
         self._persist_run_locked(run)
         self._finish_operation_locked(operation_id, "failed", error=error)
         return ServiceTransition(operation_id, run.status, supervisor_started)
+
+    def _superseded_start_locked(
+        self,
+        run: _Run,
+        operation_id: str,
+        supervisor_started: bool,
+    ) -> ServiceTransition | None:
+        current = self._runs.get(run.status.service)
+        if current is run and run.status.state is ServiceRunState.STARTING:
+            return None
+        self._terminate_locked(run)
+        self._finish_operation_locked(operation_id, "superseded")
+        status = current.status if current is not None else run.status
+        return ServiceTransition(operation_id, status, supervisor_started)
 
     def _set_shedding_locked(self, enabled: bool) -> None:
         if self._shedding_new_work != enabled:

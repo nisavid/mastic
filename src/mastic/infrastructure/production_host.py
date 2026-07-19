@@ -319,6 +319,7 @@ def application_target_port(
         context_window = coherent_application_target_context(
             service.options.get("max_context"),
             parameters.get("context_window", stored.context_window if stored else None),
+            requested_context_present="context_window" in parameters,
         )
         stored_codex_provider = stored.provider if stored and name == "codex" else None
         if stored_codex_provider in {None, "mastic-local"}:
@@ -444,8 +445,15 @@ def _application_target_max_concurrent(value: object) -> int:
 
 
 def coherent_application_target_context(
-    service_context: object, requested_context: object
+    service_context: object,
+    requested_context: object,
+    *,
+    requested_context_present: bool = False,
 ) -> int | None:
+    if requested_context_present and requested_context is None:
+        raise ValueError(
+            "Application Configuration Target context_window cannot be explicit null"
+        )
     service_value = optional_int(service_context)
     requested_value = optional_int(requested_context)
     if (
@@ -643,10 +651,30 @@ def hub_online() -> bool:
 
 
 def resolve_uv(home: Path) -> Path:
-    candidates = []
     configured = os.environ.get("MASTIC_UV_EXECUTABLE")
-    if configured:
-        candidates.append(Path(configured))
+    if "MASTIC_UV_EXECUTABLE" in os.environ:
+        if not configured:
+            raise FileNotFoundError(
+                "MASTIC_UV_EXECUTABLE does not identify an existing uv executable"
+            )
+        candidate = Path(configured).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+            metadata = resolved.stat()
+        except OSError as error:
+            raise FileNotFoundError(
+                "MASTIC_UV_EXECUTABLE does not identify an existing uv executable"
+            ) from error
+        if (
+            not candidate.is_absolute()
+            or not stat.S_ISREG(metadata.st_mode)
+            or not os.access(resolved, os.X_OK)
+        ):
+            raise ValueError(
+                "MASTIC_UV_EXECUTABLE must identify an absolute executable regular file"
+            )
+        return resolved
+    candidates = []
     discovered = shutil.which("uv")
     if discovered:
         candidates.append(Path(discovered))
@@ -674,8 +702,8 @@ def resolve_uv(home: Path) -> Path:
 def optional_int(value: object) -> int | None:
     if value is None:
         return None
-    if type(value) is not int:
-        raise ValueError("value must be an integer")
+    if type(value) is not int or value <= 0:
+        raise ValueError("value must be a positive integer")
     return value
 
 

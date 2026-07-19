@@ -35,7 +35,38 @@ class _ModelSupply(_Port):
         return CacheInventory((), "local-observed", ())
 
 
+class _FalseyPort(_Port):
+    def __bool__(self) -> bool:
+        return False
+
+
 class CompositionTests(unittest.TestCase):
+    def test_falsey_injected_collaborators_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            logs = _FalseyPort()
+            metrics = _FalseyPort()
+            port = _Port()
+
+            composition = compose_application(
+                paths=paths,
+                activator=_Activator(),
+                runtime_supply=port,
+                model_supply=_ModelSupply(),
+                supervisor=port,
+                setup=port,
+                application_targets=port,
+                logs=logs,
+                metrics=metrics,
+            )
+
+            backend = composition.dispatcher._backend
+            self.assertIs(backend._logs, logs)
+            self.assertIs(backend._metrics, metrics)
+
     def test_uninitialized_queries_compose_without_supervisor_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

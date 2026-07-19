@@ -316,27 +316,39 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
     async def test_navigation_discards_a_stale_mutation_preview(self) -> None:
         gate = Event()
         self.dispatcher.preview_gate = gate
-        async with self.app.run_test(size=(120, 45)) as pilot:
-            await self.app.open_operation("service.remove")
-            self.app.query_one("#parameter-resource", Input).value = "coding"
-            self.app.query_one("#operation-submit", Button).press()
-            while not self.dispatcher.previews:
+        try:
+            async with self.app.run_test(size=(120, 45)) as pilot:
+                await self.app.open_operation("service.remove")
+                self.app.query_one("#parameter-resource", Input).value = "coding"
+                self.app.query_one("#operation-submit", Button).press()
+                for _ in range(100):
+                    if self.dispatcher.previews:
+                        break
+                    await pilot.pause()
+                else:
+                    self.fail("preview was not requested")
+
+                self.app.show_view("services")
+                gate.set()
                 await pilot.pause()
 
-            self.app.show_view("services")
+                self.assertEqual(self.app.current_view, "services")
+                self.assertIsNone(self.app.pending_parameters)
+                self.assertEqual(
+                    self.app.query_one("#operation-confirm", Button).styles.display,
+                    "none",
+                )
+                self.assertIn(
+                    "Inference Services",
+                    str(self.app.query_one("#view-title", Static).content),
+                )
+        finally:
             gate.set()
-            await pilot.pause()
 
-            self.assertEqual(self.app.current_view, "services")
-            self.assertIsNone(self.app.pending_parameters)
-            self.assertEqual(
-                self.app.query_one("#operation-confirm", Button).styles.display,
-                "none",
-            )
-            self.assertIn(
-                "Inference Services",
-                str(self.app.query_one("#view-title", Static).content),
-            )
+    def test_result_renders_evidence_once(self) -> None:
+        rendered = MasticApp._render_result({"evidence": ["exact revision"]})
+
+        self.assertEqual(rendered.count("exact revision"), 1)
 
     async def test_every_catalogue_operation_can_be_executed_from_tui(self) -> None:
         async with self.app.run_test(size=(140, 55)) as pilot:

@@ -41,6 +41,8 @@ class OperationalStateStoreTests(unittest.TestCase):
 
             for key in (
                 "api_key",
+                "api-key",
+                "apiKey",
                 "api_token",
                 "authorization",
                 "password",
@@ -147,6 +149,9 @@ class OperationalStateStoreTests(unittest.TestCase):
                 "output",
                 "query",
                 "text",
+                "prompt-text",
+                "promptText",
+                "requestBody",
             ):
                 with self.subTest(key=key):
                     with self.assertRaisesRegex(
@@ -197,15 +202,30 @@ class OperationalStateStoreTests(unittest.TestCase):
             second = store.put_snapshot(
                 {"kind": "service", "id": "chat", "state": "ready", "version": 2}
             )
+            other = store.put_snapshot(
+                {"kind": "service", "id": "alpha", "state": "ready", "version": 1}
+            )
 
             self.assertEqual(store.snapshot("service", "chat"), second)
             self.assertEqual(store.snapshot("service", "chat", version=1), first)
-            self.assertEqual(store.snapshots("service"), (first, second))
+            self.assertEqual(store.snapshots("service"), (other, second))
 
             with self.assertRaisesRegex(ValueError, "version 1 is immutable"):
                 store.put_snapshot(
                     {"kind": "service", "id": "chat", "state": "failed", "version": 1}
                 )
+
+    def test_progress_filters_by_kind_before_applying_its_page_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(Path(directory) / "state.sqlite3")
+            store.put_operation({"id": "op-1"})
+            for index in range(1000):
+                store.append_event(
+                    {"operation_id": "op-1", "kind": "checkpoint", "index": index}
+                )
+            progress = store.append_progress("op-1", {"completed": 1, "total": 1})
+
+            self.assertEqual(store.progress("op-1"), (progress,))
 
 
 if __name__ == "__main__":

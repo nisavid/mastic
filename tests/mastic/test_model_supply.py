@@ -14,6 +14,7 @@ from mastic.infrastructure.model_supply import (
     HuggingFaceHubClient,
     HubModelRecord,
     ModelSupply,
+    ModelSupplyError,
     VerificationResult,
 )
 
@@ -34,8 +35,8 @@ class FakeHub:
         self.resolve_calls: list[tuple[str, str, bool]] = []
         self.download_calls: list[tuple[str, str, bool, bool]] = []
         self.verification = VerificationResult(
-            status="complete",
-            evidence="cache-completeness",
+            status="verified",
+            evidence="hub-exact-manifest",
             issues=(),
         )
         self.inventory = CacheInventory(
@@ -236,14 +237,14 @@ class ModelInstallTests(unittest.TestCase):
             )
 
             before = supply.verify(installed)
-            repaired = supply.repair(installed)
+            with self.assertRaisesRegex(ModelSupplyError, "repair failed"):
+                supply.repair(installed)
 
             self.assertEqual(before.status, "incomplete")
             self.assertEqual(
                 hub.download_calls[-1],
-                ("mlx-community/Qwen-test", "a" * 40, False, False),
+                ("mlx-community/Qwen-test", "a" * 40, False, True),
             )
-            self.assertEqual(repaired.status, "incomplete")
 
 
 class ModelCacheTests(unittest.TestCase):
@@ -276,12 +277,73 @@ class ModelCacheTests(unittest.TestCase):
             self.assertEqual(preview.expected_freed_size, 900)
             self.assertEqual(hub.deletion_calls, [("abc123",)])
             with self.assertRaisesRegex(PermissionError, "explicit approval"):
-                preview.execute()
-            preview.execute(approved=True)
+                preview.execute(installations=())
+            preview.execute(approved=True, installations=())
             self.assertTrue(hub.deletion.executed)
+
+    def test_cache_deletion_rechecks_live_installations_after_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            hub = FakeHub(Path(directory))
+            supply = ModelSupply(hub)
+            installation = supply.install(
+                alias="coding",
+                repo_id="mlx-community/Qwen-test",
+                revision="main",
+            ).installation
+            preview = supply.preview_cache_deletion(
+                (installation.revision.commit_sha,), installations=()
+            )
+
+            with self.assertRaisesRegex(ModelSupplyError, "blocked by references"):
+                preview.execute(approved=True, installations=(installation,))
+
+            self.assertFalse(hub.deletion.executed)
 
 
 class HuggingFaceHubClientTests(unittest.TestCase):
+    def test_offline_verification_reuses_exact_manifest_and_rejects_tampering(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshots" / ("b" * 40)
+            snapshot.mkdir(parents=True)
+            payload = b"exact weights"
+            (snapshot / "weights.bin").write_bytes(payload)
+
+            class FakeApi:
+                def model_info(self, _repo_id, **_kwargs):
+                    return SimpleNamespace(
+                        sha="b" * 40,
+                        siblings=(
+                            SimpleNamespace(
+                                rfilename="weights.bin",
+                                size=len(payload),
+                                blob_id=None,
+                                lfs={"sha256": sha256(payload).hexdigest()},
+                            ),
+                        ),
+                    )
+
+            module = ModuleType("huggingface_hub")
+            module.HfApi = FakeApi
+            module.snapshot_download = lambda **_kwargs: str(snapshot)
+            with patch.dict("sys.modules", {"huggingface_hub": module}):
+                client = HuggingFaceHubClient()
+                online = client.verify_revision(
+                    "mlx-community/Qwen", "b" * 40, snapshot
+                )
+                (snapshot / "weights.bin").write_bytes(b"tampered")
+                offline = client.verify_revision(
+                    "mlx-community/Qwen",
+                    "b" * 40,
+                    snapshot,
+                    local_files_only=True,
+                )
+
+            self.assertEqual(online.status, "verified")
+            self.assertEqual(offline.status, "incomplete")
+            self.assertIn("size-mismatch:weights.bin", offline.issues)
+
     def test_verify_revision_checks_every_exact_hub_manifest_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / ("b" * 40)

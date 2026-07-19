@@ -17,6 +17,8 @@ from typing import Callable, Generic, Iterator, Mapping, Sequence, TypeVar
 import tomlkit
 from tomlkit.toml_document import TOMLDocument
 
+from mastic.application.serialization import to_plain_data as _plain
+
 
 ValidatedConfig = TypeVar("ValidatedConfig")
 ConfigValidator = Callable[[Mapping[str, object]], ValidatedConfig]
@@ -24,6 +26,11 @@ _JOURNAL_SCHEMA_VERSION = 1
 _JOURNAL_KEYS = frozenset(
     {"action", "previous_revision", "revision", "saved_at", "schema_version"}
 )
+_REVISION_UNSET = object()
+
+
+class ConfigRevisionConflict(RuntimeError):
+    """The desired state changed after a caller resolved its mutation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,30 +87,57 @@ class ConfigStore(Generic[ValidatedConfig]):
         return _private_file_exists(self._path)
 
     def save(
-        self, document: TOMLDocument, *, action: str = "save"
+        self,
+        document: TOMLDocument,
+        *,
+        action: str = "save",
+        expected_revision: str | None | object = _REVISION_UNSET,
     ) -> ConfigSnapshot[ValidatedConfig]:
         """Validate and atomically replace the desired-state document."""
+        if type(action) is not str or not action.strip():
+            raise ValueError("config journal action must be a nonempty string")
         text = document.as_string()
         snapshot = self._snapshot(text)
         with self._locked():
+            self._require_revision_locked(expected_revision)
             self._save_locked(snapshot, action)
         return snapshot
 
     def edit(
-        self, mutation: Callable[[TOMLDocument], object]
+        self,
+        mutation: Callable[[TOMLDocument], object],
+        *,
+        expected_revision: str | None | object = _REVISION_UNSET,
     ) -> ConfigSnapshot[ValidatedConfig]:
         """Apply one locked semantic edit to the latest desired state."""
         with self._locked():
+            self._require_revision_locked(expected_revision)
             snapshot = self._snapshot(_read_private_file(self._path).decode("utf-8"))
             mutation(snapshot.document)
             edited = self._snapshot(snapshot.document.as_string())
             self._save_locked(edited, "edit")
             return edited
 
-    def import_text(self, text: str) -> ConfigSnapshot[ValidatedConfig]:
+    def import_text(
+        self,
+        text: str,
+        *,
+        expected_revision: str | None | object = _REVISION_UNSET,
+    ) -> ConfigSnapshot[ValidatedConfig]:
         """Validate and atomically import a TOML document."""
         snapshot = self._snapshot(text)
-        return self.save(snapshot.document)
+        return self.save(snapshot.document, expected_revision=expected_revision)
+
+    def _require_revision_locked(self, expected_revision: str | None | object) -> None:
+        if expected_revision is _REVISION_UNSET:
+            return
+        current_revision = (
+            _revision(_read_private_file(self._path))
+            if _private_file_exists(self._path)
+            else None
+        )
+        if current_revision != expected_revision:
+            raise ConfigRevisionConflict("config revision changed after preview")
 
     def export_text(self) -> str:
         """Export the current document exactly as stored."""
@@ -120,7 +154,12 @@ class ConfigStore(Generic[ValidatedConfig]):
         with self._locked():
             return self._reconcile_journal_locked()
 
-    def restore(self, revision: str) -> ConfigSnapshot[ValidatedConfig]:
+    def restore(
+        self,
+        revision: str,
+        *,
+        expected_revision: str | None | object = _REVISION_UNSET,
+    ) -> ConfigSnapshot[ValidatedConfig]:
         """Restore an exact archived desired-state revision."""
         archive_path = self._archive_path(revision)
         try:
@@ -130,7 +169,11 @@ class ConfigStore(Generic[ValidatedConfig]):
         if _revision(text.encode()) != revision:
             raise RuntimeError(f"config revision {revision} failed integrity check")
         snapshot = self._snapshot(text)
-        return self.save(snapshot.document, action="restore")
+        return self.save(
+            snapshot.document,
+            action="restore",
+            expected_revision=expected_revision,
+        )
 
     def _snapshot(self, text: str) -> ConfigSnapshot[ValidatedConfig]:
         document = tomlkit.parse(text)
@@ -442,11 +485,3 @@ def _semantic_diff(
         return
     if before != after:
         yield ConfigChange(path, _plain(before), _plain(after))
-
-
-def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [_plain(item) for item in value]
-    return value

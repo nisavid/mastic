@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from dataclasses import dataclass
 
@@ -349,6 +350,48 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.gateway.routes["coding"][0], "ready")
         self.assertEqual(self.gateway.routes["memory"][0], "ready")
 
+    def test_service_start_claims_one_run_before_launch_preparation(self) -> None:
+        supervisor: Supervisor
+
+        class ReentrantRuntime(FakeRuntimeSupply):
+            entered = False
+
+            def prepare_launch(self, service, host, port):
+                if not self.entered:
+                    self.entered = True
+                    supervisor.start_service(str(service.name))
+                return super().prepare_launch(service, host, port)
+
+        runtime = ReentrantRuntime()
+        supervisor = Supervisor(
+            desired_state=self.desired,
+            runtime_supply=runtime,
+            state_store=self.store,
+            gateway=self.gateway,
+            processes=self.processes,
+            probe=self.probe,
+            memory_pressure=self.pressure,
+            clock=self.clock,
+            readiness_timeout=3,
+            drain_timeout=2,
+            terminate_timeout=1,
+        )
+
+        transition = supervisor.start_service("coding")
+
+        self.assertEqual(transition.run.state, ServiceRunState.READY)
+        self.assertEqual(len(self.processes.launched), 1)
+        self.assertEqual(
+            len(
+                [
+                    item
+                    for item in self.store.operation_items.values()
+                    if item["kind"] == "service.start"
+                ]
+            ),
+            1,
+        )
+
     def test_capabilities_are_validated_before_process_launch(self) -> None:
         self.runtime.error = CapabilityValidationError("mtp is unavailable")
 
@@ -367,6 +410,24 @@ class SupervisorTests(unittest.TestCase):
                 observed_capabilities=frozenset({"model"}),
             )
 
+    def test_unexpected_launch_preparation_failure_is_journaled(self) -> None:
+        self.runtime.error = OSError("runtime catalogue disappeared")
+
+        with self.assertRaisesRegex(OSError, "catalogue disappeared"):
+            self.supervisor.start_service("coding")
+
+        operation = next(
+            item
+            for item in self.store.operation_items.values()
+            if item["kind"] == "service.start"
+        )
+        self.assertEqual(operation["status"], "failed")
+        self.assertEqual(operation["outcome"], "failed")
+        self.assertEqual(
+            self.supervisor.service_status("coding").state,
+            ServiceRunState.FAILED,
+        )
+
     def test_readiness_timeout_forces_bounded_cleanup(self) -> None:
         self.probe.ready = False
 
@@ -376,6 +437,39 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result.run.state, ServiceRunState.FAILED)
         self.assertEqual(process.terminate_calls, 1)
         self.assertFalse(process.running)
+
+    def test_stale_readiness_cannot_resurrect_a_stopped_run(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingProbe(FakeProbe):
+            def is_ready(self, endpoint: str, timeout: float) -> bool:
+                del endpoint, timeout
+                entered.set()
+                release.wait(1)
+                return True
+
+        self.probe = BlockingProbe()
+        supervisor = self._new_supervisor()
+        transitions: list[object] = []
+        starter = threading.Thread(
+            target=lambda: transitions.append(supervisor.start_service("coding"))
+        )
+        starter.start()
+        self.assertTrue(entered.wait(1))
+
+        stopped = supervisor.stop_service("coding")
+        release.set()
+        starter.join(1)
+
+        self.assertFalse(starter.is_alive())
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(stopped.run.state, ServiceRunState.STOPPED)
+        self.assertEqual(
+            supervisor.service_status("coding").state,
+            ServiceRunState.STOPPED,
+        )
+        self.assertEqual(self.gateway.routes["coding"], ("stopped", None))
 
     def test_stop_restart_and_supervisor_shutdown_are_bounded_and_journaled(self):
         first = self.supervisor.start_service("coding")
@@ -407,6 +501,52 @@ class SupervisorTests(unittest.TestCase):
         latest = self.store.snapshot_items[-1]
         self.assertEqual(latest["process_identity"], f"birth-{process.pid}")
         self.assertTrue(process.running)
+
+    def test_remove_uses_live_run_after_desired_state_was_committed_absent(
+        self,
+    ) -> None:
+        transition = self.supervisor.start_service("coding")
+        process = self.processes.processes[transition.run.pid]  # type: ignore[index]
+        self.desired.items.pop("coding")
+
+        removed = self.supervisor.remove_service("coding", previous_route="coding")
+
+        self.assertEqual(removed.run.state, ServiceRunState.STOPPED)
+        self.assertFalse(process.running)
+        self.assertNotIn("coding", self.gateway.routes)
+
+    def test_remove_cleans_stopped_route_after_desired_state_was_committed_absent(
+        self,
+    ) -> None:
+        self.supervisor.start()
+        self.desired.items.pop("coding")
+
+        removed = self.supervisor.remove_service("coding", previous_route="coding")
+
+        self.assertEqual(removed.run.state, ServiceRunState.STOPPED)
+        self.assertNotIn("coding", self.gateway.routes)
+
+    def test_supervisor_stop_cleans_up_every_component_after_one_failure(self) -> None:
+        coding = self.supervisor.start_service("coding")
+        memory = self.supervisor.start_service("memory")
+        stuck = self.processes.processes[coding.run.pid]  # type: ignore[index]
+        sibling = self.processes.processes[memory.run.pid]  # type: ignore[index]
+        stuck.ignores_terminate = True
+        stuck.ignores_kill = True
+
+        with self.assertRaisesRegex(RuntimeError, "Supervisor stop failed"):
+            self.supervisor.stop()
+
+        self.assertFalse(sibling.running)
+        self.assertIn(("stop", 2), self.gateway.calls)
+        self.assertEqual(self.supervisor.status().state, "failed")
+        operation = [
+            item
+            for item in self.store.operation_items.values()
+            if item["kind"] == "supervisor.stop"
+        ][-1]
+        self.assertEqual(operation["status"], "failed")
+        self.assertEqual(operation["outcome"], "failed")
 
     def test_supervisor_restart_restores_gateway_admission_for_ready_service(self):
         self.supervisor.start_service("coding")
@@ -582,6 +722,78 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(mismatched.runs, ())
         self.assertFalse(replacement.running)
 
+    def test_recovery_retries_cleanup_when_a_live_child_cannot_initially_stop(
+        self,
+    ) -> None:
+        identity = ProcessIdentity(1234, "birth-1234")
+        process = FakeProcess(1234, ignores_terminate=True, ignores_kill=True)
+        self.processes.processes[1234] = process
+        self.probe.identities[1234] = identity
+        service = self.desired.service("coding")
+        launch = self.runtime.prepare_launch(service, "127.0.0.1", 49199)  # type: ignore[arg-type]
+        self.store.snapshot_items.append(
+            {
+                "kind": "service_run",
+                "id": "coding/run-old",
+                "version": 1,
+                "service": "coding",
+                "run_id": "run-old",
+                "state": "ready",
+                "pid": 1234,
+                "process_identity": "birth-1234",
+                "launch_identity": _launch_identity(launch),
+                "upstream_port": 49199,
+            }
+        )
+        self.probe.ready = False
+
+        with self.assertRaisesRegex(RuntimeError, "could not be confirmed stopped"):
+            self._new_supervisor().start()
+
+        latest = self.store.snapshot_items[-1]
+        self.assertEqual(latest["state"], "stopping")
+        self.assertEqual(latest["pid"], 1234)
+        process.ignores_kill = False
+
+        recovered = self._new_supervisor().start()
+
+        self.assertEqual(recovered.runs, ())
+        self.assertFalse(process.running)
+        self.assertEqual(self.store.snapshot_items[-1]["state"], "stopped")
+
+    def test_recovery_stops_and_records_a_verified_undesired_child(self) -> None:
+        service = self.desired.service("coding")
+        launch = self.runtime.prepare_launch(service, "127.0.0.1", 49199)  # type: ignore[arg-type]
+        process = FakeProcess(1234)
+        self.processes.processes[1234] = process
+        self.probe.identities[1234] = ProcessIdentity(1234, "birth-1234")
+        self.store.snapshot_items.append(
+            {
+                "kind": "service_run",
+                "id": "coding/run-old",
+                "version": 1,
+                "service": "coding",
+                "run_id": "run-old",
+                "state": "ready",
+                "pid": 1234,
+                "process_identity": "birth-1234",
+                "launch_identity": _launch_identity(launch),
+                "upstream_port": 49199,
+            }
+        )
+        self.desired.items.pop("coding")
+
+        status = self.supervisor.start()
+
+        self.assertNotIn("coding", {run.service for run in status.runs})
+        self.assertEqual(self.processes.attached, [1234])
+        self.assertFalse(process.running)
+        final = [
+            item for item in self.store.snapshot_items if item["id"] == "coding/run-old"
+        ][-1]
+        self.assertEqual(final["state"], "stopped")
+        self.assertNotIn("pid", final)
+
     def test_critical_pressure_stops_lru_idle_unpinned_but_never_pinned_or_busy(self):
         self.desired.items["pinned"] = _service("pinned", pinned=True)
         self.supervisor.start_service("coding")
@@ -627,6 +839,21 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.gateway.routes["new"], ("stopped", None))
         self.assertEqual(outcome.pressure, PressureLevel.NORMAL)
 
+    def test_maintenance_activates_a_new_supervisor_owned_service(self) -> None:
+        self.supervisor.start()
+        self.desired.items["automatic"] = _service(
+            "automatic", activation=ActivationPolicy.SUPERVISOR
+        )
+
+        outcome = self.supervisor.maintain()
+
+        self.assertEqual(outcome.state, "running")
+        self.assertEqual(
+            self.supervisor.service_status("automatic").state,
+            ServiceRunState.READY,
+        )
+        self.assertEqual(self.gateway.routes["automatic"][0], "ready")
+
     def test_maintenance_restarts_a_running_service_after_desired_edit(self) -> None:
         first = self.supervisor.start_service("coding")
         self.desired.items["coding"] = _service("coding", route="coding-v2")
@@ -639,6 +866,24 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("coding", self.gateway.routes)
         self.assertEqual(self.gateway.routes["coding-v2"][0], "ready")
         self.assertEqual(outcome.restarted_services, ("coding",))
+
+    def test_maintenance_closes_the_old_route_before_waiting_to_replace(self) -> None:
+        class DrainAwareGateway(FakeGateway):
+            def is_busy(self, service: str) -> bool:
+                state, _endpoint = self.routes[service]
+                if state != "unavailable":
+                    raise AssertionError("replacement inspected an admitting route")
+                return super().is_busy(service)
+
+        self.gateway = DrainAwareGateway()
+        supervisor = self._new_supervisor()
+        supervisor.start_service("coding")
+        self.desired.items["coding"] = _service("coding", route="coding-v2")
+
+        outcome = supervisor.maintain()
+
+        self.assertEqual(outcome.restarted_services, ("coding",))
+        self.assertEqual(self.gateway.routes["coding-v2"][0], "ready")
 
     def test_maintenance_restarts_idle_run_after_exact_launch_target_update(
         self,

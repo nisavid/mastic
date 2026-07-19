@@ -1,6 +1,8 @@
 import json
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import (
@@ -8,10 +10,13 @@ from mastic.application.setup import (
     ExactSetupSelection,
     RecommendedProfile,
     RemovalInventory,
+    SetupEvidence,
     SetupIntent,
     SetupResolver,
     SetupPreflight,
+    StepState,
 )
+from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.setup_port import (
     OperationalSetupEvidenceStore,
     SetupOperationPort,
@@ -58,6 +63,9 @@ class FakeOperationalState:
 
     def snapshots(self, kind):
         return tuple(row for row in self.rows if row["kind"] == kind)
+
+    def snapshot_history(self, kind):
+        return self.snapshots(kind)
 
 
 def selection(*, revision=MODEL_REVISION, trust=()):
@@ -305,10 +313,18 @@ class SetupOperationPortTests(unittest.TestCase):
             self.runtime.calls
             + self.model.calls
             + self.config.calls
+            + self.applications.calls
             + self.application_targets.calls
             + self.supervisor.calls,
             [],
         )
+
+    def test_direct_setup_port_rejects_non_boolean_control_flags(self) -> None:
+        for parameters in ({"offline": "false"}, {"noninteractive": 1}):
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(ApplicationError) as raised:
+                    self.port().preview(parameters)
+                self.assertEqual(raised.exception.code, "invalid_parameter")
 
     def test_no_validated_fit_is_a_completed_observation_without_mutation(self):
         preview = self.port(
@@ -325,6 +341,7 @@ class SetupOperationPortTests(unittest.TestCase):
             self.runtime.calls
             + self.model.calls
             + self.config.calls
+            + self.applications.calls
             + self.application_targets.calls
             + self.supervisor.calls,
             [],
@@ -832,24 +849,33 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "setup_interrupted")
         self.assertIn("application.canary.hindsight", str(raised.exception))
+        details = dict(raised.exception.details)
+        self.assertEqual(details["state"], "interrupted")
+        self.assertFalse(details["complete"])
+        self.assertEqual(details["completion"], "partial")
+        self.assertEqual(details["readiness"], "pending")
         self.assertEqual(
-            dict(raised.exception.details),
-            {
-                "state": "interrupted",
-                "complete": False,
-                "completion": "partial",
-                "readiness": "pending",
-                "application_target_readiness": {
-                    "codex": "unverified",
-                    "hindsight": "pending",
-                },
-                "failed_step": "application.canary.hindsight",
-            },
+            details["application_target_readiness"],
+            {"codex": "unverified", "hindsight": "pending"},
+        )
+        self.assertEqual(details["failed_step"], "application.canary.hindsight")
+        self.assertEqual(
+            details["remaining_steps"],
+            ("application.canary.hindsight",),
+        )
+        self.assertEqual(
+            details["observations"]["application_target_readiness"],
+            {"codex": "unverified", "hindsight": "pending"},
+        )
+        self.assertIn("preflight", details["observations"])
+        self.assertIn(
+            "application.canary.codex", details["observations"]["completed_steps"]
         )
         self.assertEqual(
             [item.step_id for item in self.evidence.items["setup"]][-1],
-            "application.canary.codex",
+            "application.canary.hindsight",
         )
+        self.assertEqual(self.evidence.items["setup"][-1].state, StepState.FAILED)
 
         self.application_targets.calls.clear()
         self.application_targets.results["application-target.test"] = (
@@ -976,8 +1002,10 @@ class SetupOperationPortTests(unittest.TestCase):
                 "gateway.configure",
                 "supervisor.activate",
                 "runtime.install",
+                "model.install",
             ],
         )
+        self.assertEqual(self.evidence.items["setup"][-1].state, StepState.FAILED)
 
         resumed = self.port()
         resumed_preview = resumed.preview({})
@@ -1091,7 +1119,10 @@ class SetupOperationPortTests(unittest.TestCase):
             [*self.inventory.unrelated_settings, "codex"],
         )
         self.assertEqual(
-            self.supervisor.calls + self.application_targets.calls + self.config.calls,
+            self.supervisor.calls
+            + self.applications.calls
+            + self.application_targets.calls
+            + self.config.calls,
             [],
         )
 
@@ -1111,12 +1142,14 @@ class SetupOperationPortTests(unittest.TestCase):
             [call[0] for call in self.application_targets.calls],
             ["application-target.remove", "application-target.remove"],
         )
-        self.assertIn(
-            (
-                "application.remove",
-                {"applications": ("hindsight",), "confirmed": True},
-            ),
+        self.assertEqual(
             self.applications.calls,
+            [
+                (
+                    "application.remove",
+                    {"applications": ("hindsight",), "confirmed": True},
+                )
+            ],
         )
         state_remove = next(
             call for call in self.config.calls if call[0] == "state.remove"
@@ -1143,6 +1176,23 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(state.rows[0]["kind"], "setup_evidence")
         self.assertNotIn("prompt", json.dumps(state.rows[0]))
         self.assertEqual(len(resolved["preview_fingerprint"]), 64)
+
+    def test_operational_evidence_adapter_records_failure_then_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = OperationalSetupEvidenceStore(
+                OperationalStateStore(Path(directory) / "state.sqlite3")
+            )
+            failed = SetupEvidence(
+                "model.install", "exact-plan", StepState.FAILED, "interrupted"
+            )
+            completed = SetupEvidence(
+                "model.install", "exact-plan", StepState.COMPLETE, "installed"
+            )
+
+            evidence.record("setup", failed)
+            evidence.record("setup", completed)
+
+            self.assertEqual(evidence.load("setup"), (failed, completed))
 
 
 if __name__ == "__main__":

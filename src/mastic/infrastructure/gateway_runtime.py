@@ -61,6 +61,7 @@ class GatewayRuntime:
         self._authenticate = authenticate
         self._profile_resolver = profile_resolver
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._routes: dict[str, GatewayRoute] = {}
         self._active: dict[str, int] = {}
@@ -74,52 +75,54 @@ class GatewayRuntime:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            app = create_gateway(
-                self,
-                bind_host=self.host,
-                activity=self,
-                authenticate=self._authenticate,
-                profile_resolver=self._profile_resolver,
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._thread is not None and self._thread.is_alive():
+                    return
+                app = create_gateway(
+                    self,
+                    bind_host=self.host,
+                    activity=self,
+                    authenticate=self._authenticate,
+                    profile_resolver=self._profile_resolver,
+                )
+                server = self._server_factory(app, self.host, self.port)
+                thread = threading.Thread(
+                    target=server.run,
+                    name="mastic-gateway",
+                    daemon=True,
+                )
+                self._server = server
+                self._thread = thread
+                thread.start()
+            deadline = time.monotonic() + self._start_timeout
+            while time.monotonic() < deadline:
+                if server.started:
+                    return
+                if not thread.is_alive():
+                    break
+                time.sleep(self._poll_interval)
+            self.stop(self._start_timeout)
+            raise RuntimeError(
+                "Gateway did not start on its configured loopback endpoint"
             )
-            server = self._server_factory(app, self.host, self.port)
-            thread = threading.Thread(
-                target=server.run,
-                name="mastic-gateway",
-                daemon=True,
-            )
-            self._server = server
-            self._thread = thread
-            thread.start()
-        deadline = time.monotonic() + self._start_timeout
-        while time.monotonic() < deadline:
-            if server.started:
-                return
-            if not thread.is_alive():
-                break
-            time.sleep(self._poll_interval)
-        self.stop(self._start_timeout)
-        raise RuntimeError("Gateway did not start on its configured loopback endpoint")
 
     def stop(self, timeout: float) -> None:
-        with self._lock:
-            server = self._server
-            thread = self._thread
-            if server is None or thread is None:
-                return
-            server.should_exit = True
-        if thread is not threading.current_thread():
-            thread.join(timeout)
-        if thread.is_alive():
-            raise RuntimeError("Gateway did not stop before the shutdown deadline")
-        with self._lock:
-            # A new generation may have started after this thread exited but
-            # before this stopper reacquired the lifecycle lock.
-            if self._server is server and self._thread is thread:
-                self._server = None
-                self._thread = None
+        with self._lifecycle_lock:
+            with self._lock:
+                server = self._server
+                thread = self._thread
+                if server is None or thread is None:
+                    return
+                server.should_exit = True
+            if thread is not threading.current_thread():
+                thread.join(timeout)
+            if thread.is_alive():
+                raise RuntimeError("Gateway did not stop before the shutdown deadline")
+            with self._lock:
+                if self._server is server and self._thread is thread:
+                    self._server = None
+                    self._thread = None
 
     def set_route(self, service: str, state: str, endpoint: str | None) -> None:
         if state not in {"ready", "stopped", "unavailable"}:

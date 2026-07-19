@@ -756,6 +756,7 @@ class MasticApp(App[None]):
                 "schema_version",
                 "operation",
                 "next_actions",
+                "evidence",
             }:
                 continue
             rows.extend(cls._render_field(key, item))

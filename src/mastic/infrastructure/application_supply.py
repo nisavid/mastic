@@ -128,12 +128,33 @@ class ApplicationSupply:
         conflicts: list[str] = []
         codex_path = self._home / ".local/bin/codex"
         hindsight_path = self._home / ".local/bin/hindsight"
-        if "codex" in targets and _path_present(codex_path) and not adopted["codex"]:
+        codex_pending = _journal_pending(prior, "codex")
+        codex_resume = (
+            "codex" in targets
+            and codex_pending
+            and (
+                _regular_digest(codex_path)
+                == hashlib.sha256(
+                    _codex_binary(self._artifact_path(artifacts["codex-cli"]))
+                ).hexdigest()
+            )
+        )
+        if (
+            "codex" in targets
+            and _path_present(codex_path)
+            and not adopted["codex"]
+            and not codex_resume
+        ):
             conflicts.append(str(codex_path))
+        hindsight_cli_resume = "hindsight" in targets and (
+            _journal_component_pending(prior, "cli")
+            and _regular_digest(hindsight_path) == artifacts["hindsight-cli"].sha256
+        )
         if (
             "hindsight" in targets
             and _path_present(hindsight_path)
             and not adopted["hindsight-cli"]
+            and not hindsight_cli_resume
         ):
             conflicts.append(str(hindsight_path))
         api_root = self._api_tool_root()
@@ -145,6 +166,7 @@ class ApplicationSupply:
                 or any(_path_present(path) for path in api_bins.values())
             )
             and not adopted["hindsight-api"]
+            and not _journal_component_pending(prior, "api")
         ):
             conflicts.extend(
                 str(path)
@@ -223,6 +245,8 @@ class ApplicationSupply:
                     "cli_sha256": artifacts["hindsight-cli"].sha256,
                     "cli_ownership": "mastic" if cli_is_owned else "third-party",
                     "api_ownership": "mastic" if api_is_owned else "third-party",
+                    "cli_state": "complete" if cli_adopted else "pending",
+                    "api_state": "complete" if api_adopted else "pending",
                     "api_tool_root": str(api_root),
                     "api_bin_paths": {
                         name: str(path) for name, path in api_bins.items()
@@ -232,8 +256,25 @@ class ApplicationSupply:
                 self._write_journal(journal)
                 if not cli_adopted:
                     self._install_hindsight(artifacts["hindsight-cli"])
+                    installed["hindsight"] = {
+                        **installed["hindsight"],
+                        "cli_state": "complete",
+                        "cli_sha256": _required_regular_digest(hindsight_path),
+                    }
+                    journal["applications"] = installed
+                    self._write_journal(journal)
                 if not api_adopted:
                     self._install_hindsight_api(artifacts["hindsight-api"])
+                    installed["hindsight"] = {
+                        **installed["hindsight"],
+                        "api_state": "complete",
+                        "api_bin_sha256": {
+                            name: _required_regular_digest(path)
+                            for name, path in api_bins.items()
+                        },
+                    }
+                    journal["applications"] = installed
+                    self._write_journal(journal)
                 installed["hindsight"] = {
                     "version": _VERSIONS["hindsight"],
                     "provenance": (
@@ -252,6 +293,8 @@ class ApplicationSupply:
                     ),
                     "cli_ownership": "mastic" if cli_is_owned else "third-party",
                     "api_ownership": "mastic" if api_is_owned else "third-party",
+                    "cli_state": "complete",
+                    "api_state": "complete",
                     "api_tool_root": str(api_root),
                     "api_bin_paths": {
                         name: str(path) for name, path in api_bins.items()
@@ -347,6 +390,15 @@ class ApplicationSupply:
                     expected_digest=str(value["sha256"]),
                 )
             else:
+                if value.get("provenance") == "installing" and (
+                    value.get("cli_state") != "complete"
+                    or value.get("api_state") != "complete"
+                ):
+                    raise ApplicationError(
+                        "application_install_incomplete",
+                        "Resume the interrupted Hindsight installation before removing it",
+                        next_actions=("rerun mastic setup",),
+                    )
                 if value.get("cli_ownership") == "mastic":
                     self._remove_owned_file_component(
                         journal,
@@ -699,23 +751,47 @@ class ApplicationSupply:
             with tempfile.TemporaryDirectory(prefix="mastic-api-adopt-") as raw:
                 root = Path(raw)
                 _extract_safe(archive, root)
+                expected: dict[str, bytes] = {}
                 for wheel in (root / "wheels").glob("*.whl"):
                     with zipfile.ZipFile(wheel) as package:
                         for member in package.infolist():
-                            if (
-                                member.is_dir()
-                                or ".data/" in member.filename
-                                or member.filename.endswith(".dist-info/RECORD")
-                            ):
+                            if member.is_dir():
                                 continue
-                            installed = site / member.filename
-                            if (
-                                installed.is_symlink()
-                                or not installed.is_file()
-                                or installed.read_bytes() != package.read(member)
-                            ):
+                            relative = _installed_wheel_path(member.filename)
+                            if relative is None:
+                                continue
+                            payload = package.read(member)
+                            if relative in expected and expected[relative] != payload:
                                 return False
-                return any((root / "wheels").glob("*.whl"))
+                            expected[relative] = payload
+                if not expected:
+                    return False
+                observed = tuple(site.rglob("*"))
+                if any(path.is_symlink() for path in observed):
+                    return False
+                actual = {
+                    path.relative_to(site).as_posix(): path
+                    for path in observed
+                    if path.is_file()
+                    and "__pycache__" not in path.relative_to(site).parts
+                }
+                generated = {
+                    name
+                    for name, path in actual.items()
+                    if name.endswith(".dist-info/INSTALLER")
+                    and path.read_bytes() == b"uv\n"
+                    or name.endswith(".dist-info/REQUESTED")
+                    and path.read_bytes() == b""
+                }
+                if set(actual) != set(expected) | generated:
+                    return False
+                for relative, payload in expected.items():
+                    installed = actual.get(relative)
+                    if installed is None:
+                        return False
+                    if installed.read_bytes() != payload:
+                        return False
+                return True
         except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile):
             return False
 
@@ -834,6 +910,27 @@ def _journal_owns_api(applications: Mapping[object, object]) -> bool:
 def _journal_owns_cli(applications: Mapping[object, object]) -> bool:
     value = applications.get("hindsight")
     return isinstance(value, Mapping) and value.get("cli_ownership") == "mastic"
+
+
+def _journal_pending(applications: Mapping[object, object], name: str) -> bool:
+    value = applications.get(name)
+    return (
+        isinstance(value, Mapping)
+        and value.get("ownership") == "mastic"
+        and value.get("provenance") == "installing"
+    )
+
+
+def _journal_component_pending(
+    applications: Mapping[object, object], component: str
+) -> bool:
+    value = applications.get("hindsight")
+    return (
+        isinstance(value, Mapping)
+        and value.get("provenance") == "installing"
+        and value.get(f"{component}_ownership") == "mastic"
+        and value.get(f"{component}_state") == "pending"
+    )
 
 
 def _parse_artifact(value: object) -> _Artifact:
@@ -1012,6 +1109,18 @@ def _extract_safe(archive: Path, destination: Path) -> None:
             ):
                 raise ValueError("archive contains an unsafe member")
         source.extractall(destination, filter="data")
+
+
+def _installed_wheel_path(name: str) -> str | None:
+    path = Path(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("wheel contains an unsafe member")
+    parts = path.parts
+    if len(parts) >= 3 and parts[0].endswith(".data"):
+        if parts[1] not in {"purelib", "platlib"}:
+            return None
+        path = Path(*parts[2:])
+    return path.as_posix()
 
 
 def _verify_api_bundle(archive: Path) -> None:

@@ -141,20 +141,32 @@ class PrivateLogReader:
         paths = self._paths(scope, resource)
         rows: list[dict[str, object]] = []
         for path in paths:
+            descriptor: int | None = None
             try:
-                metadata = path.lstat()
-            except FileNotFoundError:
-                continue
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or metadata.st_size > self._max_bytes
-            ):
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                )
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    continue
+                start = max(0, metadata.st_size - self._max_bytes)
+                if start:
+                    os.lseek(descriptor, start - 1, os.SEEK_SET)
+                    preceding = os.read(descriptor, 1)
+                else:
+                    preceding = b"\n"
+                payload = os.read(descriptor, self._max_bytes)
             except OSError:
                 continue
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            if start and preceding != b"\n":
+                _partial, separator, payload = payload.partition(b"\n")
+                if not separator:
+                    payload = b""
+            lines = payload.decode("utf-8", errors="replace").splitlines()
             rows.extend(
                 {"source": path.name, "message": line}
                 for line in lines[-self._max_lines :]
@@ -186,11 +198,8 @@ class StateMetricsSource:
         return tuple(
             item
             for item in self._state.metrics()
-            if scope == "all"
-            or (
-                item.get("scope") == scope
-                and (resource is None or item.get("resource") == resource)
-            )
+            if (scope == "all" or item.get("scope") == scope)
+            and (resource is None or item.get("resource") == resource)
         )
 
 
