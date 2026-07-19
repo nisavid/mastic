@@ -16,8 +16,9 @@ Phase 2 Messages decisions open. Its design evidence lives in `docs/research/`.
 ## Development
 
 ```sh
-uv run python -m unittest discover -s tests -v
-uvx ruff check .
-uvx ruff format --check .
+uv run --frozen python -m unittest discover -s tests -t . -v
+uv run --frozen pyrefly check --output-format min-text
+uv run --frozen ruff check .
+uv run --frozen ruff format --check .
 uv build
 ```
