@@ -26,6 +26,49 @@ HINDSIGHT_API_LAUNCHERS = (
 
 
 class ApplicationSupplyTests(unittest.TestCase):
+    def test_cli_install_ignores_hostile_predictable_temporary_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            destination = root / "bin/codex"
+            destination.parent.mkdir()
+            victim = root / "victim"
+            victim.write_bytes(b"keep me")
+            predictable = destination.with_name(
+                f".{destination.name}.mastic-{os.getpid()}"
+            )
+            predictable.symlink_to(victim)
+
+            supply = ApplicationSupply(root / "home", root / "cache", root / "state")
+            supply._install_bytes(destination, b"managed executable")
+
+            self.assertEqual(victim.read_bytes(), b"keep me")
+            self.assertTrue(predictable.is_symlink())
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_bytes(), b"managed executable")
+
+    def test_cli_install_does_not_replace_destination_created_during_publish(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            destination = root / "bin/codex"
+            destination.parent.mkdir()
+            supply = ApplicationSupply(root / "home", root / "cache", root / "state")
+            real_link = os.link
+
+            def create_conflict_then_link(source, target, **kwargs):
+                destination.write_bytes(b"third-party executable")
+                return real_link(source, target, **kwargs)
+
+            with (
+                patch.object(application_supply.os, "link", create_conflict_then_link),
+                self.assertRaises(ApplicationError) as raised,
+            ):
+                supply._install_bytes(destination, b"managed executable")
+
+            self.assertEqual(raised.exception.code, "application_install_conflict")
+            self.assertEqual(destination.read_bytes(), b"third-party executable")
+
     def test_install_and_remove_transactions_serialize_across_store_instances(
         self,
     ) -> None:

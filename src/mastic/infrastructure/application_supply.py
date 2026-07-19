@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import tarfile
 import tempfile
@@ -836,10 +837,64 @@ class ApplicationSupply:
                 "application_install_conflict",
                 f"refusing to replace symlink: {destination}",
             )
-        temporary = destination.with_name(f".{destination.name}.mastic-{os.getpid()}")
-        temporary.write_bytes(content)
-        temporary.chmod(0o755)
-        os.replace(temporary, destination)
+        try:
+            parent_fd = os.open(
+                destination.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError as error:
+            raise ApplicationError(
+                "application_install_conflict",
+                f"refusing unsafe application directory: {destination.parent}",
+            ) from error
+        temporary: str | None = None
+        try:
+            for _ in range(64):
+                candidate = (
+                    f".{destination.name}.mastic-{secrets.token_hex(16)}.temporary"
+                )
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o700,
+                        dir_fd=parent_fd,
+                    )
+                except FileExistsError:
+                    continue
+                temporary = candidate
+                break
+            else:
+                raise RuntimeError("could not allocate an application install file")
+
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o755)
+                os.fsync(stream.fileno())
+            try:
+                os.link(
+                    temporary,
+                    destination.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as error:
+                raise ApplicationError(
+                    "application_install_conflict",
+                    f"refusing to overwrite an application: {destination}",
+                ) from error
+            os.unlink(temporary, dir_fd=parent_fd)
+            temporary = None
+            os.fsync(parent_fd)
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_fd)
 
     def _artifact_path(self, artifact: _Artifact) -> Path:
         return self._cache / "artifacts" / artifact.filename
