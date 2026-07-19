@@ -67,6 +67,7 @@ class DaemonOperationRouter:
         self._pressure = pressure or (lambda: "unknown")
         self._physical_drain_timeout = physical_drain_timeout
         self._condition = threading.Condition(threading.RLock())
+        self._physical_gate = threading.Lock()
         self._active_physical = 0
         self._stopping = False
         self._physically_stopped = False
@@ -123,7 +124,12 @@ class DaemonOperationRouter:
             self._assert_accepting_locked()
             self._active_physical += 1
         try:
-            return self._execute_physical(owner, operation, parameters, operation_id)
+            # Never acquire the gate while holding the lifecycle condition: a
+            # finishing owner needs that condition to release stop/drain waiters.
+            with self._physical_gate:
+                return self._execute_physical(
+                    owner, operation, parameters, operation_id
+                )
         finally:
             with self._condition:
                 self._active_physical -= 1
@@ -206,19 +212,20 @@ class DaemonOperationRouter:
         owns_stop_gate = False
         try:
             owns_stop_gate = self._prepare_stop(deadline)
-            return self._execute_claimed(
-                operation=operation,
-                parameters=parameters,
-                identity=identity,
-                request_fingerprint=request_fingerprint,
-                execute=(
-                    lambda: (
-                        self._supervisor.execute(operation, parameters)
-                        if owns_stop_gate
-                        else {"state": "stopped", "already_stopped": True}
-                    )
-                ),
-            )
+            with self._physical_gate:
+                return self._execute_claimed(
+                    operation=operation,
+                    parameters=parameters,
+                    identity=identity,
+                    request_fingerprint=request_fingerprint,
+                    execute=(
+                        lambda: (
+                            self._supervisor.execute(operation, parameters)
+                            if owns_stop_gate
+                            else {"state": "stopped", "already_stopped": True}
+                        )
+                    ),
+                )
         except BaseException:
             if owns_stop_gate:
                 with self._condition:
@@ -427,7 +434,8 @@ class DaemonOperationRouter:
                 return {"state": "stopping"}
             self._active_physical += 1
         try:
-            value = self._supervisor.execute("supervisor.maintain", {})
+            with self._physical_gate:
+                value = self._supervisor.execute("supervisor.maintain", {})
         finally:
             with self._condition:
                 self._active_physical -= 1
