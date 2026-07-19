@@ -114,6 +114,7 @@ class ModelAlias:
     installation_name: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "name", ResourceName(self.name))
         ResourceName(self.installation_name)
 
 
@@ -128,8 +129,20 @@ class InferenceService:
     options: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "name", ResourceName(self.name))
+        object.__setattr__(self, "model_alias", ResourceName(self.model_alias))
+        object.__setattr__(self, "route", ResourceName(self.route))
         validate_runtime_installation_id(self.runtime_installation)
-        object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
+        object.__setattr__(
+            self,
+            "options",
+            MappingProxyType(
+                {
+                    str(key): _freeze_option_value(value)
+                    for key, value in self.options.items()
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +154,18 @@ class ServiceRun:
     pid: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "service_name", ResourceName(self.service_name))
         if not self.run_id:
             raise ValueError("run ID is required")
         if self.upstream_port is not None and not 1 <= self.upstream_port <= 65535:
             raise ValueError("upstream port must be in 1..65535")
+
+
+def _freeze_option_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_option_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_option_value(item) for item in value)
+    return value

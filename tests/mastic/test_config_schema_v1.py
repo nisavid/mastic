@@ -4,6 +4,7 @@ import tomlkit
 
 from mastic.application.application_targets import SamplingProfile
 from mastic.application.config_schema import ConfigSchemaError, validate_config
+from mastic.application.serialization import to_plain_data
 
 
 VALID = """
@@ -127,6 +128,20 @@ class ConfigSchemaV1Tests(unittest.TestCase):
                 "repetition_penalty": 1.0,
                 "enable_thinking": True,
             },
+        )
+
+    def test_service_options_accept_nested_string_keyed_tables(self) -> None:
+        document = tomlkit.parse(VALID)
+        document["services"]["coding"]["options"]["engine"] = {
+            "cache": {"bits": 8, "enabled": True},
+            "layers": [1, 2, 3],
+        }
+
+        config = validate_config(document)
+
+        self.assertEqual(
+            to_plain_data(config.services["coding"].options["engine"]),
+            {"cache": {"bits": 8, "enabled": True}, "layers": [1, 2, 3]},
         )
 
     def test_rejects_unknown_keys_raw_argv_and_environment_escape_hatches(self) -> None:
@@ -290,11 +305,18 @@ capabilities = []
         self.assertEqual(application_target.max_concurrent, 1)
 
     def test_rejects_unsafe_hindsight_profile_and_ambiguous_flat_sampling(self) -> None:
-        hindsight = VALID.replace(
-            "[application_targets.codex]", "[application_targets.hindsight]"
-        ).replace(
-            'kind = "codex"',
-            'kind = "hindsight"\nprofile = "../default"\nmax_concurrent = 1',
+        hindsight = (
+            VALID.replace(
+                "[application_targets.codex]", "[application_targets.hindsight]"
+            )
+            .replace(
+                'kind = "codex"',
+                'kind = "hindsight"\nprofile = "../default"\nmax_concurrent = 1',
+            )
+            .replace(
+                "[application_targets.codex.sampling.coding]",
+                "[application_targets.hindsight.sampling.verification]",
+            )
         )
         with self.assertRaisesRegex(ConfigSchemaError, "profile"):
             validate_config(tomlkit.parse(hindsight))
@@ -309,11 +331,18 @@ capabilities = []
     def test_rejects_partial_workload_sets_and_unrepresentable_codex_values(
         self,
     ) -> None:
-        partial_hindsight = VALID.replace(
-            "[application_targets.codex]", "[application_targets.hindsight]"
-        ).replace(
-            'kind = "codex"',
-            'kind = "hindsight"\nprofile = "default"\nmax_concurrent = 1',
+        partial_hindsight = (
+            VALID.replace(
+                "[application_targets.codex]", "[application_targets.hindsight]"
+            )
+            .replace(
+                'kind = "codex"',
+                'kind = "hindsight"\nprofile = "default"\nmax_concurrent = 1',
+            )
+            .replace(
+                "[application_targets.codex.sampling.coding]",
+                "[application_targets.hindsight.sampling.verification]",
+            )
         )
         with self.assertRaisesRegex(ConfigSchemaError, "requires sampling profiles"):
             validate_config(tomlkit.parse(partial_hindsight))

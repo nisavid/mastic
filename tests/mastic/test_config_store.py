@@ -68,10 +68,45 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(first.revision, second.revision)
             self.assertEqual(len(store.history()), 1)
 
+    def test_compacts_history_and_removes_evicted_archives(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("mastic.infrastructure.config_store._CONFIG_HISTORY_LIMIT", 3),
+        ):
+            path = Path(directory) / "config.toml"
+            store = ConfigStore(path, lambda data: int(data["generation"]))
+            revisions = [
+                store.import_text(f"generation = {generation}\n").revision
+                for generation in range(1, 6)
+            ]
+
+            history = store.history()
+
+            self.assertEqual(
+                tuple(record.revision for record in history), tuple(revisions[-3:])
+            )
+            self.assertIsNone(history[0].previous_revision)
+            self.assertEqual(
+                {archive.stem for archive in store._history_path.iterdir()},
+                set(revisions[-3:]),
+            )
+            self.assertEqual(
+                tuple(
+                    record.revision
+                    for record in ConfigStore(
+                        path, lambda data: int(data["generation"])
+                    ).history()
+                ),
+                tuple(revisions[-3:]),
+            )
+            with self.assertRaises(KeyError):
+                store.restore(revisions[0])
+            self.assertEqual(store.restore(revisions[-2]).value, 4)
+
     def test_private_file_lock_serializes_processes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = str(Path(directory) / "application-target.lock")
-            context = multiprocessing.get_context("fork")
+            context = multiprocessing.get_context()
             first_acquired = context.Event()
             first_release = context.Event()
             second_attempting = context.Event()
@@ -229,7 +264,7 @@ class ConfigStoreTests(unittest.TestCase):
             ready = threading.Barrier(8)
 
             def increment() -> None:
-                ready.wait()
+                ready.wait(timeout=5)
                 store.edit(
                     lambda document: document.__setitem__(
                         "count", document["count"] + 1

@@ -635,6 +635,31 @@ class LocalOperationBackendTests(unittest.TestCase):
             )
             self.assertEqual(execution[1]["revision"], "c" * 40)
 
+    def test_model_mutations_reject_missing_required_parameters(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(
+                Path(directory),
+                config=_MODEL_ONLY_CONFIG,
+                model_supply=_ModelSupply(),
+            )
+            invalid = (
+                OperationRequest("model.install", {}),
+                OperationRequest(
+                    "model.adopt",
+                    {"repository": "owner/model", "revision": "a" * 40},
+                ),
+                OperationRequest("model.update", {"revision": "main"}),
+                OperationRequest("model.update", {"resource": "coding"}),
+            )
+
+            for request in invalid:
+                with (
+                    self.subTest(request=request),
+                    self.assertRaises(ApplicationError) as raised,
+                ):
+                    backend.prepare(request)
+                self.assertEqual(raised.exception.code, "invalid_parameter")
+
     def test_model_adopt_binds_execution_to_previewed_snapshot_fingerprint(
         self,
     ) -> None:

@@ -405,20 +405,20 @@ def create_gateway(
                 retryable=True,
             )
 
-        client = request.state.http_client
-        upstream_request = client.build_request(
-            request.method,
-            f"{origin}{_upstream_path(request.url.path)}",
-            content=body,
-            headers={
-                name: value
-                for name, value in request.headers.items()
-                if name.lower() in _REQUEST_HEADER_ALLOWLIST
-            }
-            | ({"accept-encoding": "identity"} if is_responses else {}),
-            params=request.query_params,
-        )
         try:
+            client = request.state.http_client
+            upstream_request = client.build_request(
+                request.method,
+                f"{origin}{_upstream_path(request.url.path)}",
+                content=body,
+                headers={
+                    name: value
+                    for name, value in request.headers.items()
+                    if name.lower() in _REQUEST_HEADER_ALLOWLIST
+                }
+                | ({"accept-encoding": "identity"} if is_responses else {}),
+                params=request.query_params,
+            )
             upstream = await asyncio.wait_for(
                 client.send(upstream_request, stream=True),
                 timeout=upstream_response_timeout,

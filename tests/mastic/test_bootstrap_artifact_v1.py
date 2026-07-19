@@ -39,6 +39,9 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertIn("readonly MASTIC_VERSION='0.1.0'", script)
             self.assertIn(hashlib.sha256(wheel.read_bytes()).hexdigest(), script)
             self.assertIn(hashlib.sha256(closure.read_bytes()).hexdigest(), script)
+            self.assertIn("--connect-timeout 30", script)
+            self.assertIn("--max-time 1800", script)
+            self.assertIn("--retry 3", script)
             self.assertNotIn("@MASTIC_", script)
             self.assertTrue(output.stat().st_mode & stat.S_IXUSR)
             syntax = subprocess.run(

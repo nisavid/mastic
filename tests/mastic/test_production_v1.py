@@ -1317,6 +1317,28 @@ class ProductionCompositionTests(unittest.TestCase):
                 f"owner/model@{revision}",
             )
 
+    def test_launch_supply_rejects_adopted_model_without_snapshot_path(self) -> None:
+        revision = "a" * 40
+        config = validate_config(
+            {
+                "schema_version": 1,
+                "models": {
+                    "adopted": {
+                        "repository": "owner/model",
+                        "revision": revision,
+                        "provenance": "adopted",
+                        "path": "/tmp/snapshot",
+                    }
+                },
+            }
+        )
+        object.__setattr__(config.models["adopted"], "path", None)
+
+        with self.assertRaisesRegex(ValueError, "missing its path"):
+            configured_model_installations(
+                config, CacheInventory((), "local-observed", ())
+            )
+
     def test_removal_inventory_includes_manifest_backed_orphan_targets(self) -> None:
         class Supply:
             def inventory(self):

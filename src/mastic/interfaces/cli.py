@@ -92,7 +92,9 @@ def build_cli(
         group, command = operation_name.rsplit(".", 1)
         group_app = groups.get(group)
         if group_app is None:
-            continue
+            raise RuntimeError(
+                f"operation {operation_name!r} has no registered CLI group {group!r}"
+            )
         _add_command(group_app, command, operation, dispatcher)
     return app
 
@@ -243,8 +245,8 @@ def _signature_parameter(parameter: Parameter) -> SignatureParameter:
         value_type = bool | None
         default = None
     elif parameter.value_type == "integer":
-        value_type = int | None
-        default = None
+        value_type = int if parameter.required else int | None
+        default = SignatureParameter.empty if parameter.required else None
     else:
         value_type = str if parameter.required else str | None
         default = SignatureParameter.empty if parameter.required else None

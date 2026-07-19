@@ -682,6 +682,16 @@ route = "coding"
             installed["installation_name"],
         )
 
+        with self.assertRaisesRegex(SupplyPortError, "requires a Model Alias"):
+            port.execute(
+                "model.rollback",
+                {
+                    "resource": installed["installation_name"],
+                    "target": updated["installation_name"],
+                    "confirmed": True,
+                },
+            )
+
     def test_model_port_rejects_non_boolean_flags(self) -> None:
         port = ModelSupplyPort(
             FakeModelSupply(self.root / "cache"), self.store, self.security

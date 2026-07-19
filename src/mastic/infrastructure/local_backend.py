@@ -150,6 +150,7 @@ class LocalOperationBackend:
                 "unknown_operation", f"unknown operation: {request.name}"
             )
         _validate_parameter_types(operation, request.parameters)
+        _validate_required_model_parameters(request)
         self._validate_request(request)
         if operation.kind is OperationKind.QUERY:
             return PreparedOperation(False, lambda: self._query(request))
@@ -703,7 +704,11 @@ class LocalOperationBackend:
                 configured_installation is not None
                 and configured_installation.provenance == "adopted"
             ):
-                assert configured_installation.path is not None
+                if configured_installation.path is None:
+                    raise ApplicationError(
+                        "invalid_state",
+                        "adopted model installation is missing its snapshot path",
+                    )
                 inspect_adoption = getattr(self._model_supply, "inspect_adoption", None)
                 snapshot = (
                     _plain(inspect_adoption(configured_installation.path))
@@ -1207,7 +1212,11 @@ class LocalOperationBackend:
     ) -> SuppliedModelInstallation:
         desired = config.models[installation_name]
         if desired.provenance == "adopted":
-            assert desired.path is not None
+            if desired.path is None:
+                raise ApplicationError(
+                    "invalid_state",
+                    "adopted model installation is missing its snapshot path",
+                )
             revision = ModelRevision(
                 repo_id=desired.revision.repository,
                 commit_sha=desired.revision.revision,
@@ -1506,6 +1515,20 @@ def _validate_parameter_types(
                     "invalid_parameter",
                     f"{name} must be one of: {', '.join(specification.accepted)}",
                 )
+
+
+def _validate_required_model_parameters(request: OperationRequest) -> None:
+    required = {
+        "model.install": ("repository",),
+        "model.adopt": ("repository", "revision", "path"),
+        "model.update": ("resource", "revision"),
+    }.get(request.name, ())
+    for name in required:
+        if name not in request.parameters or request.parameters[name] is None:
+            raise ApplicationError(
+                "invalid_parameter",
+                f"{name} is required for {request.name}",
+            )
 
 
 def _not_found(noun: str, resource: str) -> ApplicationError:

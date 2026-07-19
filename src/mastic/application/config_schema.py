@@ -458,9 +458,13 @@ def _option_value(value: object) -> bool:
         return math.isfinite(value)
     if type(value) in {str, int, bool}:
         return True
-    return isinstance(value, list) and all(
-        type(item) in {str, int, float, bool} and _option_value(item) for item in value
-    )
+    if isinstance(value, list):
+        return all(_option_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _option_value(item) for key, item in value.items()
+        )
+    return False
 
 
 def _table(value: object, scope: str) -> Mapping[str, object]:

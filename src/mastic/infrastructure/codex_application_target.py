@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -56,6 +57,7 @@ class CodexApplicationTargetIntegration:
         catalog_backup_path: str | Path | None = None,
         bundled_catalog: Callable[[], Mapping[str, object]] | None = None,
         catalog_validator: Callable[[Path], None] | None = None,
+        resolve_executable: Callable[[str], Path] | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.manifest_path = Path(manifest_path)
@@ -68,8 +70,15 @@ class CodexApplicationTargetIntegration:
             catalog_backup_path
             or self.manifest_path.with_name("codex-model-catalog.backup")
         )
-        self._bundled_catalog = bundled_catalog or _default_bundled_codex_catalog
-        self._catalog_validator = catalog_validator or _validate_codex_catalog
+        self._resolve_executable = resolve_executable or _default_executable_resolver
+        self._bundled_catalog = bundled_catalog or (
+            lambda: _default_bundled_codex_catalog(self._resolve_executable("codex"))
+        )
+        self._catalog_validator = catalog_validator or (
+            lambda path: _validate_codex_catalog(
+                path, self._resolve_executable("codex")
+            )
+        )
 
     def preview(
         self, configuration: ApplicationTargetConfiguration
@@ -734,10 +743,10 @@ def _codex_target(configuration: ApplicationTargetConfiguration) -> CodexTargetO
     return configuration.target
 
 
-def _default_bundled_codex_catalog() -> Mapping[str, object]:
+def _default_bundled_codex_catalog(executable: Path) -> Mapping[str, object]:
     try:
         completed = subprocess.run(
-            ("codex", "debug", "models", "--bundled"),
+            (str(executable), "debug", "models", "--bundled"),
             check=True,
             capture_output=True,
             text=True,
@@ -755,7 +764,7 @@ def _default_bundled_codex_catalog() -> Mapping[str, object]:
     return value
 
 
-def _validate_codex_catalog(path: Path) -> None:
+def _validate_codex_catalog(path: Path, executable: Path) -> None:
     try:
         source = json.loads(path.read_text(encoding="utf-8"))
         expected = {
@@ -772,7 +781,7 @@ def _validate_codex_catalog(path: Path) -> None:
         _write_private(home / "config.toml", document.as_string().encode())
         try:
             completed = subprocess.run(
-                ("codex", "debug", "models"),
+                (str(executable), "debug", "models"),
                 check=True,
                 capture_output=True,
                 text=True,
@@ -803,6 +812,16 @@ def _validate_codex_catalog(path: Path) -> None:
             raise ApplicationTargetIntegrationConflict(
                 "installed Codex did not resolve the custom model metadata exactly"
             )
+
+
+def _default_executable_resolver(name: str) -> Path:
+    raw = shutil.which(name)
+    if raw is None:
+        raise FileNotFoundError(name)
+    path = Path(raw).resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"invalid executable: {name}")
+    return path
 
 
 def _toml_changes(document: TOMLDocument, desired: Mapping[tuple[str, ...], object]):

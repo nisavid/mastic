@@ -196,6 +196,31 @@ class RuntimeCatalogueTests(unittest.TestCase):
                     options={name: value},
                 )
 
+    def test_nested_launch_options_render_as_canonical_json(self) -> None:
+        catalogue = RuntimeCatalogue.load_builtin()
+        installation = RuntimeInstallation(
+            installation_id="optiq-0.3.3",
+            runtime="optiq",
+            version="0.3.3",
+            provenance="tested",
+            root=Path("/runtimes/optiq-0.3.3"),
+            launcher=("/runtimes/optiq-0.3.3/bin/optiq", "serve"),
+            capabilities=frozenset({"model", "host", "port", "chat_template_args"}),
+        )
+
+        argv = RuntimeLaunchBuilder(catalogue).build(
+            installation,
+            model="/models/qwen",
+            host="127.0.0.1",
+            port=49152,
+            options={"chat_template_args": {"thinking": True, "budget": 4096}},
+        )
+
+        self.assertIn(
+            ("--chat-template-args", '{"budget":4096,"thinking":true}'),
+            tuple(zip(argv, argv[1:])),
+        )
+
     def test_launch_options_cannot_override_required_endpoint_arguments(self) -> None:
         catalogue = RuntimeCatalogue.load_builtin()
         installation = RuntimeInstallation(

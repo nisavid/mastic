@@ -9,7 +9,7 @@ import os
 import stat
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Generic, Iterator, Mapping, Sequence, TypeVar
@@ -23,6 +23,7 @@ from mastic.application.serialization import to_plain_data as _plain
 ValidatedConfig = TypeVar("ValidatedConfig")
 ConfigValidator = Callable[[Mapping[str, object]], ValidatedConfig]
 _JOURNAL_SCHEMA_VERSION = 1
+_CONFIG_HISTORY_LIMIT = 256
 _JOURNAL_KEYS = frozenset(
     {"action", "previous_revision", "revision", "saved_at", "schema_version"}
 )
@@ -236,24 +237,14 @@ class ConfigStore(Generic[ValidatedConfig]):
         return self._history_path / f"{revision}.toml"
 
     def _append_journal(self, revision: ConfigRevision) -> None:
-        payload = json.dumps(
-            {
-                "action": revision.action,
-                "previous_revision": revision.previous_revision,
-                "revision": revision.revision,
-                "saved_at": revision.saved_at,
-                "schema_version": revision.schema_version,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        payload = _journal_line(revision)
         descriptor = _open_private_file(
             self._journal_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
         )
         try:
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "ab", closefd=False) as stream:
-                stream.write(f"{payload}\n".encode())
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
         finally:
@@ -275,24 +266,24 @@ class ConfigStore(Generic[ValidatedConfig]):
             raise RuntimeError("config journal is corrupt")
         self._atomic_replace(self._path, payload)
         self._archive(snapshot.revision, payload)
-        self._append_journal(
-            ConfigRevision(
-                schema_version=_JOURNAL_SCHEMA_VERSION,
-                revision=snapshot.revision,
-                previous_revision=previous_revision,
-                saved_at=datetime.now(UTC).isoformat(),
-                action=action,
-            )
+        revision = ConfigRevision(
+            schema_version=_JOURNAL_SCHEMA_VERSION,
+            revision=snapshot.revision,
+            previous_revision=previous_revision,
+            saved_at=datetime.now(UTC).isoformat(),
+            action=action,
         )
+        self._append_journal(revision)
+        self._compact_journal_locked((*records, revision))
 
     def _reconcile_journal_locked(self) -> tuple[ConfigRevision, ...]:
         records = list(self._read_journal_locked())
         if not _private_file_exists(self._path):
-            return tuple(records)
+            return self._compact_journal_locked(records)
         payload = _read_private_file(self._path)
         current_revision = _revision(payload)
         if records and records[-1].revision == current_revision:
-            return tuple(records)
+            return self._compact_journal_locked(records)
         self._archive(current_revision, payload)
         recovered = ConfigRevision(
             schema_version=_JOURNAL_SCHEMA_VERSION,
@@ -303,7 +294,43 @@ class ConfigStore(Generic[ValidatedConfig]):
         )
         self._append_journal(recovered)
         records.append(recovered)
-        return tuple(records)
+        return self._compact_journal_locked(records)
+
+    def _compact_journal_locked(
+        self, records: Sequence[ConfigRevision]
+    ) -> tuple[ConfigRevision, ...]:
+        if len(records) <= _CONFIG_HISTORY_LIMIT:
+            return tuple(records)
+        retained = list(records[-_CONFIG_HISTORY_LIMIT:])
+        retained[0] = replace(retained[0], previous_revision=None)
+        self._atomic_replace(
+            self._journal_path,
+            b"".join(_journal_line(record) for record in retained),
+        )
+        retained_revisions = {record.revision for record in retained}
+        if _private_file_exists(self._path):
+            retained_revisions.add(_revision(_read_private_file(self._path)))
+        removed = False
+        for archive in self._history_path.iterdir():
+            if (
+                archive.suffix != ".toml"
+                or not _is_revision(archive.stem)
+                or archive.stem in retained_revisions
+            ):
+                continue
+            _private_file_exists(archive)
+            archive.unlink()
+            removed = True
+        if removed:
+            directory = os.open(
+                self._history_path,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        return tuple(retained)
 
     def _read_journal_locked(self) -> tuple[ConfigRevision, ...]:
         if not _private_file_exists(self._journal_path):
@@ -447,6 +474,23 @@ def _parse_journal_revision(
         saved_at=saved_at,
         action=action,
     )
+
+
+def _journal_line(revision: ConfigRevision) -> bytes:
+    return (
+        json.dumps(
+            {
+                "action": revision.action,
+                "previous_revision": revision.previous_revision,
+                "revision": revision.revision,
+                "saved_at": revision.saved_at,
+                "schema_version": revision.schema_version,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
 
 
 def _is_revision(value: object) -> bool:

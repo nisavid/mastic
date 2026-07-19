@@ -2,6 +2,7 @@ import json
 import math
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -795,6 +796,41 @@ class ClientIntegrationV1Tests(unittest.TestCase):
 
             self.assertTrue(result.changed)
             self.assertEqual(adapter.inspect()["state"], "healthy")
+
+    def test_codex_catalog_commands_use_the_resolved_absolute_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = Path("/managed/application-bin/codex")
+            catalog = root / "catalog.json"
+            catalog.write_text(
+                json.dumps({"models": [{"slug": "coding", "context_window": 32768}]}),
+                encoding="utf-8",
+            )
+            adapter = CodexApplicationTargetIntegration(
+                root / "config.toml",
+                root / "owner.json",
+                root / "backup",
+                resolve_executable=lambda name: executable,
+            )
+            bundled = subprocess.CompletedProcess(
+                (), 0, json.dumps(self._bundled_codex_catalog()), ""
+            )
+            validated = subprocess.CompletedProcess(
+                (),
+                0,
+                json.dumps({"models": [{"slug": "coding", "context_window": 32768}]}),
+                "",
+            )
+
+            with patch(
+                "mastic.infrastructure.codex_application_target.subprocess.run",
+                side_effect=(bundled, validated),
+            ) as run:
+                adapter._bundled_catalog()
+                adapter._catalog_validator(catalog)
+
+            self.assertEqual(run.call_args_list[0].args[0][0], str(executable))
+            self.assertEqual(run.call_args_list[1].args[0][0], str(executable))
 
     def test_codex_preview_apply_and_remove_preserve_unrelated_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
