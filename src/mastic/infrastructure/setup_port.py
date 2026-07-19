@@ -37,6 +37,9 @@ from mastic.application.setup import (
     SetupRequest,
     StepState,
 )
+from mastic.infrastructure.application_target_canaries import (
+    application_canary_evidence_sha256,
+)
 
 
 _GIB = 1024**3
@@ -384,6 +387,7 @@ class SetupOperationPort:
                         for step in resolved.steps
                     ),
                     "application_targets": resolved.selection.application_targets,
+                    "performance_binding": _performance_binding(resolved),
                 }
             )
 
@@ -1129,6 +1133,7 @@ def _content_free_result(
         metric = f"{target}.native_canary.duration_seconds"
         return {
             "profile": result.get("profile"),
+            "service": resolved.selection.service_name,
             "ok": response.get("ok") is True,
             "exact_contract": response.get("exact_contract") is True,
             "phases": response.get("phases", ()),
@@ -1220,6 +1225,7 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
         "application_targets",
         "id",
         "kind",
+        "performance_binding",
         "plan_identity",
         "steps",
         "version",
@@ -1234,6 +1240,9 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
     ):
         raise ValueError("setup Plan identity must be an exact sha256 digest")
     raw_steps = plan.get("steps")
+    binding = plan.get("performance_binding")
+    if binding is not None and not isinstance(binding, Mapping):
+        raise ValueError("setup Plan performance binding must be an object")
     if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, str | bytes):
         raise ValueError("setup Plan steps must be a sequence")
     steps: list[dict[str, str]] = []
@@ -1266,11 +1275,14 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
         raise ValueError("setup Plan application targets are invalid")
     if any(f"application.canary.{target}" not in identities for target in targets):
         raise ValueError("setup Plan is missing an application canary")
-    return {
+    normalized = {
         "plan_identity": identity,
         "steps": tuple(steps),
         "application_targets": targets,
     }
+    if binding is not None:
+        normalized["performance_binding"] = dict(binding)
+    return normalized
 
 
 def _conservative_setup_outcome(*, malformed: bool) -> Mapping[str, object]:
@@ -1400,7 +1412,10 @@ def _durable_setup_outcome(
             target_readiness[target] = Readiness.UNVERIFIED.value
         else:
             target_readiness[target] = _durable_canary_readiness(
-                target, outcome, performance_profile
+                target,
+                outcome,
+                performance_profile,
+                plan.get("performance_binding"),
             )
     if target_readiness:
         readiness = _combined_readiness(target_readiness)
@@ -1431,6 +1446,8 @@ def _durable_canary_band(
     target: str,
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
+    *,
+    expected_service: str | None = None,
 ) -> str | None:
     try:
         payload = json.loads(evidence.detail)
@@ -1439,7 +1456,12 @@ def _durable_canary_band(
         return None
     if not isinstance(result, Mapping):
         return None
-    validated = _application_canary_performance(target, result, performance_profile)
+    validated = _application_canary_performance(
+        target,
+        result,
+        performance_profile,
+        expected_service=expected_service,
+    )
     if validated is None:
         return None
     performance, value = validated
@@ -1458,8 +1480,19 @@ def _durable_canary_readiness(
     target: str,
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
+    performance_binding: object,
 ) -> str:
-    band = _durable_canary_band(target, evidence, performance_profile)
+    if not _performance_binding_matches(performance_binding, performance_profile):
+        return Readiness.UNVERIFIED.value
+    assert isinstance(performance_binding, Mapping)
+    service = performance_binding["service"]
+    assert isinstance(service, str)
+    band = _durable_canary_band(
+        target,
+        evidence,
+        performance_profile,
+        expected_service=service,
+    )
     if band == "expected":
         return Readiness.READY.value
     if band == Readiness.DEGRADED.value:
@@ -1501,13 +1534,26 @@ def _verification_ready(evidence: SetupEvidence) -> bool:
 
 
 def _application_canary_contract_ready(
-    target: str, result: Mapping[str, object]
+    target: str,
+    result: Mapping[str, object],
+    *,
+    expected_service: str | None = None,
 ) -> bool:
     contract = _APPLICATION_CANARY_CONTRACTS.get(target)
     if contract is None:
         return False
     profile, phases = contract
     raw_phases = result.get("phases")
+    service = result.get("service")
+    if not isinstance(service, str) or not service:
+        return False
+    expected_digest = application_canary_evidence_sha256(
+        target=target,
+        profile=profile,
+        service=service,
+        phases=phases,
+        exact_contract=True,
+    )
     return bool(
         result.get("ok") is True
         and result.get("exact_contract") is True
@@ -1515,7 +1561,8 @@ def _application_canary_contract_ready(
         and isinstance(raw_phases, Sequence)
         and not isinstance(raw_phases, (str, bytes))
         and tuple(raw_phases) == phases
-        and _exact_sha256(result.get("evidence_sha256"))
+        and (expected_service is None or service == expected_service)
+        and result.get("evidence_sha256") == expected_digest
     )
 
 
@@ -1523,8 +1570,12 @@ def _application_canary_performance(
     target: str,
     result: Mapping[str, object],
     performance_profile: Mapping[str, object],
+    *,
+    expected_service: str | None = None,
 ) -> tuple[Mapping[str, object], float] | None:
-    if not _application_canary_contract_ready(target, result):
+    if not _application_canary_contract_ready(
+        target, result, expected_service=expected_service
+    ):
         return None
     performance = result.get("performance")
     if not isinstance(performance, Mapping):
@@ -1571,6 +1622,51 @@ def _performance_plan_fingerprint(selection: ExactSetupSelection) -> str:
             }
         ).encode()
     ).hexdigest()
+
+
+def _performance_binding(resolved: ResolvedSetup) -> Mapping[str, object]:
+    return {
+        "selection_sha256": _performance_plan_fingerprint(resolved.selection),
+        "application_versions": dict(PHASE1_APPLICATION_VERSIONS),
+        "platform": resolved.preflight.platform,
+        "machine": resolved.preflight.machine,
+        "memory_bytes": resolved.preflight.memory_bytes,
+        "macos_major": _macos_major(resolved.preflight.os_version),
+        "service": resolved.selection.service_name,
+    }
+
+
+def _performance_binding_matches(
+    value: object, performance_profile: Mapping[str, object]
+) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "selection_sha256",
+        "application_versions",
+        "platform",
+        "machine",
+        "memory_bytes",
+        "macos_major",
+        "service",
+    }:
+        return False
+    host = performance_profile.get("host")
+    plan = performance_profile.get("plan")
+    if not isinstance(host, Mapping) or not isinstance(plan, Mapping):
+        return False
+    memory_bytes = value.get("memory_bytes")
+    service = value.get("service")
+    return bool(
+        value.get("selection_sha256") == plan.get("selection_sha256")
+        and value.get("application_versions") == dict(PHASE1_APPLICATION_VERSIONS)
+        and value.get("application_versions") == plan.get("application_versions")
+        and value.get("platform") == host.get("platform")
+        and value.get("machine") == host.get("machine")
+        and type(memory_bytes) is int
+        and memory_bytes >= host.get("minimum_memory_bytes", math.inf)
+        and value.get("macos_major") in host.get("macos_major_versions", ())
+        and isinstance(service, str)
+        and bool(service)
+    )
 
 
 def _macos_major(version: str) -> int | None:
@@ -1721,7 +1817,12 @@ def _evidenced_canary_band(
     result = payload.get("result")
     if not isinstance(result, Mapping):
         return None
-    validated = _application_canary_performance(target, result, performance_profile)
+    validated = _application_canary_performance(
+        target,
+        result,
+        performance_profile,
+        expected_service=resolved.selection.service_name,
+    )
     if validated is None:
         return None
     performance, value = validated

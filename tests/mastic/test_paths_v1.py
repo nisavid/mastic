@@ -59,6 +59,32 @@ class PathsV1Tests(unittest.TestCase):
         self.assertEqual(paths.data_dir, Path("/data/mastic"))
         self.assertEqual(paths.log_dir, Path("/logs"))
 
+    def test_coordination_namespace_is_stable_across_product_root_overrides(
+        self,
+    ) -> None:
+        home = Path("/home/user")
+        first = resolve_paths(
+            home=home,
+            environment={
+                "MASTIC_CONFIG_DIR": "/first/config",
+                "MASTIC_STATE_DIR": "/first/state",
+                "MASTIC_DATA_DIR": "/first/data",
+                "MASTIC_LOG_DIR": "/first/logs",
+            },
+        )
+        second = resolve_paths(
+            home=home,
+            environment={
+                "MASTIC_CONFIG_DIR": "/second/config",
+                "MASTIC_STATE_DIR": "/second/state",
+                "MASTIC_DATA_DIR": "/second/data",
+                "MASTIC_LOG_DIR": "/second/logs",
+            },
+        )
+
+        self.assertEqual(first.coordination_dir, home / ".local/state/.mastic-locks")
+        self.assertEqual(second.coordination_dir, first.coordination_dir)
+
     def test_prepare_creates_private_directories_without_creating_configuration(
         self,
     ) -> None:

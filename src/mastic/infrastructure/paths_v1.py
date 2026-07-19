@@ -15,6 +15,7 @@ class MasticPaths:
     state_dir: Path
     data_dir: Path
     log_dir: Path
+    coordination_dir: Path | None = None
 
     @property
     def config_file(self) -> Path:
@@ -67,6 +68,7 @@ def resolve_paths(
         log_dir=_environment_path(
             env, "MASTIC_LOG_DIR", user_home / "Library/Logs/mastic"
         ),
+        coordination_dir=user_home / ".local/state/.mastic-locks",
     )
 
 
