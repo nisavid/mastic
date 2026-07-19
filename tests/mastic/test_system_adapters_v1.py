@@ -6,6 +6,8 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +26,7 @@ from mastic.infrastructure.system_adapters import (
     MacOSMemoryPressure,
     MacOSProcessLauncher,
     MacOSProcessProbe,
+    PendingSubprocessManagedProcess,
     SystemClock,
 )
 from mastic.infrastructure.model_supply import (
@@ -164,7 +167,46 @@ def _verified_model(_model):
     return VerificationResult("complete", "cache-integrity", ())
 
 
+def _full_nonblocking_pipe() -> tuple[int, int]:
+    read_descriptor, write_descriptor = os.pipe()
+    os.set_blocking(write_descriptor, False)
+    try:
+        while True:
+            os.write(write_descriptor, b"x" * 4096)
+    except BlockingIOError:
+        return read_descriptor, write_descriptor
+
+
 class ProcessLauncherTests(unittest.TestCase):
+    def test_launch_rejects_embedded_nul_before_spawning_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            spawn_calls = 0
+
+            def popen(*_args, **_kwargs):
+                nonlocal spawn_calls
+                spawn_calls += 1
+                return _FakePopen()
+
+            launcher = MacOSProcessLauncher(
+                log_dir=Path(directory) / "logs",
+                base_environment={"PATH": "/usr/bin"},
+                popen=popen,
+            )
+
+            invalid_launches = (
+                (("/runtime/bin/optiq", "serve\0unexpected"), {}),
+                (("/runtime/bin/optiq",), {"PATH": "/usr/bin\0/untrusted"}),
+                (("/runtime/bin/optiq",), {"PATH\0UNTRUSTED": "/usr/bin"}),
+            )
+            for argv, environment in invalid_launches:
+                with (
+                    self.subTest(argv=argv, environment=environment),
+                    self.assertRaisesRegex(ValueError, "embedded NUL"),
+                ):
+                    launcher.launch(argv, environment)
+
+            self.assertEqual(spawn_calls, 0)
+
     def test_aborting_uncommitted_launch_never_execs_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -226,6 +268,16 @@ class ProcessLauncherTests(unittest.TestCase):
             def start(self) -> None:
                 pass
 
+        class WritableSelector:
+            def register(self, *_args) -> None:
+                pass
+
+            def select(self, _timeout):
+                return ((object(), object()),)
+
+            def close(self) -> None:
+                pass
+
         closed: list[int] = []
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -237,6 +289,12 @@ class ProcessLauncherTests(unittest.TestCase):
             patch.object(system_adapters.os, "close", side_effect=closed.append),
             patch.object(
                 system_adapters.os, "write", side_effect=BrokenPipeError("closed")
+            ),
+            patch.object(system_adapters.os, "set_blocking"),
+            patch.object(
+                system_adapters.selectors,
+                "DefaultSelector",
+                return_value=WritableSelector(),
             ),
             patch.object(system_adapters.threading, "Thread", IdleThread),
         ):
@@ -251,6 +309,64 @@ class ProcessLauncherTests(unittest.TestCase):
             process.abort()
 
         self.assertEqual(closed.count(34), 1)
+
+    def test_commit_deadline_fails_closed_when_the_gate_does_not_read(self) -> None:
+        read_descriptor, write_descriptor = _full_nonblocking_pipe()
+        process = PendingSubprocessManagedProcess(
+            _FakePopen(),
+            threading.Thread(),
+            write_descriptor,
+            b"launch-frame",
+            commit_timeout_seconds=0.05,
+        )
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(TimeoutError, "launch gate"):
+                process.commit()
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            process.abort()
+            os.close(read_descriptor)
+
+    def test_terminate_signals_while_a_commit_is_waiting_for_the_gate(self) -> None:
+        class ObservablePopen(_FakePopen):
+            def __init__(self) -> None:
+                self.terminated = threading.Event()
+
+            def terminate(self) -> None:
+                self.terminated.set()
+
+        read_descriptor, write_descriptor = _full_nonblocking_pipe()
+        popen = ObservablePopen()
+        process = PendingSubprocessManagedProcess(
+            popen,
+            threading.Thread(),
+            write_descriptor,
+            b"launch-frame",
+            commit_timeout_seconds=2.0,
+        )
+        commit_errors: list[Exception] = []
+
+        def commit() -> None:
+            try:
+                process.commit()
+            except Exception as error:
+                commit_errors.append(error)
+
+        commit_thread = threading.Thread(target=commit)
+        commit_thread.start()
+        time.sleep(0.05)
+        started = time.monotonic()
+        try:
+            process.terminate()
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertTrue(popen.terminated.is_set())
+            commit_thread.join(0.5)
+            self.assertFalse(commit_thread.is_alive())
+            self.assertEqual(len(commit_errors), 1)
+        finally:
+            process.abort()
+            os.close(read_descriptor)
 
     def test_log_storage_failure_does_not_stop_pipe_drain(self) -> None:
         read_descriptor, write_descriptor = os.pipe()

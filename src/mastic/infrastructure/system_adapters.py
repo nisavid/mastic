@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import socket
 import stat
 import subprocess
@@ -38,8 +39,13 @@ from mastic.infrastructure.supervisor_v1 import (
 
 
 _SAFE_LOG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# Keep these framing limits paired with the dependency-free _launch_gate.py
+# script, which must remain directly executable before package imports work.
 _LAUNCH_FRAME_HEADER_BYTES = 8
 _MAX_LAUNCH_PAYLOAD_BYTES = 1024 * 1024
+_LAUNCH_COMMIT_TIMEOUT_SECONDS = 5.0
+_LAUNCH_COMMIT_POLL_SECONDS = 0.05
+_LAUNCH_WRITE_CHUNK_BYTES = 64 * 1024
 _CONTENT_ADDRESSED_BLOB_NAME = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 _ALLOWED_PROCESS_ENVIRONMENT = frozenset(
     {
@@ -109,12 +115,23 @@ class PendingSubprocessManagedProcess(SubprocessManagedProcess):
         output_thread: threading.Thread,
         control_descriptor: int,
         launch_frame: bytes,
+        *,
+        commit_timeout_seconds: float = _LAUNCH_COMMIT_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__(process, output_thread)
+        if (
+            isinstance(commit_timeout_seconds, bool)
+            or not isinstance(commit_timeout_seconds, (int, float))
+            or commit_timeout_seconds <= 0
+        ):
+            raise ValueError("launch commit timeout must be positive")
         self._control_descriptor: int | None = control_descriptor
         self._launch_frame = launch_frame
+        self._commit_timeout_seconds = float(commit_timeout_seconds)
         self._control_lock = threading.Lock()
         self._committed = False
+        self._commit_in_progress = False
+        self._abort_requested = False
 
     def commit(self) -> None:
         with self._control_lock:
@@ -123,35 +140,79 @@ class PendingSubprocessManagedProcess(SubprocessManagedProcess):
             descriptor = self._control_descriptor
             if descriptor is None:
                 raise RuntimeError("process launch was already aborted")
-            try:
-                remaining = memoryview(self._launch_frame)
-                while remaining:
+            if self._commit_in_progress:
+                raise RuntimeError("process launch commit is already in progress")
+            self._commit_in_progress = True
+            frame = self._launch_frame
+
+        deadline = time.monotonic() + self._commit_timeout_seconds
+        selector = selectors.DefaultSelector()
+        offset = 0
+        try:
+            selector.register(descriptor, selectors.EVENT_WRITE)
+            while offset < len(frame):
+                with self._control_lock:
+                    if self._abort_requested:
+                        raise RuntimeError("process launch was aborted")
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TimeoutError("process launch gate commit timed out")
+                try:
+                    ready = selector.select(
+                        min(remaining_seconds, _LAUNCH_COMMIT_POLL_SECONDS)
+                    )
+                except InterruptedError:
+                    continue
+                if not ready:
+                    continue
+                with self._control_lock:
+                    if self._abort_requested:
+                        raise RuntimeError("process launch was aborted")
+                    if self._control_descriptor != descriptor:
+                        raise RuntimeError("process launch was already aborted")
                     try:
-                        written = os.write(descriptor, remaining)
-                    except InterruptedError:
+                        written = os.write(
+                            descriptor,
+                            frame[offset : offset + _LAUNCH_WRITE_CHUNK_BYTES],
+                        )
+                    except (BlockingIOError, InterruptedError):
                         continue
                     if written <= 0:
                         raise OSError("process launch gate accepted no data")
-                    remaining = remaining[written:]
-            except Exception:
-                self._close_control_locked()
-                raise
-            self._committed = True
-            self._close_control_locked()
+                    offset += written
+                    if offset == len(frame):
+                        self._committed = True
+                        self._close_control_locked()
+        except Exception:
+            with self._control_lock:
+                if self._control_descriptor == descriptor:
+                    self._close_control_locked()
+            raise
+        finally:
+            selector.close()
+            with self._control_lock:
+                self._commit_in_progress = False
+                self._launch_frame = b""
 
     def abort(self) -> None:
         with self._control_lock:
             if self._committed:
                 return
-            self._close_control_locked()
+            self._abort_requested = True
+            if not self._commit_in_progress:
+                self._close_control_locked()
 
     def terminate(self) -> None:
-        self.abort()
-        super().terminate()
+        try:
+            self.abort()
+        finally:
+            super().terminate()
 
     def kill(self) -> None:
-        self.abort()
-        super().kill()
+        try:
+            self.abort()
+        finally:
+            super().kill()
 
     def _close_control_locked(self) -> None:
         descriptor = self._control_descriptor
@@ -258,6 +319,7 @@ class MacOSProcessLauncher:
         self, argv: Sequence[str], environment: Mapping[str, str]
     ) -> PendingSubprocessManagedProcess:
         exact_argv = _validate_argv(argv)
+        _validate_environment_strings(environment)
         unsupported = sorted(set(environment) - _ALLOWED_PROCESS_ENVIRONMENT)
         if unsupported:
             raise ValueError(
@@ -310,6 +372,12 @@ class MacOSProcessLauncher:
                 os.close(control_write_descriptor)
         if process is None or control_write_descriptor is None:
             raise RuntimeError("process launch gate did not start")
+        try:
+            os.set_blocking(control_write_descriptor, False)
+        except Exception:
+            os.close(control_write_descriptor)
+            process.terminate()
+            raise
         return PendingSubprocessManagedProcess(
             process, pump, control_write_descriptor, launch_frame
         )
@@ -709,6 +777,8 @@ def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
     exact = tuple(argv)
     if not exact or any(not isinstance(item, str) or not item for item in exact):
         raise ValueError("process launch requires a non-empty exact argv")
+    if any("\0" in item for item in exact):
+        raise ValueError("process launch argv contains an embedded NUL")
     if not Path(exact[0]).is_absolute():
         raise ValueError("process launch executable must be an absolute path")
     return exact
@@ -717,11 +787,7 @@ def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
 def _encode_launch_frame(
     argv: tuple[str, ...], environment: Mapping[str, str]
 ) -> bytes:
-    if not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in environment.items()
-    ):
-        raise ValueError("process environment requires string keys and values")
+    _validate_environment_strings(environment)
     payload = json.dumps(
         {"argv": argv, "environment": dict(environment)},
         ensure_ascii=False,
@@ -730,6 +796,16 @@ def _encode_launch_frame(
     if not payload or len(payload) > _MAX_LAUNCH_PAYLOAD_BYTES:
         raise ValueError("process launch payload is too large")
     return len(payload).to_bytes(_LAUNCH_FRAME_HEADER_BYTES, "big") + payload
+
+
+def _validate_environment_strings(environment: Mapping[str, str]) -> None:
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in environment.items()
+    ):
+        raise ValueError("process environment requires string keys and values")
+    if any("\0" in key or "\0" in value for key, value in environment.items()):
+        raise ValueError("process environment contains an embedded NUL")
 
 
 def _birth_token(created_at: float) -> str:

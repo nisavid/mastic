@@ -8,8 +8,16 @@ import sys
 from typing import Sequence
 
 
+# Keep these framing limits paired with system_adapters.py.  This gate stays
+# dependency-free and directly executable before package imports are available.
 _HEADER_BYTES = 8
 _MAX_PAYLOAD_BYTES = 1024 * 1024
+_EXIT_OK = 0
+_EXIT_USAGE = 64
+_EXIT_SOFTWARE = 70
+_EXIT_IO = 74
+_EXIT_DATA = 78
+_EXIT_CANNOT_EXEC = 126
 
 
 def _read_exact(descriptor: int, size: int) -> bytes | None:
@@ -35,6 +43,7 @@ def _decode_launch(payload: bytes) -> tuple[tuple[str, ...], dict[str, str]]:
         not isinstance(argv, list)
         or not argv
         or not all(isinstance(item, str) and item for item in argv)
+        or any("\0" in item for item in argv)
         or not os.path.isabs(argv[0])
     ):
         raise ValueError("invalid launch argv")
@@ -43,49 +52,68 @@ def _decode_launch(payload: bytes) -> tuple[tuple[str, ...], dict[str, str]]:
         for key, value in environment.items()
     ):
         raise ValueError("invalid launch environment")
+    if any("\0" in key or "\0" in value for key, value in environment.items()):
+        raise ValueError("invalid launch environment")
     return tuple(argv), dict(environment)
 
 
 def _gate(descriptor: int) -> int:
-    header = _read_exact(descriptor, _HEADER_BYTES)
+    try:
+        header = _read_exact(descriptor, _HEADER_BYTES)
+    except (OSError, OverflowError):
+        return _EXIT_IO
     if header is None:
-        return 0
+        return _EXIT_OK
     size = int.from_bytes(header, "big")
     if size <= 0 or size > _MAX_PAYLOAD_BYTES:
-        return 78
-    payload = _read_exact(descriptor, size)
+        return _EXIT_DATA
+    try:
+        payload = _read_exact(descriptor, size)
+    except (OSError, OverflowError):
+        return _EXIT_IO
     if payload is None:
-        return 0
+        return _EXIT_OK
     try:
         argv, environment = _decode_launch(payload)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return 78
+    except (json.JSONDecodeError, RecursionError, TypeError, UnicodeError, ValueError):
+        return _EXIT_DATA
     finally:
         payload = b""
-    os.close(descriptor)
+    try:
+        os.close(descriptor)
+    except OSError:
+        return _EXIT_IO
     try:
         os.execve(argv[0], argv, environment)
-    except OSError:
-        os.write(2, b"mastic launch gate could not exec the runtime\n")
-        return 126
+    except (OSError, ValueError):
+        try:
+            os.write(2, b"mastic launch gate could not exec the runtime\n")
+        except OSError:
+            pass
+        return _EXIT_CANNOT_EXEC
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1:
-        return 64
+        return _EXIT_USAGE
     try:
         descriptor = int(arguments[0])
     except ValueError:
-        return 64
+        return _EXIT_USAGE
     if descriptor < 0:
-        return 64
+        return _EXIT_USAGE
     try:
-        return _gate(descriptor)
+        try:
+            return _gate(descriptor)
+        except (OSError, OverflowError):
+            return _EXIT_IO
+        except Exception:
+            return _EXIT_SOFTWARE
     finally:
         try:
             os.close(descriptor)
-        except OSError:
+        except (OSError, OverflowError):
             pass
 
 
