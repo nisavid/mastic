@@ -3,8 +3,9 @@
 ## Supported versions
 
 MASTIC does not have a released runtime yet. Security fixes apply to the
-default branch and its repository automation. Code under `legacy/` is archived
-for reference and is not supported.
+default branch and its repository automation. Historical imported components
+remain available through Git history and are not supported as separate
+products.
 
 ## Reporting a vulnerability
 
