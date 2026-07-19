@@ -35,6 +35,7 @@ from mastic.infrastructure.production import (
     _LocalSupervisorOwner,
     _LocalModelSupply,
     _SetupSupervisorOwner,
+    _composition_transition,
     _sampling_matches_service_model,
     _removal_transition,
     _setup_resolver,
@@ -182,6 +183,27 @@ class ProductionCompositionTests(unittest.TestCase):
                 )
 
             self.assertGreaterEqual(prepare.call_count, 1)
+
+    def test_transition_locks_reject_symlink_aliased_owned_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(data, target_is_directory=True)
+            paths = MasticPaths(
+                root / "config",
+                alias / "state",
+                data,
+                root / "logs",
+            )
+
+            for transition in (_setup_transition, _composition_transition):
+                with (
+                    self.subTest(transition=transition.__name__),
+                    self.assertRaisesRegex(ValueError, "must not overlap"),
+                ):
+                    transition(paths)
 
     def test_local_read_composition_remains_available_during_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

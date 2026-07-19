@@ -156,19 +156,36 @@ def _external_transition(
     """Place a coordination lock outside every product-owned removable path."""
 
     owned = tuple(
-        path.expanduser().absolute()
+        _canonical_transition_path(path)
         for path in (paths.config_dir, paths.state_dir, paths.data_dir, paths.log_dir)
     )
-    parent = paths.state_dir.expanduser().absolute().parent
+    if any(
+        left == right or left.is_relative_to(right) or right.is_relative_to(left)
+        for index, left in enumerate(owned)
+        for right in owned[index + 1 :]
+    ):
+        raise ValueError(
+            "product-owned paths must not overlap after resolving symlinks"
+        )
+    parent = _canonical_transition_path(paths.state_dir).parent
     while True:
         candidate = parent / ".mastic-locks" / filename
+        physical_candidate = _canonical_transition_path(candidate)
         if not any(
-            candidate == path or candidate.is_relative_to(path) for path in owned
+            physical_candidate == path or physical_candidate.is_relative_to(path)
+            for path in owned
         ):
             return _ReentrantPrivateFileLock(candidate)
         if parent == parent.parent:
             raise ValueError("transition lock must be outside removable paths")
         parent = parent.parent
+
+
+def _canonical_transition_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"transition path cannot be resolved: {path}") from error
 
 
 def _setup_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
