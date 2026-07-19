@@ -1386,12 +1386,17 @@ def _durable_setup_outcome(
         for item in evidence
         if item.state in {StepState.COMPLETE, StepState.SKIPPED}
     }
+    raw_binding = plan.get("performance_binding")
+    bound_service = (
+        raw_binding.get("service") if isinstance(raw_binding, Mapping) else None
+    )
+    expected_service = bound_service if isinstance(bound_service, str) else None
     completion = (
         Completion.COMPLETE
         if all(
             (outcome := current.get(step)) is not None
             and _durable_terminal_setup_evidence_valid(
-                step[0], outcome, performance_profile
+                step[0], outcome, performance_profile, expected_service
             )
             for step in steps
         )
@@ -1504,6 +1509,7 @@ def _durable_terminal_setup_evidence_valid(
     step_id: str,
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
+    expected_service: str | None,
 ) -> bool:
     if evidence.state is StepState.SKIPPED:
         return True
@@ -1513,7 +1519,15 @@ def _durable_terminal_setup_evidence_valid(
         return _verification_ready(evidence)
     if step_id.startswith("application.canary."):
         target = step_id.removeprefix("application.canary.")
-        return _durable_canary_band(target, evidence, performance_profile) is not None
+        return (
+            _durable_canary_band(
+                target,
+                evidence,
+                performance_profile,
+                expected_service=expected_service,
+            )
+            is not None
+        )
     return True
 
 

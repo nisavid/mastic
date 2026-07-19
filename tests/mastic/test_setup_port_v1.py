@@ -735,6 +735,21 @@ class SetupOperationPortTests(unittest.TestCase):
         matching = DurableSetupOutcomeProvider(
             plans, evidence, profile, application_targets=inspections
         ).outcome()
+        canary = evidence.items["setup"][0]
+        wrong_service_detail = json.loads(canary.detail)
+        wrong_service_detail["result"].update(
+            {
+                "service": "wrong",
+                "evidence_sha256": canary_evidence_sha256("codex", service="wrong"),
+            }
+        )
+        evidence.items["setup"][0] = replace(
+            canary, detail=json.dumps(wrong_service_detail)
+        )
+        wrong_service = DurableSetupOutcomeProvider(
+            plans, evidence, profile, application_targets=inspections
+        ).outcome()
+        evidence.items["setup"][0] = canary
         plans.plan["performance_binding"] = {
             **plans.plan["performance_binding"],
             "selection_sha256": "d" * 64,
@@ -745,6 +760,8 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(without_binding["readiness"], "unverified")
         self.assertEqual(matching["readiness"], "ready")
+        self.assertEqual(wrong_service["completion"], "partial")
+        self.assertEqual(wrong_service["readiness"], "unverified")
         self.assertEqual(wrong_plan["readiness"], "unverified")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
