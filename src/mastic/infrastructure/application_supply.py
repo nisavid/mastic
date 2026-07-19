@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,6 +73,7 @@ class ApplicationSupply:
         application_tool_dir: Path | None = None,
         application_bin_dir: Path | None = None,
         run_command: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        transition: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
         self._home = home.expanduser().absolute()
         self._cache = cache_dir.expanduser().absolute()
@@ -101,6 +103,11 @@ class ApplicationSupply:
             .absolute()
         )
         self._run = run_command
+        self._transition = transition or (
+            lambda: private_file_lock(
+                self._state.parent / ".mastic-locks" / "application-installations.lock"
+            )
+        )
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -113,7 +120,7 @@ class ApplicationSupply:
                 "confirmation_required",
                 f"application {action} requires confirmation",
             )
-        with private_file_lock(self._state / ".application-installations.lock"):
+        with self._transition():
             if operation == "application.remove":
                 return self._remove(parameters)
             return self._install(parameters)
