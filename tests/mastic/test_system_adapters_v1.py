@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+import psutil
 import tomlkit
 import mastic.infrastructure.system_adapters as system_adapters
 
@@ -342,6 +343,29 @@ class ProcessLauncherTests(unittest.TestCase):
         attached.status_value = "zombie"
 
         self.assertEqual(process.poll(), 0)
+
+    def test_attached_process_control_is_idempotent_after_disappearance(self) -> None:
+        class DisappearedProcess(_FakePsutilProcess):
+            def terminate(self):
+                raise psutil.NoSuchProcess(self.pid)
+
+            def kill(self):
+                raise psutil.NoSuchProcess(self.pid)
+
+            def wait(self, timeout):
+                raise psutil.NoSuchProcess(self.pid)
+
+        launcher = MacOSProcessLauncher(
+            log_dir=Path("/unused"),
+            process_factory=lambda pid: DisappearedProcess(pid),
+        )
+        process = launcher.attach(8123)
+        self.assertIsNotNone(process)
+
+        process.terminate()
+        process.kill()
+
+        self.assertEqual(process.wait(0.1), 0)
 
 
 class ProcessProbeTests(unittest.TestCase):

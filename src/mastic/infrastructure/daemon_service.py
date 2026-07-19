@@ -608,25 +608,36 @@ class DaemonService:
         finally:
             initialized.set()
             stopped.set()
+            cleanup_errors: list[tuple[str, BaseException]] = []
             if maintenance_task is not None:
-                await maintenance_task
-            stop_error: BaseException | None = None
+                try:
+                    await maintenance_task
+                except BaseException as error:
+                    cleanup_errors.append(("maintenance shutdown", error))
             try:
                 if start_attempted:
                     await asyncio.to_thread(router.stop)
             except BaseException as error:
-                stop_error = error
-            finally:
+                cleanup_errors.append(("router shutdown", error))
+            try:
                 await server.close()
-                for signum in installed_signals:
+            except BaseException as error:
+                cleanup_errors.append(("control server close", error))
+            for signum in installed_signals:
+                try:
                     loop.remove_signal_handler(signum)
-            if stop_error is not None:
+                except BaseException as error:
+                    cleanup_errors.append(
+                        (f"signal handler removal for {signum!s}", error)
+                    )
+            if cleanup_errors:
+                target = primary_error or cleanup_errors.pop(0)[1]
+                for stage, error in cleanup_errors:
+                    target.add_note(
+                        f"Daemon {stage} also failed: {type(error).__name__}: {error}"
+                    )
                 if primary_error is None:
-                    raise stop_error
-                primary_error.add_note(
-                    "Daemon router shutdown also failed: "
-                    f"{type(stop_error).__name__}: {stop_error}"
-                )
+                    raise target
 
 
 def _operation_fingerprint(operation: str, parameters: Mapping[str, object]) -> str:
