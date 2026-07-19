@@ -32,6 +32,7 @@ from mastic.infrastructure.setup_port import (
     OperationalSetupEvidenceStore,
     OperationalSetupPlanStore,
     SetupOperationPort,
+    _combined_readiness,
 )
 
 
@@ -485,6 +486,13 @@ class SetupOperationPortTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("credential", json.dumps(outcome))
+
+    def test_unknown_or_empty_target_readiness_fails_closed(self):
+        self.assertEqual(_combined_readiness({}).value, "unverified")
+        self.assertEqual(
+            _combined_readiness({"codex": "future-state"}).value,
+            "unverified",
+        )
 
     def test_durable_outcome_fails_closed_when_target_observation_is_unknown(self):
         plans = FakePlanStore()

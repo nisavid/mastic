@@ -1270,14 +1270,17 @@ def _target_readiness(outcome: Mapping[str, object]) -> Mapping[str, str]:
 def _combined_readiness(target_readiness: Mapping[str, str]) -> Readiness:
     values = set(target_readiness.values())
     return next(
-        candidate
-        for candidate in (
-            Readiness.PENDING,
-            Readiness.UNVERIFIED,
-            Readiness.DEGRADED,
-            Readiness.READY,
-        )
-        if candidate.value in values
+        (
+            candidate
+            for candidate in (
+                Readiness.PENDING,
+                Readiness.UNVERIFIED,
+                Readiness.DEGRADED,
+                Readiness.READY,
+            )
+            if candidate.value in values
+        ),
+        Readiness.UNVERIFIED,
     )
 
 
