@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-import stat
 import socket
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,6 +165,26 @@ def _verified_model(_model):
 
 
 class ProcessLauncherTests(unittest.TestCase):
+    def test_aborting_uncommitted_launch_never_execs_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "runtime-started"
+            launcher = MacOSProcessLauncher(log_dir=root / "logs")
+            process = launcher.launch(
+                (
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import sys; Path(sys.argv[1]).touch()",
+                    str(marker),
+                ),
+                {"MASTIC_SERVICE_NAME": "coding"},
+            )
+
+            process.abort()
+            process.wait(2)
+
+            self.assertFalse(marker.exists())
+
     def test_failed_spawn_closes_the_parent_pipe_descriptor_once(self) -> None:
         class IdleThread:
             def __init__(self, **_kwargs) -> None:
@@ -174,7 +196,11 @@ class ProcessLauncherTests(unittest.TestCase):
         closed: list[int] = []
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(system_adapters.os, "pipe", return_value=(31, 32)),
+            patch.object(
+                system_adapters.os,
+                "pipe",
+                side_effect=((31, 32), (33, 34)),
+            ),
             patch.object(system_adapters.os, "close", side_effect=closed.append),
             patch.object(system_adapters.threading, "Thread", IdleThread),
         ):
@@ -189,6 +215,42 @@ class ProcessLauncherTests(unittest.TestCase):
                 launcher.launch(("/runtime/bin/optiq",), {})
 
         self.assertEqual(closed.count(32), 1)
+        self.assertEqual(closed.count(33), 1)
+        self.assertEqual(closed.count(34), 1)
+
+    def test_commit_pipe_failure_closes_control_descriptor_once(self) -> None:
+        class IdleThread:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+        closed: list[int] = []
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                system_adapters.os,
+                "pipe",
+                side_effect=((31, 32), (33, 34)),
+            ),
+            patch.object(system_adapters.os, "close", side_effect=closed.append),
+            patch.object(
+                system_adapters.os, "write", side_effect=BrokenPipeError("closed")
+            ),
+            patch.object(system_adapters.threading, "Thread", IdleThread),
+        ):
+            launcher = MacOSProcessLauncher(
+                log_dir=Path(directory),
+                popen=lambda *_args, **_kwargs: _FakePopen(),
+            )
+            process = launcher.launch(("/runtime/bin/optiq",), {})
+
+            with self.assertRaises(BrokenPipeError):
+                process.commit()
+            process.abort()
+
+        self.assertEqual(closed.count(34), 1)
 
     def test_log_storage_failure_does_not_stop_pipe_drain(self) -> None:
         read_descriptor, write_descriptor = os.pipe()
@@ -237,8 +299,13 @@ class ProcessLauncherTests(unittest.TestCase):
 
             self.assertEqual(process.pid, 4123)
             argv, options = calls[0]
-            self.assertEqual(argv, ("/runtime/bin/optiq", "serve", "--port", "49152"))
+            self.assertEqual(argv[0], sys.executable)
+            self.assertEqual(Path(argv[1]).name, "_launch_gate.py")
+            self.assertEqual(len(argv), 3)
+            self.assertNotIn("/runtime/bin/optiq", argv)
             self.assertIs(options["shell"], False)
+            self.assertIs(options["start_new_session"], True)
+            self.assertEqual(options["pass_fds"], (int(argv[2]),))
             self.assertEqual(
                 options["env"],
                 {
@@ -252,9 +319,48 @@ class ProcessLauncherTests(unittest.TestCase):
             self.assertTrue(log.is_file())
             self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(log_dir.stat().st_mode), 0o700)
+            process.abort()
 
             with self.assertRaisesRegex(ValueError, "environment variable"):
                 launcher.launch(("/runtime/bin/optiq",), {"API_TOKEN": "secret"})
+
+    def test_commit_execs_exact_runtime_in_place_with_allowlisted_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "runtime.json"
+            launcher = MacOSProcessLauncher(
+                log_dir=root / "logs",
+                base_environment={
+                    "HOME": str(root),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "GITHUB_TOKEN": "must-not-leak",
+                },
+            )
+            program = (
+                "import json, os, pathlib, sys; "
+                "pathlib.Path(sys.argv[1]).write_text(json.dumps("
+                "{'pid': os.getpid(), 'home': os.environ.get('HOME'), "
+                "'service': os.environ.get('MASTIC_SERVICE_NAME'), "
+                "'secret': os.environ.get('GITHUB_TOKEN')})); "
+                "print('runtime-output')"
+            )
+            process = launcher.launch(
+                (sys.executable, "-c", program, str(marker)),
+                {"MASTIC_SERVICE_NAME": "coding"},
+            )
+            gate_pid = process.pid
+
+            process.commit()
+            self.assertEqual(process.wait(2), 0)
+
+            observed = json.loads(marker.read_text())
+            self.assertEqual(observed["pid"], gate_pid)
+            self.assertEqual(observed["home"], str(root))
+            self.assertEqual(observed["service"], "coding")
+            self.assertIsNone(observed["secret"])
+            self.assertEqual((root / "logs/coding.log").read_text(), "runtime-output\n")
 
     def test_service_logs_rotate_with_bounded_size_and_retention(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -278,6 +384,7 @@ class ProcessLauncherTests(unittest.TestCase):
                 process = launcher.launch(
                     ("/runtime/bin/optiq",), {"MASTIC_SERVICE_NAME": "coding"}
                 )
+                process.abort()
                 process.wait(1)
 
             files = tuple(sorted(log_dir.glob("coding.log*")))

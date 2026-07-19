@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 from ipaddress import ip_address
@@ -36,6 +38,8 @@ from mastic.infrastructure.supervisor_v1 import (
 
 
 _SAFE_LOG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_LAUNCH_FRAME_HEADER_BYTES = 8
+_MAX_LAUNCH_PAYLOAD_BYTES = 1024 * 1024
 _CONTENT_ADDRESSED_BLOB_NAME = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 _ALLOWED_PROCESS_ENVIRONMENT = frozenset(
     {
@@ -94,6 +98,73 @@ class SubprocessManagedProcess:
             return result
         except subprocess.TimeoutExpired as error:
             raise TimeoutError from error
+
+
+class PendingSubprocessManagedProcess(SubprocessManagedProcess):
+    """Hold a spawned exec gate closed until the launch identity is durable."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        output_thread: threading.Thread,
+        control_descriptor: int,
+        launch_frame: bytes,
+    ) -> None:
+        super().__init__(process, output_thread)
+        self._control_descriptor: int | None = control_descriptor
+        self._launch_frame = launch_frame
+        self._control_lock = threading.Lock()
+        self._committed = False
+
+    def commit(self) -> None:
+        with self._control_lock:
+            if self._committed:
+                return
+            descriptor = self._control_descriptor
+            if descriptor is None:
+                raise RuntimeError("process launch was already aborted")
+            try:
+                remaining = memoryview(self._launch_frame)
+                while remaining:
+                    try:
+                        written = os.write(descriptor, remaining)
+                    except InterruptedError:
+                        continue
+                    if written <= 0:
+                        raise OSError("process launch gate accepted no data")
+                    remaining = remaining[written:]
+            except Exception:
+                self._close_control_locked()
+                raise
+            self._committed = True
+            self._close_control_locked()
+
+    def abort(self) -> None:
+        with self._control_lock:
+            if self._committed:
+                return
+            self._close_control_locked()
+
+    def terminate(self) -> None:
+        self.abort()
+        super().terminate()
+
+    def kill(self) -> None:
+        self.abort()
+        super().kill()
+
+    def _close_control_locked(self) -> None:
+        descriptor = self._control_descriptor
+        self._control_descriptor = None
+        self._launch_frame = b""
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def __del__(self) -> None:
+        try:
+            self.abort()
+        except Exception:
+            pass
 
 
 class PsutilManagedProcess:
@@ -185,7 +256,7 @@ class MacOSProcessLauncher:
 
     def launch(
         self, argv: Sequence[str], environment: Mapping[str, str]
-    ) -> SubprocessManagedProcess:
+    ) -> PendingSubprocessManagedProcess:
         exact_argv = _validate_argv(argv)
         unsupported = sorted(set(environment) - _ALLOWED_PROCESS_ENVIRONMENT)
         if unsupported:
@@ -194,6 +265,7 @@ class MacOSProcessLauncher:
                 + ", ".join(unsupported)
             )
         merged_environment = {**self._base_environment, **dict(environment)}
+        launch_frame = _encode_launch_frame(exact_argv, merged_environment)
         _prepare_private_directory(self._log_dir)
         service = merged_environment.get("MASTIC_SERVICE_NAME", "runtime")
         if _SAFE_LOG_NAME.fullmatch(service) is None:
@@ -213,9 +285,14 @@ class MacOSProcessLauncher:
             daemon=True,
         )
         pump.start()
+        control_read_descriptor: int | None = None
+        control_write_descriptor: int | None = None
+        process: subprocess.Popen[bytes] | None = None
         try:
+            control_read_descriptor, control_write_descriptor = os.pipe()
+            gate = Path(__file__).with_name("_launch_gate.py")
             process = self._popen(
-                exact_argv,
+                (sys.executable, str(gate), str(control_read_descriptor)),
                 shell=False,
                 env=merged_environment,
                 stdin=subprocess.DEVNULL,
@@ -223,10 +300,19 @@ class MacOSProcessLauncher:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 close_fds=True,
+                pass_fds=(control_read_descriptor,),
             )
         finally:
             os.close(write_descriptor)
-        return SubprocessManagedProcess(process, pump)
+            if control_read_descriptor is not None:
+                os.close(control_read_descriptor)
+            if process is None and control_write_descriptor is not None:
+                os.close(control_write_descriptor)
+        if process is None or control_write_descriptor is None:
+            raise RuntimeError("process launch gate did not start")
+        return PendingSubprocessManagedProcess(
+            process, pump, control_write_descriptor, launch_frame
+        )
 
     def attach(self, pid: int) -> PsutilManagedProcess | None:
         if type(pid) is not int or pid <= 0:
@@ -623,7 +709,27 @@ def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
     exact = tuple(argv)
     if not exact or any(not isinstance(item, str) or not item for item in exact):
         raise ValueError("process launch requires a non-empty exact argv")
+    if not Path(exact[0]).is_absolute():
+        raise ValueError("process launch executable must be an absolute path")
     return exact
+
+
+def _encode_launch_frame(
+    argv: tuple[str, ...], environment: Mapping[str, str]
+) -> bytes:
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in environment.items()
+    ):
+        raise ValueError("process environment requires string keys and values")
+    payload = json.dumps(
+        {"argv": argv, "environment": dict(environment)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not payload or len(payload) > _MAX_LAUNCH_PAYLOAD_BYTES:
+        raise ValueError("process launch payload is too large")
+    return len(payload).to_bytes(_LAUNCH_FRAME_HEADER_BYTES, "big") + payload
 
 
 def _birth_token(created_at: float) -> str:
