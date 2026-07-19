@@ -466,15 +466,38 @@ class Supervisor:
                 self._persist_run_locked(run)
                 process.commit()
             except Exception as error:
+                launch_error = f"process launch failed: {error}"
+                cleanup_errors: list[str] = []
                 if pending is not None:
-                    pending.abort()
+                    try:
+                        pending.abort()
+                    except Exception as cleanup_error:
+                        cleanup_errors.append(f"gate abort: {cleanup_error}")
                     if run.identity is None:
-                        self._terminate_direct_locked(pending)
-                        run.process = None
+                        try:
+                            self._terminate_direct_locked(pending)
+                        except Exception as cleanup_error:
+                            cleanup_errors.append(
+                                f"direct termination: {cleanup_error}"
+                            )
+                        finally:
+                            run.process = None
                     else:
-                        self._terminate_locked(run)
-                return self._failed_start_locked(
-                    run, operation_id, f"process launch failed: {error}", needs_start
+                        try:
+                            self._terminate_locked(run)
+                        except Exception as cleanup_error:
+                            cleanup_errors.append(f"termination: {cleanup_error}")
+                detail = launch_error
+                if cleanup_errors:
+                    detail += "; cleanup failed: " + "; ".join(cleanup_errors)
+                return self._record_failed_start_locked(
+                    run,
+                    operation_id,
+                    detail,
+                    needs_start,
+                    cleanup_unconfirmed=(
+                        run.process is not None and run.identity is not None
+                    ),
                 )
 
         deadline = self._clock.monotonic() + self._readiness_timeout
@@ -1150,10 +1173,28 @@ class Supervisor:
         supervisor_started: bool,
     ) -> ServiceTransition:
         self._terminate_locked(run)
+        return self._record_failed_start_locked(
+            run, operation_id, error, supervisor_started
+        )
+
+    def _record_failed_start_locked(
+        self,
+        run: _Run,
+        operation_id: str,
+        error: str,
+        supervisor_started: bool,
+        *,
+        cleanup_unconfirmed: bool = False,
+    ) -> ServiceTransition:
+        state = (
+            ServiceRunState.STOPPING if cleanup_unconfirmed else ServiceRunState.FAILED
+        )
         run.status = ServiceRunStatus(
             run.status.service,
             run.status.run_id,
-            ServiceRunState.FAILED,
+            state,
+            upstream_port=(run.status.upstream_port if cleanup_unconfirmed else None),
+            pid=run.status.pid if cleanup_unconfirmed else None,
             error=error,
         )
         self._gateway.set_route(self._gateway_route(run.service), "unavailable", None)

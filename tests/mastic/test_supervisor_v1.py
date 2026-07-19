@@ -151,6 +151,8 @@ class FakeProcesses:
         self.attached: list[int] = []
         self.commit_error: Exception | None = None
         self.lifecycle: list[str] | None = None
+        self.ignores_terminate = False
+        self.ignores_kill = False
 
     def allocate_loopback_port(self, host: str) -> int:
         port = self.next_port
@@ -160,6 +162,8 @@ class FakeProcesses:
     def launch(self, argv, environment):
         process = FakeProcess(
             1000 + len(self.processes),
+            ignores_terminate=self.ignores_terminate,
+            ignores_kill=self.ignores_kill,
             commit_error=self.commit_error,
             lifecycle=self.lifecycle,
         )
@@ -397,6 +401,39 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(process.abort_calls, 1)
         self.assertEqual(process.terminate_calls, 1)
         self.assertEqual(self.store.snapshot_items[-1]["state"], "failed")
+
+    def test_commit_and_cleanup_failures_return_a_recoverable_stopping_run(
+        self,
+    ) -> None:
+        self.processes.commit_error = OSError("commit pipe closed")
+        self.processes.ignores_terminate = True
+        self.processes.ignores_kill = True
+
+        result = self.supervisor.start_service("coding")
+
+        process = next(iter(self.processes.processes.values()))
+        self.assertEqual(result.run.state, ServiceRunState.STOPPING)
+        self.assertEqual(result.run.pid, process.pid)
+        self.assertIn(
+            "process launch failed: commit pipe closed", result.run.error or ""
+        )
+        self.assertIn("cleanup failed:", result.run.error or "")
+        operation = self.store.operation_items[result.operation_id]
+        self.assertEqual(operation["status"], "failed")
+        self.assertEqual(operation["outcome"], "failed")
+        self.assertEqual(operation["error"], result.run.error)
+        latest = self.store.snapshot_items[-1]
+        self.assertEqual(latest["state"], "stopping")
+        self.assertEqual(latest["pid"], process.pid)
+        self.assertEqual(latest["process_identity"], f"birth-{process.pid}")
+        self.assertTrue(process.running)
+
+        process.ignores_kill = False
+        recovered = self._new_supervisor().start()
+
+        self.assertEqual(recovered.runs, ())
+        self.assertFalse(process.running)
+        self.assertEqual(self.store.snapshot_items[-1]["state"], "stopped")
 
     def test_starting_snapshot_failure_aborts_without_committing_runtime(self) -> None:
         class FailingStateStore(FakeStateStore):
