@@ -242,6 +242,28 @@ class ProductionCompositionTests(unittest.TestCase):
                 (physical / "setup-removal.lock").resolve(strict=False),
             )
 
+    def test_transition_locks_reject_coordination_inside_an_owned_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            alias = root / "coordination-alias"
+            alias.symlink_to(data, target_is_directory=True)
+            paths = MasticPaths(
+                root / "config",
+                root / "state",
+                data,
+                root / "logs",
+                coordination_dir=alias,
+            )
+
+            for transition in (_setup_transition, _composition_transition):
+                with (
+                    self.subTest(transition=transition.__name__),
+                    self.assertRaisesRegex(ValueError, "outside removable paths"),
+                ):
+                    transition(paths)
+
     def test_local_read_composition_remains_available_during_setup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
