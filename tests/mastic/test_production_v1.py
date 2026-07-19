@@ -8,7 +8,6 @@ import socket
 import stat
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,6 +125,14 @@ class ProductionCompositionTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(coherent_application_target_context(131_072, None), 131_072)
         self.assertEqual(coherent_application_target_context(131_072, 131_072), 131_072)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            coherent_application_target_context(None, 0)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            coherent_application_target_context(None, -1)
+        with self.assertRaisesRegex(ValueError, "explicit null"):
+            coherent_application_target_context(
+                131_072, None, requested_context_present=True
+            )
         with self.assertRaisesRegex(ValueError, "must match"):
             coherent_application_target_context(131_072, 196_608)
 
@@ -589,6 +596,29 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["shell"])
         self.assertEqual(run.call_args.kwargs["timeout"], 30 * 60)
 
+    def test_invalid_explicit_uv_path_fails_without_falling_back_to_discovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fallback = Path(directory) / "uv"
+            fallback.write_text("#!/bin/sh\n", encoding="utf-8")
+            fallback.chmod(0o700)
+            for configured in (str(Path(directory) / "missing"), ""):
+                with (
+                    self.subTest(configured=configured),
+                    patch.dict(
+                        os.environ,
+                        {"MASTIC_UV_EXECUTABLE": configured},
+                        clear=False,
+                    ),
+                    patch(
+                        "mastic.infrastructure.production_host.shutil.which",
+                        return_value=str(fallback),
+                    ),
+                    self.assertRaisesRegex(FileNotFoundError, "MASTIC_UV_EXECUTABLE"),
+                ):
+                    resolve_uv(Path(directory))
+
     def test_router_dispatches_all_physical_owner_families(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = OperationalStateStore(Path(directory) / "state.sqlite3")
@@ -626,6 +656,229 @@ class ProductionCompositionTests(unittest.TestCase):
                 {"gateway", "supervisor"},
             )
 
+    def test_explicit_stop_and_service_finalization_stop_physical_state_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = _Port({"state": "stopped"})
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=_Port(),
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+
+            router.execute("supervisor.stop", {}, operation_id="stop-1")
+            finalized = router.stop()
+
+            self.assertEqual(finalized["state"], "stopped")
+            self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
+
+    def test_completed_stop_replays_exactly_and_rejects_conflicting_id_reuse(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = _Port({"state": "stopped", "generation": 7})
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=_Port(),
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+
+            first = router.execute("supervisor.stop", {}, operation_id="stop-exact")
+            replay = router.execute("supervisor.stop", {}, operation_id="stop-exact")
+
+            self.assertEqual(replay, first)
+            with self.assertRaises(ApplicationError) as raised:
+                router.execute(
+                    "supervisor.stop",
+                    {"force": True},
+                    operation_id="stop-exact",
+                )
+            self.assertEqual(raised.exception.code, "operation_id_conflict")
+            self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
+
+    def test_completed_mutation_is_not_reexecuted_when_final_event_write_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = OperationalStateStore(Path(directory) / "state.sqlite3")
+            runtime = _Port({"state": "complete"})
+            router = DaemonOperationRouter(
+                runtime=runtime,
+                model=_Port(),
+                supervisor=_Port(),
+                state=state,
+            )
+            original_append = state.append_event
+            events = 0
+
+            def append_event(event):
+                nonlocal events
+                events += 1
+                if events == 2:
+                    raise OSError("journal unavailable")
+                return original_append(event)
+
+            with patch.object(state, "append_event", side_effect=append_event):
+                first = router.execute(
+                    "runtime.install",
+                    {"runtime": "optiq"},
+                    operation_id="runtime-1",
+                )
+                second = router.execute(
+                    "runtime.install",
+                    {"runtime": "optiq"},
+                    operation_id="runtime-1",
+                )
+                third = router.execute(
+                    "runtime.install",
+                    {"runtime": "optiq"},
+                    operation_id="runtime-1",
+                )
+
+            self.assertTrue(first["journal_reconciliation_required"])
+            self.assertEqual(second["state"], "complete")
+            self.assertEqual(third, second)
+            self.assertEqual(runtime.calls, [("runtime.install", {"runtime": "optiq"})])
+            self.assertEqual(
+                [event["kind"] for event in state.events("runtime-1")],
+                ["started", "complete"],
+            )
+            self.assertFalse(state.operation("runtime-1")["terminal_event_pending"])
+
+    def test_startup_reconciles_a_pending_terminal_event_without_reexecution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = OperationalStateStore(Path(directory) / "state.sqlite3")
+            state.put_operation(
+                {
+                    "id": "runtime-before-restart",
+                    "kind": "runtime.install",
+                    "resource": "optiq",
+                    "status": "complete",
+                    "request_fingerprint": "sha256:" + "a" * 64,
+                    "terminal_event_pending": True,
+                    "result": {"state": "complete"},
+                }
+            )
+            state.append_event(
+                {
+                    "kind": "started",
+                    "operation_id": "runtime-before-restart",
+                    "resource": "optiq",
+                }
+            )
+            runtime = _Port({"state": "complete"})
+            router = DaemonOperationRouter(
+                runtime=runtime,
+                model=_Port(),
+                supervisor=_Port({"state": "running"}),
+                state=state,
+            )
+
+            router.start()
+
+            self.assertEqual(runtime.calls, [])
+            self.assertEqual(
+                [event["kind"] for event in state.events("runtime-before-restart")],
+                ["started", "complete"],
+            )
+            self.assertFalse(
+                state.operation("runtime-before-restart")["terminal_event_pending"]
+            )
+
+    def test_operation_id_is_bound_to_the_exact_operation_and_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = _Port({"state": "complete"})
+            model = _Port({"state": "complete"})
+            router = DaemonOperationRouter(
+                runtime=runtime,
+                model=model,
+                supervisor=_Port(),
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+            router.execute(
+                "runtime.install",
+                {"runtime": "optiq", "options": {"channel": "tested"}},
+                operation_id="physical-1",
+            )
+
+            conflicting_requests = (
+                (
+                    "runtime.install",
+                    {"runtime": "optiq", "options": {"channel": "custom"}},
+                ),
+                ("model.install", {"repository": "owner/model"}),
+            )
+            for operation, parameters in conflicting_requests:
+                with self.subTest(operation=operation, parameters=parameters):
+                    with self.assertRaises(ApplicationError) as raised:
+                        router.execute(
+                            operation,
+                            parameters,
+                            operation_id="physical-1",
+                        )
+                    self.assertEqual(raised.exception.code, "operation_id_conflict")
+
+            self.assertEqual(len(runtime.calls), 1)
+            self.assertEqual(model.calls, [])
+
+    def test_concurrent_matching_operation_ids_share_one_physical_result(self) -> None:
+        class BlockingPort(_Port):
+            def __init__(self) -> None:
+                super().__init__({"state": "complete"})
+                self.entered = threading.Event()
+                self.duplicate_entered = threading.Event()
+                self.release = threading.Event()
+                self.entries = 0
+
+            def execute(self, operation, parameters):
+                self.entries += 1
+                if self.entries > 1:
+                    self.duplicate_entered.set()
+                self.entered.set()
+                self.release.wait(1)
+                return super().execute(operation, parameters)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = BlockingPort()
+            router = DaemonOperationRouter(
+                runtime=runtime,
+                model=_Port(),
+                supervisor=_Port(),
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+            results = []
+
+            def execute() -> None:
+                results.append(
+                    router.execute(
+                        "runtime.install",
+                        {"runtime": "optiq"},
+                        operation_id="runtime-concurrent",
+                    )
+                )
+
+            first = threading.Thread(target=execute, daemon=True)
+            second = threading.Thread(target=execute, daemon=True)
+            first.start()
+            self.assertTrue(runtime.entered.wait(1))
+            second.start()
+
+            self.assertFalse(runtime.duplicate_entered.wait(0.05))
+            runtime.release.set()
+            first.join(1)
+            second.join(1)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(len(runtime.calls), 1)
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0], results[1])
+
     def test_router_rejects_unowned_resume_instead_of_faking_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             router = DaemonOperationRouter(
@@ -661,16 +914,24 @@ class ProductionCompositionTests(unittest.TestCase):
                 physical_drain_timeout=1,
             )
             physical = threading.Thread(
-                target=lambda: router.execute("runtime.install", {"runtime": "optiq"})
+                target=lambda: router.execute("runtime.install", {"runtime": "optiq"}),
+                daemon=True,
             )
             physical.start()
             self.assertTrue(runtime.entered.wait(1))
             stopped = []
             stopping = threading.Thread(
-                target=lambda: stopped.append(router.execute("supervisor.stop", {}))
+                target=lambda: stopped.append(router.execute("supervisor.stop", {})),
+                daemon=True,
             )
             stopping.start()
-            time.sleep(0.02)
+            with router._condition:  # noqa: SLF001 - lifecycle synchronization proof.
+                self.assertTrue(
+                    router._condition.wait_for(  # noqa: SLF001
+                        lambda: router._stopping,
+                        timeout=1,  # noqa: SLF001
+                    )
+                )
 
             with self.assertRaises(ApplicationError) as raised:
                 router.execute("model.install", {"repository": "owner/model"})
@@ -680,8 +941,121 @@ class ProductionCompositionTests(unittest.TestCase):
             runtime.release.set()
             physical.join(1)
             stopping.join(1)
+            self.assertFalse(physical.is_alive())
+            self.assertFalse(stopping.is_alive())
             self.assertEqual(stopped[0]["state"], "stopped")
             self.assertEqual(supervisor.calls, [("supervisor.stop", {})])
+
+    def test_waiting_stop_reclaims_the_drain_gate_after_the_first_stop_fails(
+        self,
+    ) -> None:
+        class StopPort(_Port):
+            def __init__(self) -> None:
+                super().__init__({"state": "stopped"})
+                self.first_entered = threading.Event()
+                self.first_release = threading.Event()
+                self.second_entered = threading.Event()
+                self.second_release = threading.Event()
+                self.stop_calls = 0
+
+            def execute(self, operation, parameters):
+                if operation == "supervisor.stop":
+                    self.stop_calls += 1
+                    if self.stop_calls == 1:
+                        self.first_entered.set()
+                        self.first_release.wait(1)
+                        raise RuntimeError("first stop failed")
+                    self.second_entered.set()
+                    self.second_release.wait(1)
+                return super().execute(operation, parameters)
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = StopPort()
+            model = _Port({"state": "complete"})
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=model,
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+            failures = []
+            stopped = []
+
+            def fail_first() -> None:
+                try:
+                    router.execute("supervisor.stop", {})
+                except RuntimeError as error:
+                    failures.append(str(error))
+
+            first = threading.Thread(target=fail_first, daemon=True)
+            second = threading.Thread(
+                target=lambda: stopped.append(router.execute("supervisor.stop", {})),
+                daemon=True,
+            )
+            first.start()
+            self.assertTrue(supervisor.first_entered.wait(1))
+            second.start()
+            supervisor.first_release.set()
+            self.assertTrue(supervisor.second_entered.wait(1))
+
+            with self.assertRaises(ApplicationError) as raised:
+                router.execute("model.install", {"repository": "owner/model"})
+            self.assertEqual(raised.exception.code, "supervisor_stopping")
+            self.assertEqual(model.calls, [])
+
+            supervisor.second_release.set()
+            first.join(1)
+            second.join(1)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(failures, ["first stop failed"])
+            self.assertEqual(stopped[0]["state"], "stopped")
+
+    def test_stop_serializes_maintenance_and_rejects_lifecycle_start(self) -> None:
+        class MaintenancePort(_Port):
+            def __init__(self) -> None:
+                super().__init__({"state": "running"})
+                self.maintenance_entered = threading.Event()
+                self.maintenance_release = threading.Event()
+                self.stop_entered = threading.Event()
+                self.stop_release = threading.Event()
+
+            def execute(self, operation, parameters):
+                if operation == "supervisor.maintain":
+                    self.maintenance_entered.set()
+                    self.maintenance_release.wait(1)
+                elif operation == "supervisor.stop":
+                    self.stop_entered.set()
+                    self.stop_release.wait(1)
+                    return {"state": "stopped"}
+                return super().execute(operation, parameters)
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = MaintenancePort()
+            router = DaemonOperationRouter(
+                runtime=_Port(),
+                model=_Port(),
+                supervisor=supervisor,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+            maintenance = threading.Thread(target=router.maintain, daemon=True)
+            stopping = threading.Thread(target=router.stop, daemon=True)
+            maintenance.start()
+            self.assertTrue(supervisor.maintenance_entered.wait(1))
+            stopping.start()
+
+            self.assertFalse(supervisor.stop_entered.wait(0.05))
+            with self.assertRaises(ApplicationError) as raised:
+                router.start()
+            self.assertEqual(raised.exception.code, "supervisor_stopping")
+
+            supervisor.maintenance_release.set()
+            self.assertTrue(supervisor.stop_entered.wait(1))
+            supervisor.stop_release.set()
+            maintenance.join(1)
+            stopping.join(1)
+            self.assertFalse(maintenance.is_alive())
+            self.assertFalse(stopping.is_alive())
 
     def test_failed_daemon_cleanup_stop_reopens_the_router_in_finally(self) -> None:
         class FailingStop(_Port):

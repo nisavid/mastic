@@ -183,6 +183,32 @@ def _target_settings(service: str) -> ApplicationTargetSettings:
 
 
 class OperationPortTests(unittest.TestCase):
+    def test_configure_rejects_truthy_non_boolean_takeover_before_adapter_calls(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                "coding",
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity="coding",
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+        )
+
+        for value in ("false", 1, [False]):
+            with self.subTest(value=value):
+                with self.assertRaises(ApplicationError) as raised:
+                    port.execute(
+                        "application-target.configure",
+                        {"application_target": "codex", "takeover": value},
+                    )
+                self.assertEqual(raised.exception.code, "invalid_parameter")
+
+        self.assertEqual(adapter.calls, [])
+
     def test_configure_fails_closed_on_drift_with_explicit_choices(self) -> None:
         adapter = FakeApplicationTargetAdapter()
         adapter.inspection = {"state": "drifted", "detail": "changed"}
@@ -546,6 +572,12 @@ class OperationPortTests(unittest.TestCase):
             SamplingProfile(temperature=0.9),
         )
 
+        port.execute(
+            "application-target.configure",
+            {"application_target": "hindsight", "service": "memory"},
+        )
+        self.assertEqual(records["hindsight"].profile, "agent-memory")
+
         tested = port.execute(
             "application-target.test",
             {"application_target": "hindsight", "profile": "retain"},
@@ -555,6 +587,7 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(tested["response"]["target"], "hindsight")
         self.assertEqual(factory_calls[1][3].profile, "agent-memory")
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
+        self.assertEqual(factory_calls[3][3].profile, "agent-memory")
         self.assertNotIn("hindsight", records)
 
     def test_configure_translates_unknown_sampling_fields_to_invalid_parameter(
@@ -793,8 +826,8 @@ class OperationPortTests(unittest.TestCase):
             except Exception as error:  # pragma: no cover - asserted below
                 errors.append(error)
 
-        first = threading.Thread(target=configure, args=("first",))
-        second = threading.Thread(target=configure, args=("second",))
+        first = threading.Thread(target=configure, args=("first",), daemon=True)
+        second = threading.Thread(target=configure, args=("second",), daemon=True)
         first.start()
         self.assertTrue(first_apply_entered.wait(1))
         second.start()
@@ -810,6 +843,8 @@ class OperationPortTests(unittest.TestCase):
         first.join(1)
         second.join(1)
 
+        self.assertFalse(first.is_alive(), "first configuration deadlocked")
+        self.assertFalse(second.is_alive(), "second configuration deadlocked")
         self.assertEqual(errors, [])
         self.assertEqual(settings_reads, [None, "first"])
         self.assertEqual(state.service, "second")

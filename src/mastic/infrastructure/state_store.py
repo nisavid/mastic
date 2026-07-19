@@ -16,6 +16,12 @@ from typing import Iterator, Mapping
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_VERSION = 1
 _DEFAULT_MAX_METRICS = 10_000
+
+
+def _canonical_key(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
 _SENSITIVE_KEYS = frozenset(
     {
         "messages",
@@ -29,6 +35,7 @@ _SENSITIVE_KEYS = frozenset(
         "responses",
     }
 )
+_SENSITIVE_KEY_IDENTITIES = frozenset(_canonical_key(key) for key in _SENSITIVE_KEYS)
 _CREDENTIAL_KEYS = frozenset(
     {
         "access_token",
@@ -48,8 +55,12 @@ _CREDENTIAL_KEYS = frozenset(
         "token",
     }
 )
+_CREDENTIAL_KEY_IDENTITIES = frozenset(_canonical_key(key) for key in _CREDENTIAL_KEYS)
 _RAW_INFERENCE_KEYS = frozenset(
     {"body", "content", "input", "message", "output", "query", "text"}
+)
+_RAW_INFERENCE_KEY_IDENTITIES = frozenset(
+    _canonical_key(key) for key in _RAW_INFERENCE_KEYS
 )
 # Raw inference-shaped values are denied unless a future operational schema
 # names an exact, reviewed path here. An empty allowlist is intentional.
@@ -206,9 +217,16 @@ class OperationalStateStore:
 
     def progress(self, operation_id: str) -> tuple[dict[str, object], ...]:
         """Return only progress events for an operation."""
-        return tuple(
-            event for event in self.events(operation_id) if event["kind"] == "progress"
-        )
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, dto_json FROM events
+                WHERE operation_id = ? AND kind = 'progress'
+                ORDER BY sequence LIMIT 1000
+                """,
+                (operation_id,),
+            ).fetchall()
+        return tuple(_record({**_decode(row[1]), "sequence": row[0]}) for row in rows)
 
     def put_snapshot(self, snapshot: Mapping[str, object]) -> dict[str, object]:
         """Create or replace the latest versioned resource snapshot."""
@@ -268,6 +286,33 @@ class OperationalStateStore:
 
     def snapshots(self, kind: str | None = None) -> tuple[dict[str, object], ...]:
         """Return latest snapshots in deterministic resource order."""
+        if kind is None:
+            sql = """
+                SELECT dto_json FROM snapshots
+                WHERE sequence IN (
+                    SELECT MAX(sequence) FROM snapshots GROUP BY kind, resource_id
+                )
+                ORDER BY kind, resource_id
+            """
+            parameters: tuple[object, ...] = ()
+        else:
+            sql = """
+                SELECT dto_json FROM snapshots
+                WHERE kind = ? AND sequence IN (
+                    SELECT MAX(sequence) FROM snapshots
+                    WHERE kind = ? GROUP BY kind, resource_id
+                )
+                ORDER BY resource_id
+            """
+            parameters = (kind, kind)
+        with self._connection() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return tuple(_decode(row[0]) for row in rows)
+
+    def snapshot_history(
+        self, kind: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        """Return every immutable snapshot in insertion order."""
         if kind is None:
             sql = "SELECT dto_json FROM snapshots ORDER BY sequence"
             parameters: tuple[object, ...] = ()
@@ -415,23 +460,23 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
         for raw_key in sorted(value, key=str):
             if not isinstance(raw_key, str):
                 raise TypeError("operational DTO keys must be strings")
-            if raw_key.casefold() in _SENSITIVE_KEYS:
+            normalized_key = _canonical_key(raw_key)
+            if normalized_key in _SENSITIVE_KEY_IDENTITIES:
                 location = ".".join((*path, raw_key))
                 raise SensitiveContentError(
                     f"operational state cannot persist inference content at {location}"
                 )
-            normalized_key = raw_key.casefold()
-            normalized_path = tuple(part.casefold() for part in (*path, raw_key))
+            normalized_path = tuple(_canonical_key(part) for part in (*path, raw_key))
             if (
-                normalized_key in _RAW_INFERENCE_KEYS
+                normalized_key in _RAW_INFERENCE_KEY_IDENTITIES
                 and normalized_path not in _ALLOWED_RAW_INFERENCE_PATHS
             ):
                 location = ".".join((*path, raw_key))
                 raise SensitiveContentError(
                     f"operational state cannot persist inference content at {location}"
                 )
-            if normalized_key in _CREDENTIAL_KEYS or (
-                normalized_key.endswith("_token") and normalized_key != "birth_token"
+            if normalized_key in _CREDENTIAL_KEY_IDENTITIES or (
+                normalized_key.endswith("token") and normalized_key != "birthtoken"
             ):
                 location = ".".join((*path, raw_key))
                 raise SensitiveContentError(

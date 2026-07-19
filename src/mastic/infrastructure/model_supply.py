@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from hashlib import sha1, sha256
 from pathlib import Path
@@ -180,11 +183,21 @@ class CacheDeletionPreview:
         default=None, repr=False, compare=False
     )
 
-    def execute(self, *, approved: bool = False) -> None:
+    def execute(
+        self,
+        *,
+        installations: tuple[ModelInstallation, ...],
+        approved: bool = False,
+    ) -> None:
         if not self.allowed or self._strategy is None:
             raise ModelSupplyError("cache deletion preview is blocked by references")
         if not approved:
             raise PermissionError("cache deletion requires explicit approval")
+        if any(
+            installation.revision.commit_sha in self.revision_hashes
+            for installation in installations
+        ):
+            raise ModelSupplyError("cache deletion is blocked by references")
         self._strategy.execute()
 
 
@@ -276,7 +289,7 @@ class ModelSupply:
             snapshot,
             local_files_only=offline,
         )
-        if verification.status not in {"complete", "verified"}:
+        if verification.status != "verified":
             details = "; ".join(verification.issues) or verification.status
             raise ModelSupplyError(
                 f"exact revision is not ready for installation: {details}"
@@ -323,16 +336,20 @@ class ModelSupply:
                 installation.revision.repo_id,
                 installation.revision.commit_sha,
                 local_files_only=False,
-                force_download=False,
+                force_download=True,
             )
             .expanduser()
             .resolve()
         )
-        return self._hub.verify_revision(
+        verification = self._hub.verify_revision(
             installation.revision.repo_id,
             installation.revision.commit_sha,
             snapshot,
         )
+        if verification.status != "verified":
+            details = "; ".join(verification.issues) or verification.status
+            raise ModelSupplyError(f"exact revision repair failed: {details}")
+        return verification
 
     def inventory(self) -> CacheInventory:
         return self._hub.cache_inventory()
@@ -466,71 +483,51 @@ class HuggingFaceHubClient:
                 issues=(f"Hub resolved snapshot to {resolved}, expected {expected}",),
             )
         if local_files_only:
-            return VerificationResult(
-                status="complete",
-                evidence="cache-completeness",
-                issues=(),
-            )
-        try:
-            from huggingface_hub import HfApi
-
-            info = HfApi().model_info(
-                repo_id,
-                revision=revision,
-                files_metadata=True,
-                timeout=10.0,
-            )
-            manifest_revision = getattr(info, "sha", None)
-            if (
-                not isinstance(manifest_revision, str)
-                or manifest_revision.casefold() != revision.casefold()
-            ):
-                return VerificationResult(
-                    status="conflicting",
-                    evidence="hub-exact-manifest",
-                    issues=("Hub manifest identity did not match the exact revision",),
+            try:
+                manifest = _load_verification_manifest(
+                    expected, repo_id=repo_id, revision=revision
                 )
-            manifest = _hub_manifest(tuple(getattr(info, "siblings", ())))
-        except Exception as error:
-            return VerificationResult(
-                status="incomplete",
-                evidence="hub-exact-manifest",
-                issues=(str(error),),
-            )
-        actual = {
-            path.relative_to(expected).as_posix(): path
-            for path in expected.rglob("*")
-            if path.is_file()
-            and not path.relative_to(expected)
-            .as_posix()
-            .startswith(".cache/huggingface/")
-        }
-        issues = [
-            *(f"missing:{path}" for path in sorted(set(manifest) - set(actual))),
-            *(f"unexpected:{path}" for path in sorted(set(actual) - set(manifest))),
-        ]
-        for relative in sorted(set(manifest) & set(actual)):
-            size, algorithm, digest = manifest[relative]
-            path = actual[relative]
-            if size is not None and path.stat().st_size != size:
-                issues.append(f"size-mismatch:{relative}")
-                continue
-            observed = (
-                _file_sha256(path) if algorithm == "sha256" else _git_blob_sha(path)
-            )
-            if observed != digest:
-                issues.append(f"digest-mismatch:{relative}")
-        if issues:
-            return VerificationResult(
-                status="incomplete",
-                evidence="hub-exact-manifest",
-                issues=tuple(issues),
-            )
-        return VerificationResult(
-            status="verified",
-            evidence="hub-exact-manifest",
-            issues=(),
-        )
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                return VerificationResult(
+                    status="incomplete",
+                    evidence="persisted-exact-manifest",
+                    issues=(str(error),),
+                )
+            evidence = "persisted-exact-manifest"
+        else:
+            try:
+                from huggingface_hub import HfApi
+
+                info = HfApi().model_info(
+                    repo_id,
+                    revision=revision,
+                    files_metadata=True,
+                    timeout=10.0,
+                )
+                manifest_revision = getattr(info, "sha", None)
+                if (
+                    not isinstance(manifest_revision, str)
+                    or manifest_revision.casefold() != revision.casefold()
+                ):
+                    return VerificationResult(
+                        status="conflicting",
+                        evidence="hub-exact-manifest",
+                        issues=(
+                            "Hub manifest identity did not match the exact revision",
+                        ),
+                    )
+                manifest = _hub_manifest(tuple(getattr(info, "siblings", ())))
+                _persist_verification_manifest(
+                    expected, repo_id=repo_id, revision=revision, manifest=manifest
+                )
+            except Exception as error:
+                return VerificationResult(
+                    status="incomplete",
+                    evidence="hub-exact-manifest",
+                    issues=(str(error),),
+                )
+            evidence = "hub-exact-manifest"
+        return _verify_exact_manifest(expected, manifest, evidence=evidence)
 
     def cache_inventory(self) -> CacheInventory:
         from huggingface_hub import scan_cache_dir
@@ -573,6 +570,43 @@ class HuggingFaceHubClient:
         return scan_cache_dir().delete_revisions(*commit_hashes)
 
 
+def _verify_exact_manifest(
+    expected: Path,
+    manifest: dict[str, tuple[int | None, str, str]],
+    *,
+    evidence: str,
+) -> VerificationResult:
+    try:
+        actual = {
+            path.relative_to(expected).as_posix(): path
+            for path in expected.rglob("*")
+            if path.is_file()
+            and not path.relative_to(expected)
+            .as_posix()
+            .startswith(".cache/huggingface/")
+        }
+        issues = [
+            *(f"missing:{path}" for path in sorted(set(manifest) - set(actual))),
+            *(f"unexpected:{path}" for path in sorted(set(actual) - set(manifest))),
+        ]
+        for relative in sorted(set(manifest) & set(actual)):
+            size, algorithm, digest = manifest[relative]
+            path = actual[relative]
+            if size is not None and path.stat().st_size != size:
+                issues.append(f"size-mismatch:{relative}")
+                continue
+            observed = (
+                _file_sha256(path) if algorithm == "sha256" else _git_blob_sha(path)
+            )
+            if observed != digest:
+                issues.append(f"digest-mismatch:{relative}")
+    except OSError as error:
+        return VerificationResult("incomplete", evidence, (str(error),))
+    if issues:
+        return VerificationResult("incomplete", evidence, tuple(issues))
+    return VerificationResult("verified", evidence, ())
+
+
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -580,6 +614,85 @@ _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 def _validate_alias(alias: str) -> None:
     if not _ALIAS.fullmatch(alias):
         raise ModelSupplyError(f"invalid model alias: {alias!r}")
+
+
+def _verification_manifest_path(snapshot: Path) -> Path:
+    cache_root = (
+        snapshot.parent.parent
+        if snapshot.parent.name == "snapshots"
+        else snapshot.parent
+    )
+    return cache_root / ".mastic-manifests" / f"{snapshot.name}.json"
+
+
+def _persist_verification_manifest(
+    snapshot: Path,
+    *,
+    repo_id: str,
+    revision: str,
+    manifest: dict[str, tuple[int | None, str, str]],
+) -> None:
+    path = _verification_manifest_path(snapshot)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise OSError("model verification manifest path is unsafe")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = {
+        "schema_version": 1,
+        "repository": repo_id,
+        "revision": revision,
+        "files": {
+            name: {"size": size, "algorithm": algorithm, "digest": digest}
+            for name, (size, algorithm, digest) in sorted(manifest.items())
+        },
+    }
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_verification_manifest(
+    snapshot: Path, *, repo_id: str, revision: str
+) -> dict[str, tuple[int | None, str, str]]:
+    path = _verification_manifest_path(snapshot)
+    if path.is_symlink() or not path.is_file():
+        raise OSError("persisted exact-revision manifest is unavailable")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("repository") != repo_id
+        or str(value.get("revision", "")).casefold() != revision.casefold()
+        or not isinstance(value.get("files"), dict)
+    ):
+        raise ValueError("persisted exact-revision manifest is invalid")
+    result: dict[str, tuple[int | None, str, str]] = {}
+    for name, item in value["files"].items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(item, dict)
+            or not isinstance(item.get("algorithm"), str)
+            or not isinstance(item.get("digest"), str)
+            or (
+                item.get("size") is not None
+                and (not isinstance(item.get("size"), int) or item["size"] < 0)
+            )
+        ):
+            raise ValueError("persisted exact-revision manifest is invalid")
+        result[name] = (item.get("size"), item["algorithm"], item["digest"])
+    if not result:
+        raise ValueError("persisted exact-revision manifest is empty")
+    return result
 
 
 def _hub_manifest(

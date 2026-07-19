@@ -225,6 +225,30 @@ class RuntimeCatalogueTests(unittest.TestCase):
                     options={name: value},
                 )
 
+    def test_launch_port_must_be_a_valid_tcp_port_integer(self) -> None:
+        catalogue = RuntimeCatalogue.load_builtin()
+        installation = RuntimeInstallation(
+            installation_id="optiq-0.3.3",
+            runtime="optiq",
+            version="0.3.3",
+            provenance="tested",
+            root=Path("/runtimes/optiq-0.3.3"),
+            launcher=("/runtimes/optiq-0.3.3/bin/optiq", "serve"),
+            capabilities=frozenset({"model", "host", "port"}),
+        )
+
+        for port in (0, -1, 65_536, True, "49152"):
+            with (
+                self.subTest(port=port),
+                self.assertRaisesRegex(ValueError, "valid TCP port"),
+            ):
+                RuntimeLaunchBuilder(catalogue).build(
+                    installation,
+                    model="/models/qwen",
+                    host="127.0.0.1",
+                    port=port,  # type: ignore[arg-type]
+                )
+
 
 class SubprocessRuntimeProbeTests(unittest.TestCase):
     def test_probes_through_a_venv_python_symlink_to_the_base_interpreter(self) -> None:
@@ -325,6 +349,30 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
             definition = RuntimeCatalogue.load_builtin().definition("mlx_lm")
             with self.assertRaisesRegex(ValueError, "help probe output exceeds"):
                 SubprocessRuntimeProbe(max_output_bytes=1024).probe(definition, root)
+
+            self.assertFalse(sentinel.exists())
+
+    def test_small_probe_output_cannot_block_past_the_selector_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "bin/python"
+            sentinel = root / "completed"
+            python.parent.mkdir(parents=True)
+            python.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys, time\n"
+                "if '-c' in sys.argv:\n"
+                "    print('0.31.3')\n"
+                "else:\n"
+                "    os.write(1, b'x')\n"
+                "    time.sleep(0.5)\n"
+                f"    pathlib.Path({str(sentinel)!r}).write_text('finished')\n"
+            )
+            python.chmod(0o700)
+
+            definition = RuntimeCatalogue.load_builtin().definition("mlx_lm")
+            with self.assertRaisesRegex(ValueError, "probe command failed"):
+                SubprocessRuntimeProbe(timeout_seconds=0.05).probe(definition, root)
 
             self.assertFalse(sentinel.exists())
 

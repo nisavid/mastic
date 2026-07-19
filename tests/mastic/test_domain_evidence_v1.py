@@ -79,6 +79,14 @@ class EvidenceTests(unittest.TestCase):
             ),
             TrustDecision.NOT_GRANTED,
         )
+        self.assertEqual(
+            grant.decide(
+                revision=self.revision,
+                runtime_installation="optiq@0.3.3",
+                requested_risks=frozenset({"remote_code"}),
+            ),
+            TrustDecision.NOT_GRANTED,
+        )
 
     def test_known_security_and_integrity_failures_cannot_be_granted(self) -> None:
         grant = TrustGrant(

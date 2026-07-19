@@ -69,12 +69,13 @@ class GatewayCredentialTests(unittest.TestCase):
                 barrier.wait()
                 tokens.append(GatewayCredential(path).load_or_create())
 
-            threads = [threading.Thread(target=create) for _ in range(8)]
+            threads = [threading.Thread(target=create, daemon=True) for _ in range(8)]
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join(2)
 
+            self.assertFalse(any(thread.is_alive() for thread in threads))
             self.assertEqual(len(tokens), 8)
             self.assertEqual(len(set(tokens)), 1)
             self.assertEqual(tokens[0], GatewayCredential(path).load_or_create())

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +17,7 @@ from mastic.application.config_schema import (
     validate_hindsight_profile_name,
 )
 from mastic.application.dispatch import ApplicationError
+from mastic.application.serialization import to_plain_data as _plain
 from mastic.infrastructure.control_client import ControlClientError, UnixControlClient
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
@@ -134,7 +134,13 @@ class SupervisorOperationPort:
         elif operation == "service.restart":
             value = self._supervisor.restart_service(resource)
         elif operation == "service.remove":
-            value = self._supervisor.remove_service(resource)
+            previous_route = parameters.get("previous_route")
+            value = self._supervisor.remove_service(
+                resource,
+                previous_route=(
+                    str(previous_route) if isinstance(previous_route, str) else None
+                ),
+            )
         elif operation == "pressure.reconcile":
             value = self._supervisor.reconcile_pressure()
         elif operation == "supervisor.maintain":
@@ -291,14 +297,17 @@ class ApplicationTargetOperationPort:
                         f"mastic application-target configure {name} --help",
                     ),
                 ) from error
+            takeover = parameters.get("takeover", False)
+            if type(takeover) is not bool:
+                raise ApplicationError(
+                    "invalid_parameter", "takeover must be a boolean"
+                )
             desired_settings = _application_target_settings(
                 name, parameters, configuration, stored
             )
             preview = adapter.preview(configuration)
             rollback = adapter.rollback_point()
-            result = adapter.apply(
-                configuration, takeover=bool(parameters.get("takeover", False))
-            )
+            result = adapter.apply(configuration, takeover=takeover)
             try:
                 self._record(name, desired_settings)
             except Exception:
@@ -543,7 +552,10 @@ def _application_target_settings(
             raise ValueError(
                 "Hindsight configuration requires Hindsight target options"
             )
-        profile = validate_hindsight_profile_name(parameters.get("profile"))
+        profile = validate_hindsight_profile_name(
+            parameters.get("profile")
+            or (stored.profile if stored is not None else None)
+        )
         provider = configuration.target.provider
         max_concurrent: int | None = configuration.target.max_concurrent
     else:
@@ -562,17 +574,3 @@ def _application_target_settings(
         max_concurrent=max_concurrent,
         sampling=configuration.sampling_profiles,
     )
-
-
-def _plain(value: object) -> object:
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            field.name: _plain(getattr(value, field.name)) for field in fields(value)
-        }
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return [_plain(item) for item in value]
-    if hasattr(value, "value"):
-        return value.value  # type: ignore[union-attr]
-    return value

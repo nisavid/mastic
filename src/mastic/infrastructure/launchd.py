@@ -134,6 +134,10 @@ class LaunchdAdapter:
     def install(self) -> Path:
         """Atomically install a private user-owned plist without following links."""
 
+        if self._uid != os.getuid():
+            raise LaunchdConfigurationError(
+                "LaunchAgent must be installed by its target user"
+            )
         parent = self._plist_path.parent
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         parent_stat = parent.lstat()

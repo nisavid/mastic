@@ -153,6 +153,8 @@ class UnixControlServer:
             raise ValueError("connection idle timeout must be positive")
         if type(max_connections) is not int or max_connections <= 0:
             raise ValueError("maximum control connections must be a positive integer")
+        if supported_versions != (PROTOCOL_VERSION,):
+            raise ValueError("only control protocol version 1 is implemented")
         self.socket_path = Path(socket_path)
         self._handler = handler
         self._cancel_handler = cancel_handler
@@ -331,6 +333,9 @@ class UnixControlServer:
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         finally:
+            if connection is not None and connection.cancelling():
+                for task in tasks:
+                    task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             writer.close()
@@ -418,11 +423,12 @@ class UnixControlServer:
                 "invalid_message", "Expected a request or cancel message."
             )
         request_id = _required_string(message, "request_id")
-        operation_id = _string(message.get("operation_id")) or str(uuid.uuid4())
         if message_type == "cancel":
+            operation_id = _required_string(message, "operation_id")
             return message_type, ControlRequest(
                 request_id, operation_id, "operation.cancel", {}
             )
+        operation_id = _string(message.get("operation_id")) or str(uuid.uuid4())
         operation = _required_string(message, "operation")
         parameters = message.get("parameters", {})
         if not isinstance(parameters, dict):

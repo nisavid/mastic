@@ -79,8 +79,18 @@ class NativeApplicationTargetCanary:
     ) -> Mapping[str, object]:
         started = self._monotonic()
         if target == "codex":
+            if profile != "coding":
+                raise _canary_error(
+                    "application_target_canary_unsupported",
+                    f"Codex has no native {profile!r} canary",
+                )
             phases = self._run_codex()
         elif target == "hindsight":
+            if profile != "retain":
+                raise _canary_error(
+                    "application_target_canary_unsupported",
+                    f"Hindsight has no bounded native {profile!r} canary",
+                )
             phases = self._run_hindsight(settings)
         else:
             raise ApplicationError(
@@ -368,8 +378,6 @@ class NativeApplicationTargetCanary:
         return value
 
     def _stop_process(self, process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:

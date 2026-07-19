@@ -134,13 +134,17 @@ class HostIntegrationTests(unittest.TestCase):
             log.chmod(0o600)
             (root / "unsafe.log").symlink_to(log)
             oversized = root / "oversized.log"
-            oversized.write_text("x" * 64)
+            oversized.write_text("x" * 64 + "\ntail-one\ntail-two\n")
             oversized.chmod(0o600)
 
-            rows = PrivateLogReader(root, max_lines=2, max_bytes=32).read("service")
+            reader = PrivateLogReader(root, max_lines=2, max_bytes=32)
+            rows = reader.read("service", "coding")
+            tail = reader.read("service", "oversized")
 
             self.assertEqual([row["message"] for row in rows], ["two", "three"])
             self.assertEqual({row["source"] for row in rows}, {"coding.log"})
+            self.assertEqual([row["message"] for row in tail], ["tail-one", "tail-two"])
+            self.assertEqual(reader.read("service", "unsafe"), ())
             self.assertTrue(stat.S_ISREG(log.stat().st_mode))
 
     def test_metrics_adapter_filters_scope_and_resource(self) -> None:
@@ -150,6 +154,7 @@ class HostIntegrationTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["kind"], "request")
+        self.assertEqual(metrics.query("all", "coding"), rows)
 
 
 if __name__ == "__main__":

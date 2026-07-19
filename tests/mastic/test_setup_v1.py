@@ -6,6 +6,7 @@ from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
     MutationExecutionError,
+    MutationStep,
     RecommendedProfile,
     RemovalInventory,
     SetupEvidence,
@@ -414,6 +415,22 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(gateway.inputs["route"], "coding")
         self.assertEqual(verify.inputs["model"], "coding")
 
+    def test_mutation_step_inputs_are_recursively_immutable(self) -> None:
+        nested = {"settings": {"stops": ["</s>"]}}
+        step = MutationStep(
+            "service.configure",
+            "Configure service",
+            nested,
+            "fingerprint",
+            StepState.READY,
+        )
+
+        nested["settings"]["stops"].append("<|end|>")
+
+        self.assertEqual(step.inputs["settings"]["stops"], ("</s>",))
+        with self.assertRaises(TypeError):
+            step.inputs["settings"]["stops"] = ()  # type: ignore[index]
+
     def test_service_names_activation_and_json_options_are_validated(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
         invalid_name = ExactSetupSelection(
@@ -638,7 +655,7 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(activation.state, StepState.READY)
         self.assertNotEqual(activation.fingerprint, old_fingerprint)
 
-    def test_apply_records_only_completed_steps_before_a_failure(self) -> None:
+    def test_apply_records_completed_steps_and_the_failed_step(self) -> None:
         facts = SetupPreflight("darwin", "arm64", 64 * GIB, 200 * GIB, True)
         resolved = self.resolver.resolve(facts)
         recorded: list[SetupEvidence] = []
@@ -659,8 +676,26 @@ class SetupV1Tests(unittest.TestCase):
                 "gateway.configure",
                 "supervisor.activate",
                 "runtime.install",
+                "model.install",
             ],
         )
+        self.assertEqual(recorded[-1].state, StepState.FAILED)
+
+    def test_mutation_step_recursively_freezes_fingerprinted_inputs(self) -> None:
+        nested = {"target": {"profiles": ["coding"]}}
+        step = MutationStep(
+            "application-target.configure.codex",
+            "Configure Codex",
+            nested,
+            "sha256:exact",
+            StepState.READY,
+        )
+
+        nested["target"]["profiles"].append("memory")
+
+        self.assertEqual(step.inputs["target"]["profiles"], ("coding",))
+        with self.assertRaises(TypeError):
+            step.inputs["target"]["profiles"] += ("memory",)
 
     def test_offline_preview_exposes_evidence_and_blocks_missing_network_artifacts(
         self,

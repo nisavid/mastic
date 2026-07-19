@@ -45,7 +45,7 @@ def cli_main() -> None:
 def daemon_main() -> None:
     """Run the foreground per-user Supervisor control process."""
 
-    if {"-h", "--help"}.intersection(sys.argv[1:]):
+    if sys.argv[1:] in (["-h"], ["--help"]):
         print("usage: masticd [-h]")
         print("\nRun the foreground per-user mastic Supervisor.")
         return

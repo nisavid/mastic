@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -17,7 +19,8 @@ from mastic.application.dispatch import (
     OperationRequest,
     PreparedOperation,
 )
-from mastic.infrastructure.config_store import ConfigStore
+from mastic.application.serialization import to_plain_data as _plain
+from mastic.infrastructure.config_store import ConfigRevisionConflict, ConfigStore
 from mastic.infrastructure.model_supply import (
     ModelInstallation as SuppliedModelInstallation,
 )
@@ -146,6 +149,7 @@ class LocalOperationBackend:
             raise ApplicationError(
                 "unknown_operation", f"unknown operation: {request.name}"
             )
+        _validate_parameter_types(operation, request.parameters)
         self._validate_request(request)
         if operation.kind is OperationKind.QUERY:
             return PreparedOperation(False, lambda: self._query(request))
@@ -407,14 +411,19 @@ class LocalOperationBackend:
             component.get("state") in {"failed", "unhealthy"}
             for component in (supervisor, gateway)
         )
+        gateway_stopped = (
+            supervisor.get("state") != "stopped" and gateway.get("state") == "stopped"
+        )
         state = (
             "failed"
-            if failed or component_failed
+            if failed or component_failed or gateway_stopped
             else ("stopped" if supervisor.get("state") == "stopped" else "ok")
         )
         next_actions = []
         if supervisor.get("state") == "stopped":
             next_actions.append("mastic supervisor start")
+        elif gateway_stopped:
+            next_actions.append("mastic gateway restart")
         if failed or component_failed:
             next_actions.append("mastic doctor")
         details: dict[str, object] = {}
@@ -818,12 +827,15 @@ class LocalOperationBackend:
         state = str((item["run"] or {}).get("state", "stopped"))
         details = {}
         if request.name == "service.check":
+            gateway = self._latest("gateway", "gateway") or {"state": "stopped"}
             details["checks"] = [
                 {"name": "desired-state", "state": "valid"},
                 {"name": "service-run", "state": state},
                 {
                     "name": "gateway-route",
-                    "state": "ready" if state == "ready" else "unavailable",
+                    "state": "ready"
+                    if state == "ready" and gateway.get("state") in {"ready", "running"}
+                    else "unavailable",
                 },
             ]
         return _result(
@@ -853,8 +865,11 @@ class LocalOperationBackend:
                     "next_actions": ["mastic supervisor logs"],
                 }
             )
+        gateway_host = gateway.get("host")
         gateway_port = gateway.get("port")
-        if gateway.get("state") == "running" and gateway_port != config.gateway.port:
+        if gateway.get("state") == "running" and (
+            gateway_host != config.gateway.host or gateway_port != config.gateway.port
+        ):
             issues.append(
                 {
                     "code": "gateway_drift",
@@ -1044,6 +1059,14 @@ class LocalOperationBackend:
         self, request: OperationRequest, preview: Mapping[str, object]
     ) -> Mapping[str, object]:
         name = request.name
+        if "config_revision" in preview:
+            current_revision = (
+                self._config_store.load().revision
+                if self._config_store.exists
+                else None
+            )
+            if current_revision != preview.get("config_revision"):
+                raise _stale_preview(name)
         parameters = dict(request.parameters)
         target = preview.get("target")
         if isinstance(target, Mapping):
@@ -1071,10 +1094,18 @@ class LocalOperationBackend:
             value = remove(parameters)
         elif name == "service.remove":
             resource = str(parameters.get("resource", ""))
-            removed = self._supervisor.execute(
-                "service.remove", {"resource": resource, "confirmed": True}
-            )
+            service = self._config().services.get(resource)
+            if service is None:
+                raise _not_found("Inference Service", resource)
             configured = self._local_mutation(request, preview)
+            removed = self._supervisor.execute(
+                "service.remove",
+                {
+                    "resource": resource,
+                    "previous_route": str(service.route),
+                    "confirmed": True,
+                },
+            )
             value = {
                 "service": resource,
                 "lifecycle": removed,
@@ -1238,9 +1269,25 @@ class LocalOperationBackend:
             text = _config_import_text(parameters)
             if preview.get("candidate_sha256") != _text_digest(text):
                 raise _stale_preview(name)
-            return _plain(self._config_store.import_text(text))
+            try:
+                return _plain(
+                    self._config_store.import_text(
+                        text,
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            except ConfigRevisionConflict as error:
+                raise _stale_preview(name) from error
         if name == "config.restore":
-            return _plain(self._config_store.restore(str(parameters["revision"])))
+            try:
+                return _plain(
+                    self._config_store.restore(
+                        str(parameters["revision"]),
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            except ConfigRevisionConflict as error:
+                raise _stale_preview(name) from error
         if name == "model.trust":
             resource = str(parameters.get("resource", parameters.get("model", "")))
             config = self._config()
@@ -1359,9 +1406,25 @@ class LocalOperationBackend:
                     alias_table.pop(alias, None)
                 del models[installation_name]
 
-        if not self._config_store.exists:
-            self._config_store.import_text("schema_version = 1\n")
-        return _plain(self._config_store.edit(edit))
+        try:
+            if not self._config_store.exists:
+                document = tomlkit.parse("schema_version = 1\n")
+                edit(document)
+                return _plain(
+                    self._config_store.save(
+                        document,
+                        action="edit",
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            return _plain(
+                self._config_store.edit(
+                    edit,
+                    expected_revision=preview.get("config_revision"),
+                )
+            )
+        except ConfigRevisionConflict as error:
+            raise _stale_preview(name) from error
 
     def _service_items(self, config: MasticConfig) -> list[dict[str, object]]:
         runs: dict[str, Mapping[str, object]] = {}
@@ -1405,6 +1468,46 @@ def _resource(
     return resource
 
 
+def _validate_parameter_types(
+    operation: Operation, parameters: Mapping[str, object]
+) -> None:
+    specifications = {item.name: item for item in operation.parameters}
+    expected_internal = {
+        "confirmed": "boolean",
+        "noninteractive": "boolean",
+        "preview_fingerprint": "string",
+    }
+    for name, value in parameters.items():
+        specification = specifications.get(name)
+        value_type = (
+            specification.value_type
+            if specification is not None
+            else expected_internal.get(name)
+        )
+        if value_type is None or value_type == "json":
+            continue
+        valid = (
+            type(value) is bool
+            if value_type in {"boolean", "tristate_boolean"}
+            else type(value) is int
+            if value_type == "integer"
+            else type(value) is str
+            if value_type == "string"
+            else False
+        )
+        if not valid:
+            raise ApplicationError(
+                "invalid_parameter",
+                f"{name} must be a {value_type.replace('_', ' ')}",
+            )
+        if specification is not None and specification.accepted:
+            if value not in specification.accepted:
+                raise ApplicationError(
+                    "invalid_parameter",
+                    f"{name} must be one of: {', '.join(specification.accepted)}",
+                )
+
+
 def _not_found(noun: str, resource: str) -> ApplicationError:
     return ApplicationError(
         "resource_not_found",
@@ -1416,21 +1519,44 @@ def _not_found(noun: str, resource: str) -> ApplicationError:
 def _read_config_source(source: str, *, max_bytes: int = 1024 * 1024) -> str:
     path = Path(source).expanduser()
     try:
-        metadata = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
     except FileNotFoundError as error:
         raise ApplicationError(
             "config_source_missing", f"config source is absent: {source}"
         ) from error
-    if path.is_symlink() or not path.is_file():
+    except OSError as error:
         raise ApplicationError(
             "config_source_unsafe", "config source must be a regular non-symlink file"
-        )
-    if metadata.st_size > max_bytes:
-        raise ApplicationError(
-            "config_source_too_large",
-            f"config source exceeds the {max_bytes}-byte limit",
-        )
-    return path.read_text(encoding="utf-8")
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ApplicationError(
+                "config_source_unsafe",
+                "config source must be a regular non-symlink file",
+            )
+        if metadata.st_size > max_bytes:
+            raise ApplicationError(
+                "config_source_too_large",
+                f"config source exceeds the {max_bytes}-byte limit",
+            )
+        payload = os.read(descriptor, max_bytes + 1)
+        if len(payload) > max_bytes:
+            raise ApplicationError(
+                "config_source_too_large",
+                f"config source exceeds the {max_bytes}-byte limit",
+            )
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ApplicationError(
+                "config_source_unsafe", "config source must be valid UTF-8"
+            ) from error
+    finally:
+        os.close(descriptor)
 
 
 def _config_import_text(parameters: Mapping[str, object]) -> str:
@@ -1489,26 +1615,3 @@ def _plain_model_intelligence_report(report: object) -> dict[str, object]:
     result["repository_file_count"] = len(repository_files)
     result["repository_manifest_sha256"] = hashlib.sha256(canonical).hexdigest()
     return result
-
-
-def _plain(value: object) -> object:
-    if hasattr(value, "__dataclass_fields__"):
-        return {
-            name: _plain(getattr(value, name))
-            for name in value.__dataclass_fields__  # type: ignore[attr-defined]
-        }
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (frozenset, set)):
-        items = [_plain(item) for item in value]
-        return sorted(
-            items,
-            key=lambda item: json.dumps(
-                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-            ),
-        )
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    if isinstance(value, Path):
-        return str(value)
-    return value

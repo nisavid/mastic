@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -76,6 +77,30 @@ class PathsV1Tests(unittest.TestCase):
                 self.assertTrue(path.is_dir())
                 self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertFalse(paths.config_file.exists())
+
+    def test_concurrent_prepare_treats_an_already_created_directory_as_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = resolve_paths(home=Path(directory), environment={})
+            barrier = threading.Barrier(4)
+            errors: list[BaseException] = []
+
+            def prepare() -> None:
+                barrier.wait()
+                try:
+                    paths.prepare()
+                except BaseException as error:  # pragma: no cover - assertion aid
+                    errors.append(error)
+
+            threads = [threading.Thread(target=prepare) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+            self.assertEqual(errors, [])
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
 
 
 if __name__ == "__main__":

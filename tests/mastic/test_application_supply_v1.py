@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,60 @@ HINDSIGHT_API_LAUNCHERS = (
 
 
 class ApplicationSupplyTests(unittest.TestCase):
+    def test_hindsight_api_adoption_requires_the_exact_site_package_set(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            api_root = tool_dir / "hindsight-api"
+            site = api_root / "lib/python3.11/site-packages"
+            site.mkdir(parents=True)
+            bin_dir.mkdir()
+            expected = {
+                "hindsight_api/__init__.py": b'__version__ = "0.8.4"\n',
+                "hindsight_api-0.8.4.dist-info/RECORD": b"exact record\n",
+            }
+            for name, payload in expected.items():
+                path = site / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            python = api_root / "bin/python"
+            for name, target in application_supply._HINDSIGHT_API_ENTRY_POINTS.items():
+                module, function = target.split(":", 1)
+                (bin_dir / name).write_text(
+                    f"#!{python}\n"
+                    "# -*- coding: utf-8 -*-\n"
+                    "import sys\n"
+                    f"from {module} import {function}\n"
+                    'if __name__ == "__main__":\n'
+                    '    if sys.argv[0].endswith("-script.pyw"):\n'
+                    "        sys.argv[0] = sys.argv[0][:-11]\n"
+                    '    elif sys.argv[0].endswith(".exe"):\n'
+                    "        sys.argv[0] = sys.argv[0][:-4]\n"
+                    f"    sys.exit({function}())\n",
+                    encoding="utf-8",
+                )
+            wheel_bytes = io.BytesIO()
+            with zipfile.ZipFile(wheel_bytes, "w") as wheel:
+                for name, payload in expected.items():
+                    wheel.writestr(name, payload)
+            archive = root / "hindsight-api.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                info = tarfile.TarInfo("wheels/hindsight_api-0.8.4-py3-none-any.whl")
+                info.size = len(wheel_bytes.getvalue())
+                bundle.addfile(info, io.BytesIO(wheel_bytes.getvalue()))
+
+            supply = ApplicationSupply(
+                root / "home",
+                root / "cache",
+                root / "state",
+                application_tool_dir=tool_dir,
+                application_bin_dir=bin_dir,
+            )
+            self.assertTrue(supply._api_matches_bundle(archive))
+            (site / "unexpected_dependency.py").write_text("tampered")
+            self.assertFalse(supply._api_matches_bundle(archive))
+
     def test_incomplete_cache_reports_complete_set_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -63,10 +118,17 @@ class ApplicationSupplyTests(unittest.TestCase):
             calls.append((tuple(str(item) for item in command), kwargs))
             if tuple(command[1:3]) == ("tool", "install") and fail_api_install[0]:
                 fail_api_install[0] = False
-                raise subprocess.CalledProcessError(1, command)
-            if tuple(command[1:3]) == ("tool", "install"):
                 (application_tool_dir / "hindsight-api").mkdir(parents=True)
                 application_bin_dir.mkdir(parents=True)
+                (application_bin_dir / "hindsight-api").write_bytes(
+                    b"partial mastic install"
+                )
+                raise subprocess.CalledProcessError(1, command)
+            if tuple(command[1:3]) == ("tool", "install"):
+                (application_tool_dir / "hindsight-api").mkdir(
+                    parents=True, exist_ok=True
+                )
+                application_bin_dir.mkdir(parents=True, exist_ok=True)
                 for name in HINDSIGHT_API_LAUNCHERS:
                     (application_bin_dir / name).write_bytes(f"owned {name}".encode())
             if tuple(command[1:3]) == ("tool", "uninstall"):
@@ -147,7 +209,9 @@ class ApplicationSupplyTests(unittest.TestCase):
             home_bin = home / ".local/bin"
             home_bin.mkdir(parents=True)
             (home_bin / "codex").write_bytes(codex_bytes)
+            (home_bin / "codex").chmod(0o755)
             (home_bin / "hindsight").write_bytes(hindsight.read_bytes())
+            (home_bin / "hindsight").chmod(0o755)
             with patch.dict(
                 application_supply._OFFICIAL_DIGESTS,
                 {
@@ -179,6 +243,14 @@ class ApplicationSupplyTests(unittest.TestCase):
                 self.assertEqual(
                     interrupted["applications"]["hindsight"]["api_ownership"],
                     "mastic",
+                )
+                self.assertEqual(
+                    interrupted["applications"]["hindsight"]["cli_state"],
+                    "complete",
+                )
+                self.assertEqual(
+                    interrupted["applications"]["hindsight"]["api_state"],
+                    "pending",
                 )
                 result = supply.execute("application.install", parameters)
 
@@ -225,6 +297,9 @@ class ApplicationSupplyTests(unittest.TestCase):
                     name: str(application_bin_dir / name)
                     for name in HINDSIGHT_API_LAUNCHERS
                 },
+            )
+            self.assertEqual(
+                journal["applications"]["hindsight"]["api_state"], "complete"
             )
 
             (home_bin / "codex").write_bytes(b"external replacement")

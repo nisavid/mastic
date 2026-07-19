@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mastic.application.catalogue import OperationKind, build_operation_catalogue
 from mastic.application.config_schema import validate_config
@@ -295,6 +296,31 @@ class LocalOperationBackendTests(unittest.TestCase):
 
                 self.assertEqual(status["state"], "failed")
                 self.assertIn("mastic doctor", status["next_actions"])
+
+    def test_running_supervisor_with_stopped_gateway_is_not_reported_ok(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, state = self._backend(Path(directory), config=_EMPTY_CONFIG)
+            state.put_snapshot(
+                {
+                    "kind": "supervisor",
+                    "id": "supervisor",
+                    "version": 1,
+                    "state": "running",
+                }
+            )
+            state.put_snapshot(
+                {
+                    "kind": "gateway",
+                    "id": "gateway",
+                    "version": 1,
+                    "state": "stopped",
+                }
+            )
+
+            status = backend.prepare(OperationRequest("status")).execute()
+
+            self.assertEqual(status["state"], "failed")
+            self.assertIn("mastic gateway restart", status["next_actions"])
 
     def test_uninitialized_status_and_config_are_actionable_without_a_file(
         self,
@@ -855,6 +881,88 @@ class LocalOperationBackendTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, "stale_preview")
 
+    def test_prepared_mutation_rechecks_config_revision_before_side_effects(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            supervisor = _Port()
+            backend, _ = self._backend(Path(directory), supervisor=supervisor)
+            request = OperationRequest("service.remove", {"resource": "chat"})
+            preview = backend.prepare(request).events[-1]
+            prepared = backend.prepare(
+                OperationRequest(
+                    "service.remove",
+                    {
+                        "resource": "chat",
+                        "confirmed": True,
+                        "preview_fingerprint": preview["preview_fingerprint"],
+                    },
+                )
+            )
+            backend._config_store.edit(  # noqa: SLF001 - race regression.
+                lambda document: document["gateway"].update({"port": 9000})
+            )
+
+            with self.assertRaises(ApplicationError) as caught:
+                prepared.execute()
+
+            self.assertEqual(caught.exception.code, "stale_preview")
+            self.assertEqual(supervisor.calls, [])
+
+    def test_catalogue_types_reject_truthy_coercions_before_owner_calls(self) -> None:
+        with TemporaryDirectory() as directory:
+            setup = _Port()
+            models = _ModelSupply()
+            targets = _Port()
+            backend, _ = self._backend(
+                Path(directory),
+                setup=setup,
+                model_supply=models,
+                application_targets=targets,
+            )
+            invalid = (
+                OperationRequest("setup", {"offline": "false"}),
+                OperationRequest(
+                    "model.install",
+                    {"repository": "owner/model", "offline": 1},
+                ),
+                OperationRequest(
+                    "application-target.configure",
+                    {"application_target": "codex", "takeover": [False]},
+                ),
+                OperationRequest("service.edit", {"resource": "chat", "pinned": 0}),
+                OperationRequest("gateway.configure", {"port": True}),
+            )
+
+            for request in invalid:
+                with self.subTest(
+                    operation=request.name, parameters=request.parameters
+                ):
+                    with self.assertRaises(ApplicationError) as raised:
+                        backend.prepare(request)
+                    self.assertEqual(raised.exception.code, "invalid_parameter")
+
+            self.assertEqual(setup.calls, [])
+            self.assertEqual(models.calls, [])
+            self.assertEqual(targets.calls, [])
+
+    def test_service_remove_commits_desired_state_before_physical_cleanup(self) -> None:
+        with TemporaryDirectory() as directory:
+            supervisor = _Port()
+            backend, _ = self._backend(Path(directory), supervisor=supervisor)
+            prepared = backend.prepare(
+                OperationRequest("service.remove", {"resource": "chat"})
+            )
+            with patch.object(
+                backend._config_store,  # noqa: SLF001 - failure injection.
+                "edit",
+                side_effect=OSError("config unavailable"),
+            ):
+                with self.assertRaisesRegex(OSError, "config unavailable"):
+                    prepared.execute()
+
+            self.assertEqual(supervisor.calls, [])
+
     def test_local_service_edit_has_preview_and_never_uses_supervisor(self) -> None:
         with TemporaryDirectory() as directory:
             supervisor = _Port()
@@ -891,7 +999,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             shown = backend.prepare(OperationRequest("config.show")).execute()
             self.assertEqual(shown["resource"]["gateway"]["port"], 9001)
 
-    def test_service_remove_drains_and_stops_before_deleting_desired_state(
+    def test_service_remove_commits_desired_state_then_requests_physical_cleanup(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -909,7 +1017,11 @@ class LocalOperationBackendTests(unittest.TestCase):
                 [
                     (
                         "service.remove",
-                        {"resource": "chat", "confirmed": True},
+                        {
+                            "resource": "chat",
+                            "previous_route": "chat",
+                            "confirmed": True,
+                        },
                     )
                 ],
             )

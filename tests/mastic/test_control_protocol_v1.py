@@ -21,6 +21,18 @@ from mastic.infrastructure.control_protocol import (
 
 
 class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_server_rejects_unimplemented_protocol_versions(self) -> None:
+        async def handle(request, emit_progress):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "version 1"):
+                UnixControlServer(
+                    Path(directory) / "masticd.sock",
+                    handle,
+                    supported_versions=(2, 1),
+                )
+
     async def test_idle_connection_is_closed_with_a_stable_timeout(self) -> None:
         async def handle(request, emit_progress):
             return {}
@@ -298,6 +310,32 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cancelled, ["op-long"])
             self.assertEqual(cancel_result["result"], {"cancel_requested": True})
 
+    async def test_cancel_requires_an_explicit_operation_id(self) -> None:
+        async def handle(request, emit_progress):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(Path(directory) / "masticd.sock", handle)
+            await server.start()
+            self.addAsyncCleanup(server.close)
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            self.addAsyncCleanup(self._close_writer, writer)
+            await self._negotiate(reader, writer)
+            await write_message(
+                writer,
+                {
+                    "type": "cancel",
+                    "protocol": PROTOCOL_NAME,
+                    "version": PROTOCOL_VERSION,
+                    "request_id": "req-cancel",
+                },
+            )
+
+            response = await read_message(reader)
+
+            self.assertEqual(response["error"]["code"], "invalid_message")
+            self.assertNotIn("operation_id", response)
+
     async def test_peer_with_different_uid_is_rejected(self) -> None:
         async def handle(request, emit_progress):
             return {}
@@ -408,6 +446,41 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["result"], {"state": "stopped"})
             await self._close_writer(writer)
             await asyncio.wait_for(closing, timeout=1)
+
+    async def test_close_cancels_stuck_handlers_within_the_drain_timeout(self) -> None:
+        entered = asyncio.Event()
+
+        async def handle(request, emit_progress):
+            entered.set()
+            await asyncio.Event().wait()
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(
+                Path(directory) / "masticd.sock",
+                handle,
+                connection_drain_timeout=0.01,
+            )
+            await server.start()
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            await self._negotiate(reader, writer)
+            await write_message(
+                writer,
+                {
+                    "type": "request",
+                    "protocol": PROTOCOL_NAME,
+                    "version": PROTOCOL_VERSION,
+                    "request_id": "req-stuck",
+                    "operation_id": "op-stuck",
+                    "operation": "model.install",
+                    "parameters": {},
+                },
+            )
+            await entered.wait()
+
+            await asyncio.wait_for(server.close(), timeout=0.2)
+            await self._close_writer(writer)
+            del reader
 
     async def _negotiate(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

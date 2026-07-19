@@ -153,6 +153,21 @@ class LaunchdAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(LaunchdConfigurationError, "symbolic link"):
             self.adapter.install()
 
+    def test_refuses_cross_user_installation_before_writing(self) -> None:
+        adapter = LaunchdAdapter(
+            label="com.nisavid.masticd",
+            program_arguments=("/usr/local/bin/masticd",),
+            plist_path=self.plist,
+            runner=self.runner,
+            uid=os.getuid() + 1,
+        )
+
+        with self.assertRaisesRegex(LaunchdConfigurationError, "target user"):
+            adapter.register()
+
+        self.assertFalse(self.plist.parent.exists())
+        self.assertEqual(self.runner.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

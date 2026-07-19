@@ -107,23 +107,70 @@ class GatewayRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(servers), 2)
 
+    def test_start_waits_until_the_stopping_generation_has_fully_exited(self) -> None:
+        allow_exit = threading.Event()
+        servers: list[FakeServer] = []
+
+        class SlowExitServer(FakeServer):
+            def run(self) -> None:
+                self.started = True
+                while not self.should_exit:
+                    time.sleep(0.001)
+                allow_exit.wait(1)
+
+        def make_server(app, host, port):
+            del app, host, port
+            server = SlowExitServer()
+            servers.append(server)
+            return server
+
+        gateway = GatewayRuntime(
+            host="127.0.0.1",
+            port=8766,
+            server_factory=make_server,
+        )
+        gateway.start()
+        stopping = threading.Thread(target=gateway.stop, args=(1,), daemon=True)
+        stopping.start()
+        while not servers[0].should_exit:
+            time.sleep(0.001)
+        started = threading.Event()
+        restarting = threading.Thread(
+            target=lambda: (gateway.start(), started.set()), daemon=True
+        )
+        restarting.start()
+
+        self.assertFalse(started.wait(0.05))
+        allow_exit.set()
+        stopping.join(1)
+        restarting.join(1)
+
+        self.assertFalse(stopping.is_alive())
+        self.assertFalse(restarting.is_alive())
+        self.assertTrue(started.is_set())
+        self.assertEqual(len(servers), 2)
+        gateway.stop(1)
+
     def test_activity_prevents_busy_eviction_and_drain_waits(self) -> None:
         self.assertTrue(self.gateway.begin("coding"))
         self.assertFalse(self.gateway.begin("coding"))
         self.assertTrue(self.gateway.is_busy("coding"))
         done = threading.Event()
+        entered = threading.Event()
 
         def drain() -> None:
+            entered.set()
             self.gateway.drain(1)
             done.set()
 
         thread = threading.Thread(target=drain)
         thread.start()
-        time.sleep(0.01)
-        self.assertFalse(done.is_set())
+        self.assertTrue(entered.wait(1))
+        self.assertFalse(done.wait(0.05))
         self.gateway.end("coding")
         thread.join(1)
 
+        self.assertFalse(thread.is_alive())
         self.assertTrue(done.is_set())
         self.assertFalse(self.gateway.is_busy("coding"))
         self.assertGreater(self.gateway.last_used_ns("coding"), 0)

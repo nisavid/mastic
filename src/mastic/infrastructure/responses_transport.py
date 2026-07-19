@@ -72,7 +72,9 @@ class ResponsesTransport:
         self, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], ReconstructionMap]:
         _enforce_transform_budget(payload, self._max_request_bytes)
-        return self._adapter.transform_request(payload)
+        transformed, reconstruction = self._adapter.transform_request(payload)
+        _enforce_serialized_budget(transformed, self._max_request_bytes)
+        return transformed, reconstruction
 
     async def adapt_response_body(
         self,
@@ -87,7 +89,8 @@ class ResponsesTransport:
                 raise ResponseAdaptationTooLarge(self._max_response_bytes)
             body.extend(chunk)
         raw = bytes(body)
-        if "json" not in content_type or not raw:
+        normalized_content_type = content_type.partition(";")[0].strip().casefold()
+        if "json" not in normalized_content_type or not raw:
             return raw
         try:
             original = json.loads(raw)
@@ -412,3 +415,11 @@ def _enforce_transform_budget(payload: dict[str, Any], limit: int) -> None:
                 )
             if transformed_string_bytes > limit:
                 raise RequestTransformationTooLarge
+
+
+def _enforce_serialized_budget(payload: dict[str, Any], limit: int) -> None:
+    total = 0
+    for chunk in json.JSONEncoder(separators=(",", ":")).iterencode(payload):
+        total += len(chunk.encode())
+        if total > limit:
+            raise RequestTransformationTooLarge

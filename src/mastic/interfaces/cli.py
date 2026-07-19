@@ -18,6 +18,7 @@ from mastic.application.dispatch import (
     OperationDispatch,
     OperationRequest,
 )
+from mastic.application.serialization import to_plain_data as _plain
 
 
 _ROOT_COMMANDS = ("setup", "remove", "status", "check", "doctor", "logs", "metrics")
@@ -113,6 +114,8 @@ def _add_command(
         json_output = bool(values.pop("json_output"))
         json_lines = bool(values.pop("json_lines"))
         plain = bool(values.pop("plain"))
+        if sum((json_output, json_lines, plain)) > 1:
+            raise typer.BadParameter("choose exactly one output mode")
         confirmed = bool(values.pop("yes", False))
         specifications = {item.name: item for item in operation.parameters}
         parameters = {
@@ -351,7 +354,15 @@ def _render_result(
         )
     elif json_output:
         typer.echo(
-            json.dumps(_plain(result.value), sort_keys=True, separators=(",", ":"))
+            json.dumps(
+                {
+                    "schema_version": result.schema_version,
+                    "operation": result.operation,
+                    "result": _plain(result.value),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
     elif plain:
         typer.echo(json.dumps(_plain(result.value), sort_keys=True, indent=2))
@@ -387,14 +398,6 @@ def _render_error(error: ApplicationError, *, json_output: bool) -> None:
         typer.echo(f"{name}: {rendered}", err=True)
     for action in error.next_actions:
         typer.echo(f"Next: {action}", err=True)
-
-
-def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [_plain(item) for item in value]
-    return value
 
 
 def _group_help(group: str) -> str:

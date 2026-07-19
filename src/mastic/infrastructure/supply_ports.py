@@ -8,9 +8,10 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 import tomlkit
 
@@ -329,6 +330,22 @@ class ExactRevisionModelSecurity:
                 "model security evidence does not match the exact requested revision"
             )
         assessment = _security_assessment(report)
+        prior = next(
+            (
+                item
+                for item in reversed(self._state.snapshots("model_security"))
+                if item.get("repository") == repository
+                and str(item.get("revision", "")).casefold() == revision.casefold()
+                and isinstance(item.get("adopted_snapshot"), Mapping)
+            ),
+            None,
+        )
+        if prior is not None:
+            assessment = {
+                **assessment,
+                "adopted_snapshot": prior["adopted_snapshot"],
+                "verification": prior.get("verification", assessment["verification"]),
+            }
         self._persist(assessment)
         _require_security_allowed(assessment, require_integrity=False)
         return assessment
@@ -437,7 +454,12 @@ class CacheMover(Protocol):
         self, revision: CachedRevision, destination: Path
     ) -> CacheMovePreview: ...
 
-    def execute(self, preview: CacheMovePreview) -> Path: ...
+    def execute(
+        self,
+        preview: CacheMovePreview,
+        *,
+        before_cleanup: Callable[[], None] | None = None,
+    ) -> Path: ...
 
 
 class VerifiedCacheMover:
@@ -461,7 +483,12 @@ class VerifiedCacheMover:
             ),
         )
 
-    def execute(self, preview: CacheMovePreview) -> Path:
+    def execute(
+        self,
+        preview: CacheMovePreview,
+        *,
+        before_cleanup: Callable[[], None] | None = None,
+    ) -> Path:
         if not preview.source.is_dir():
             raise FileNotFoundError(f"cached snapshot does not exist: {preview.source}")
         if preview.destination.exists():
@@ -469,15 +496,24 @@ class VerifiedCacheMover:
                 f"cache move destination already exists: {preview.destination}"
             )
         preview.destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        token = hashlib.sha256(preview.revision_id.encode()).hexdigest()[:12]
-        stage = preview.destination.with_name(
-            f".{preview.destination.name}.mastic-staging-{token}"
+        staging_root = Path(
+            tempfile.mkdtemp(
+                dir=preview.destination.parent,
+                prefix=f".{preview.destination.name}.mastic-staging-",
+            )
         )
-        shutil.copytree(preview.source, stage, symlinks=False, dirs_exist_ok=True)
-        if _content_manifest(preview.source) != _content_manifest(stage):
-            raise SupplyPortError("cache move verification failed")
-        stage.replace(preview.destination)
+        stage = staging_root / "snapshot"
+        try:
+            shutil.copytree(preview.source, stage, symlinks=False)
+            if _content_manifest(preview.source) != _content_manifest(stage):
+                raise SupplyPortError("cache move verification failed")
+            stage.replace(preview.destination)
+        finally:
+            if staging_root.exists():
+                shutil.rmtree(staging_root)
         if preview.cleanup_source:
+            if before_cleanup is not None:
+                before_cleanup()
             shutil.rmtree(preview.source)
         return preview.destination
 
@@ -999,7 +1035,7 @@ class ModelSupplyPort:
             alias,
             repository,
             revision,
-            offline=bool(parameters.get("offline", False)),
+            offline=_optional_bool(parameters, "offline", default=False),
             runtimes=runtimes,
         )
         self._security.require_compatible(
@@ -1057,7 +1093,7 @@ class ModelSupplyPort:
             alias,
             current.revision.repository,
             _required(parameters, "revision"),
-            offline=bool(parameters.get("offline", False)),
+            offline=_optional_bool(parameters, "offline", default=False),
             runtimes=runtimes,
         )
         self._security.require_compatible(
@@ -1136,14 +1172,13 @@ class ModelSupplyPort:
             raise SupplyPortError("model rollback target must have the same repository")
         runtimes = _model_runtime_observations(config, alias)
         supplied_target = self._supplied_installation(target)
+        verification = self.verify_installation(supplied_target)
         assessment = self._security.inspect(
             supplied_target.revision.repo_id,
             supplied_target.revision.commit_sha,
             runtimes=runtimes,
         )
-        assessment = self._security.record_verification(
-            assessment, self.verify_installation(supplied_target)
-        )
+        assessment = self._security.record_verification(assessment, verification)
         self._security.require_compatible(
             assessment, tuple(item.installation_id for item in runtimes)
         )
@@ -1169,21 +1204,17 @@ class ModelSupplyPort:
         revision = self._cached_revision(_resource(parameters))
         destination = Path(_required(parameters, "destination"))
         preview = self._cache_mover.preview(revision, destination)
-        cleanup = bool(parameters.get("cleanup_source", False))
+        cleanup = _optional_bool(parameters, "cleanup_source", default=False)
         if cleanup:
             _require_confirmed(parameters, "cache source cleanup")
-            referenced_by = tuple(
-                installation.installation_id
-                for installation in self._supplied_installations()
-                if installation.revision.commit_sha == revision.commit_sha
-            )
-            if referenced_by:
-                raise SupplyPortError(
-                    "Cached Revision source is referenced by Model Installations: "
-                    + ", ".join(referenced_by)
-                )
+            self._require_unreferenced_revision(revision)
         preview = replace(preview, cleanup_source=cleanup)
-        published = self._cache_mover.execute(preview)
+        published = self._cache_mover.execute(
+            preview,
+            before_cleanup=(lambda: self._require_unreferenced_revision(revision))
+            if cleanup
+            else None,
+        )
         return {
             "path": str(published),
             "preview": _plain_cache_preview(preview),
@@ -1201,8 +1232,20 @@ class ModelSupplyPort:
                 + ", ".join(preview.blocked_by)
             )
         _require_confirmed(parameters, "cache eviction")
-        preview.execute(approved=True)
+        preview.execute(approved=True, installations=self._supplied_installations())
         return {"preview": _plain_deletion_preview(preview)}
+
+    def _require_unreferenced_revision(self, revision: CachedRevision) -> None:
+        referenced_by = tuple(
+            installation.installation_id
+            for installation in self._supplied_installations()
+            if installation.revision.commit_sha == revision.commit_sha
+        )
+        if referenced_by:
+            raise SupplyPortError(
+                "Cached Revision source is referenced by Model Installations: "
+                + ", ".join(referenced_by)
+            )
 
     def _prune(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         inventory = self._supply.inventory()
@@ -1225,7 +1268,7 @@ class ModelSupplyPort:
             }
         preview = self._supply.preview_cache_deletion(hashes, installations=())
         _require_confirmed(parameters, "cache pruning")
-        preview.execute(approved=True)
+        preview.execute(approved=True, installations=self._supplied_installations())
         return {"preview": _plain_deletion_preview(preview)}
 
     def _persist_model(
@@ -1322,7 +1365,12 @@ class ModelSupplyPort:
             ),
             None,
         )
-        snapshot = cached.snapshot_path if cached else Path("/")
+        if cached is None:
+            raise SupplyPortError(
+                f"cached Model Revision is missing: {desired.revision.repository}"
+                f"@{desired.revision.revision}"
+            )
+        snapshot = cached.snapshot_path
         revision = SuppliedModelRevision(
             desired.revision.repository,
             desired.revision.revision,
@@ -1576,6 +1624,15 @@ def _optional_any(parameters: Mapping[str, object], *names: str) -> str | None:
         if name in parameters:
             return _optional(parameters, name)
     return None
+
+
+def _optional_bool(
+    parameters: Mapping[str, object], name: str, *, default: bool
+) -> bool:
+    value = parameters.get(name, default)
+    if type(value) is not bool:
+        raise SupplyPortError(f"{name} must be a boolean")
+    return value
 
 
 def _require_confirmed(parameters: Mapping[str, object], operation: str) -> None:

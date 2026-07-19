@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
 from mastic.application.dispatch import ApplicationError
+from mastic.application.serialization import to_plain_data
 from mastic.infrastructure.control_protocol import (
     ControlProtocolError,
     ControlRequest,
@@ -25,6 +29,14 @@ class OperationOwner(Protocol):
     def execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingCompletion:
+    request_fingerprint: str
+    operation: str
+    resource: str
+    result: Mapping[str, object]
 
 
 class DaemonOperationRouter:
@@ -57,6 +69,9 @@ class DaemonOperationRouter:
         self._condition = threading.Condition(threading.RLock())
         self._active_physical = 0
         self._stopping = False
+        self._physically_stopped = False
+        self._active_operation_requests: dict[str, str] = {}
+        self._completed_results: dict[str, _PendingCompletion] = {}
         self._last_maintenance: tuple[object, ...] | None = None
 
     def execute(
@@ -75,20 +90,18 @@ class DaemonOperationRouter:
                 self._model, operation, parameters, operation_id
             )
         if operation.startswith(("supervisor.", "gateway.", "service.")):
-            if operation == "supervisor.stop":
-                self._prepare_stop()
-            else:
-                self._assert_accepting()
-            try:
-                value = self._supervisor.execute(operation, parameters)
-            except BaseException:
-                if operation == "supervisor.stop":
-                    with self._condition:
-                        self._stopping = False
-                        self._condition.notify_all()
-                raise
+            value = (
+                self._execute_supervisor_stop(parameters, operation_id)
+                if operation == "supervisor.stop"
+                else self._guarded_physical(
+                    self._supervisor, operation, parameters, operation_id
+                )
+            )
             self._record_lifecycle(value)
             if operation == "supervisor.stop":
+                with self._condition:
+                    self._physically_stopped = True
+                    self._condition.notify_all()
                 self._request_stop()
             return value
         raise ApplicationError(
@@ -112,10 +125,23 @@ class DaemonOperationRouter:
                 self._active_physical -= 1
                 self._condition.notify_all()
 
-    def _prepare_stop(self) -> None:
-        deadline = time.monotonic() + self._physical_drain_timeout
+    def _prepare_stop(self, deadline: float) -> bool:
         with self._condition:
-            self._stopping = True
+            while True:
+                if self._physically_stopped:
+                    return False
+                if not self._stopping:
+                    self._stopping = True
+                    self._condition.notify_all()
+                    break
+                while self._stopping and not self._physically_stopped:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ApplicationError(
+                            "physical_operations_busy",
+                            "Another Supervisor stop is still in progress.",
+                        )
+                    self._condition.wait(remaining)
             while self._active_physical:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -130,6 +156,7 @@ class DaemonOperationRouter:
                         ),
                     )
                 self._condition.wait(remaining)
+            return True
 
     def _assert_accepting(self) -> None:
         with self._condition:
@@ -150,58 +177,214 @@ class DaemonOperationRouter:
         operation_id: str | None,
     ) -> Mapping[str, object]:
         identity = operation_id or str(uuid4())
-        resource = str(
-            parameters.get(
-                "resource",
-                parameters.get("runtime", parameters.get("repository", operation)),
-            )
+        request_fingerprint = _operation_fingerprint(operation, parameters)
+        replay = self._claim_operation(identity, request_fingerprint)
+        if replay is not None:
+            return replay
+        return self._execute_claimed(
+            operation=operation,
+            parameters=parameters,
+            identity=identity,
+            request_fingerprint=request_fingerprint,
+            execute=lambda: owner.execute(operation, parameters),
         )
-        self._state.put_operation(
-            {
-                "id": identity,
-                "kind": operation,
-                "resource": resource,
-                "status": "running",
-            }
-        )
-        self._state.append_event(
-            {"kind": "started", "operation_id": identity, "resource": resource}
-        )
+
+    def _execute_supervisor_stop(
+        self, parameters: Mapping[str, object], operation_id: str | None
+    ) -> Mapping[str, object]:
+        operation = "supervisor.stop"
+        identity = operation_id or str(uuid4())
+        request_fingerprint = _operation_fingerprint(operation, parameters)
+        deadline = time.monotonic() + self._physical_drain_timeout
+        replay = self._claim_operation(identity, request_fingerprint, deadline=deadline)
+        if replay is not None:
+            return replay
+        owns_stop_gate = False
         try:
-            result = owner.execute(operation, parameters)
-        except Exception as error:
+            owns_stop_gate = self._prepare_stop(deadline)
+            return self._execute_claimed(
+                operation=operation,
+                parameters=parameters,
+                identity=identity,
+                request_fingerprint=request_fingerprint,
+                execute=(
+                    lambda: (
+                        self._supervisor.execute(operation, parameters)
+                        if owns_stop_gate
+                        else {"state": "stopped", "already_stopped": True}
+                    )
+                ),
+            )
+        except BaseException:
+            if owns_stop_gate:
+                with self._condition:
+                    self._stopping = False
+                    self._condition.notify_all()
+            self._release_operation(identity, request_fingerprint)
+            raise
+
+    def _execute_claimed(
+        self,
+        *,
+        operation: str,
+        parameters: Mapping[str, object],
+        identity: str,
+        request_fingerprint: str,
+        execute: Callable[[], Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        resource = _operation_resource(operation, parameters)
+        try:
             self._state.put_operation(
                 {
                     "id": identity,
                     "kind": operation,
                     "resource": resource,
-                    "status": "failed",
-                    "error": str(error),
+                    "status": "running",
+                    "request_fingerprint": request_fingerprint,
                 }
             )
             self._state.append_event(
+                {"kind": "started", "operation_id": identity, "resource": resource}
+            )
+            try:
+                result = execute()
+            except Exception as error:
+                self._state.put_operation(
+                    {
+                        "id": identity,
+                        "kind": operation,
+                        "resource": resource,
+                        "status": "failed",
+                        "request_fingerprint": request_fingerprint,
+                        "error": str(error),
+                    }
+                )
+                self._state.append_event(
+                    {
+                        "kind": "failed",
+                        "operation_id": identity,
+                        "resource": resource,
+                        "error": str(error),
+                    }
+                )
+                if isinstance(error, ApplicationError):
+                    raise
+                raise ApplicationError("operation_failed", str(error)) from error
+            completed_result = {**result, "operation_id": identity}
+            pending = _PendingCompletion(
+                request_fingerprint,
+                operation,
+                resource,
+                dict(result),
+            )
+            with self._condition:
+                self._completed_results[identity] = pending
+            try:
+                self._persist_pending_completion(identity, pending)
+            except Exception:
+                return {**completed_result, "journal_reconciliation_required": True}
+            return completed_result
+        finally:
+            self._release_operation(identity, request_fingerprint)
+
+    def _claim_operation(
+        self,
+        identity: str,
+        request_fingerprint: str,
+        *,
+        deadline: float | None = None,
+    ) -> Mapping[str, object] | None:
+        with self._condition:
+            while True:
+                completed = self._completed_results.get(identity)
+                if completed is not None:
+                    _require_matching_operation_id(
+                        identity,
+                        completed.request_fingerprint,
+                        request_fingerprint,
+                    )
+                    return self._reconcile_completion(identity, completed)
+                active_fingerprint = self._active_operation_requests.get(identity)
+                if active_fingerprint is not None:
+                    _require_matching_operation_id(
+                        identity, active_fingerprint, request_fingerprint
+                    )
+                    if deadline is None:
+                        self._condition.wait()
+                    else:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ApplicationError(
+                                "physical_operations_busy",
+                                "The matching operation is still in progress.",
+                            )
+                        self._condition.wait(remaining)
+                    continue
+                durable = self._state.operation(identity)
+                if durable is not None:
+                    stored_fingerprint = durable.get("request_fingerprint")
+                    if not isinstance(stored_fingerprint, str):
+                        raise _operation_id_conflict(identity)
+                    _require_matching_operation_id(
+                        identity, stored_fingerprint, request_fingerprint
+                    )
+                    if durable.get("status") == "complete":
+                        pending = _pending_completion(durable)
+                        if pending is None:
+                            raise _operation_journal_corrupt(identity)
+                        if durable.get("terminal_event_pending") is True:
+                            return self._reconcile_completion(identity, pending)
+                        return {**pending.result, "operation_id": identity}
+                self._active_operation_requests[identity] = request_fingerprint
+                return None
+
+    def _reconcile_completion(
+        self, identity: str, pending: _PendingCompletion
+    ) -> Mapping[str, object]:
+        result = {**pending.result, "operation_id": identity}
+        try:
+            self._persist_pending_completion(identity, pending)
+        except Exception:
+            return {**result, "journal_reconciliation_required": True}
+        return result
+
+    def _persist_pending_completion(
+        self, identity: str, pending: _PendingCompletion
+    ) -> None:
+        operation = {
+            "id": identity,
+            "kind": pending.operation,
+            "resource": pending.resource,
+            "status": "complete",
+            "request_fingerprint": pending.request_fingerprint,
+            "terminal_event_pending": True,
+            "result": dict(pending.result),
+        }
+        self._state.put_operation(operation)
+        if not any(
+            event.get("kind") == "complete" for event in self._state.events(identity)
+        ):
+            self._state.append_event(
                 {
-                    "kind": "failed",
+                    "kind": "complete",
                     "operation_id": identity,
-                    "resource": resource,
-                    "error": str(error),
+                    "resource": pending.resource,
                 }
             )
-            if isinstance(error, ApplicationError):
-                raise
-            raise ApplicationError("operation_failed", str(error)) from error
-        self._state.put_operation(
-            {
-                "id": identity,
-                "kind": operation,
-                "resource": resource,
-                "status": "complete",
-            }
-        )
-        self._state.append_event(
-            {"kind": "complete", "operation_id": identity, "resource": resource}
-        )
-        return {**result, "operation_id": identity}
+        self._state.put_operation({**operation, "terminal_event_pending": False})
+        with self._condition:
+            current = self._completed_results.get(identity)
+            if (
+                current is None
+                or current.request_fingerprint == pending.request_fingerprint
+            ):
+                self._completed_results.pop(identity, None)
+
+    def _release_operation(self, identity: str, request_fingerprint: str) -> None:
+        with self._condition:
+            if self._active_operation_requests.get(identity) == request_fingerprint:
+                self._active_operation_requests.pop(identity, None)
+            self._condition.notify_all()
 
     def cancel(self, operation_id: str) -> bool:
         """Report cancellation honestly until an owned task reaches a cancel point."""
@@ -209,27 +392,43 @@ class DaemonOperationRouter:
         return False
 
     def start(self) -> Mapping[str, object]:
-        value = self._supervisor.execute("supervisor.start", {})
+        self._reconcile_pending_operations()
+        value = self._guarded_physical(self._supervisor, "supervisor.start", {}, None)
         self._record_lifecycle(value)
         return value
 
     def stop(self) -> Mapping[str, object]:
-        self._prepare_stop()
-        try:
-            value = self._supervisor.execute("supervisor.stop", {})
-            self._record_lifecycle(value)
-            return value
-        except BaseException:
-            with self._condition:
-                self._stopping = False
-                self._condition.notify_all()
-            raise
+        value = self._execute_supervisor_stop({}, None)
+        self._record_lifecycle(value)
+        with self._condition:
+            self._physically_stopped = True
+            self._condition.notify_all()
+        return value
+
+    def _reconcile_pending_operations(self) -> None:
+        for durable in self._state.operations():
+            if (
+                durable.get("status") != "complete"
+                or durable.get("terminal_event_pending") is not True
+            ):
+                continue
+            identity = durable.get("id")
+            pending = _pending_completion(durable)
+            if not isinstance(identity, str) or pending is None:
+                raise _operation_journal_corrupt(str(identity))
+            self._persist_pending_completion(identity, pending)
 
     def maintain(self) -> Mapping[str, object]:
         with self._condition:
             if self._stopping:
                 return {"state": "stopping"}
-        value = self._supervisor.execute("supervisor.maintain", {})
+            self._active_physical += 1
+        try:
+            value = self._supervisor.execute("supervisor.maintain", {})
+        finally:
+            with self._condition:
+                self._active_physical -= 1
+                self._condition.notify_all()
         signature = (
             value.get("state"),
             value.get("pressure"),
@@ -411,3 +610,60 @@ class DaemonService:
                 await server.close()
                 for signum in installed_signals:
                     loop.remove_signal_handler(signum)
+
+
+def _operation_fingerprint(operation: str, parameters: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        to_plain_data({"operation": operation, "parameters": parameters}),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _operation_resource(operation: str, parameters: Mapping[str, object]) -> str:
+    return str(
+        parameters.get(
+            "resource",
+            parameters.get("runtime", parameters.get("repository", operation)),
+        )
+    )
+
+
+def _pending_completion(
+    durable: Mapping[str, object],
+) -> _PendingCompletion | None:
+    fingerprint = durable.get("request_fingerprint")
+    operation = durable.get("kind")
+    resource = durable.get("resource")
+    result = durable.get("result")
+    if not (
+        isinstance(fingerprint, str)
+        and isinstance(operation, str)
+        and isinstance(resource, str)
+        and isinstance(result, Mapping)
+    ):
+        return None
+    return _PendingCompletion(fingerprint, operation, resource, dict(result))
+
+
+def _require_matching_operation_id(
+    identity: str, stored_fingerprint: str, request_fingerprint: str
+) -> None:
+    if stored_fingerprint != request_fingerprint:
+        raise _operation_id_conflict(identity)
+
+
+def _operation_id_conflict(identity: str) -> ApplicationError:
+    return ApplicationError(
+        "operation_id_conflict",
+        f"Operation ID {identity!r} is already bound to a different request.",
+    )
+
+
+def _operation_journal_corrupt(identity: str) -> ApplicationError:
+    return ApplicationError(
+        "operation_journal_corrupt",
+        f"Completed operation {identity!r} has invalid reconciliation state.",
+    )

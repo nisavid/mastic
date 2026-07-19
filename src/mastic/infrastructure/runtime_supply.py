@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import selectors
 import shutil
@@ -230,8 +231,8 @@ class SubprocessRuntimeProbe:
                 if not events:
                     raise subprocess.TimeoutExpired(argv, self._timeout)
                 for key, _mask in events:
-                    chunk = key.fileobj.read(
-                        min(64 * 1024, self._max_output - total + 1)
+                    chunk = os.read(
+                        key.fd, min(64 * 1024, self._max_output - total + 1)
                     )
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -353,6 +354,8 @@ class RuntimeLaunchBuilder:
         options: Mapping[str, object] | None = None,
     ) -> tuple[str, ...]:
         definition = self._catalogue.definition(installation.runtime)
+        if type(port) is not int or not 1 <= port <= 65_535:
+            raise ValueError("port must be a valid TCP port integer")
         reserved = {"model", "host", "port"} & set(options or ())
         if reserved:
             raise ValueError(

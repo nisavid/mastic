@@ -60,9 +60,19 @@ def compose_application(
     """Bind concrete owners without activating any managed process."""
 
     paths.prepare()
-    config = config_store or ConfigStore(paths.config_file, validate_config)
-    state = state_store or OperationalStateStore(paths.state_db)
-    runtimes = runtime_catalogue or RuntimeCatalogue.load_builtin()
+    config = (
+        ConfigStore(paths.config_file, validate_config)
+        if config_store is None
+        else config_store
+    )
+    state = (
+        OperationalStateStore(paths.state_db) if state_store is None else state_store
+    )
+    runtimes = (
+        RuntimeCatalogue.load_builtin()
+        if runtime_catalogue is None
+        else runtime_catalogue
+    )
     catalogue = dict(build_operation_catalogue())
     backend = LocalOperationBackend(
         catalogue=catalogue,
@@ -72,8 +82,8 @@ def compose_application(
         runtime_supply=runtime_supply,
         model_supply=model_supply,
         supervisor=supervisor,
-        logs=logs or PrivateLogReader(paths.log_dir),
-        metrics=metrics or StateMetricsSource(state),
+        logs=PrivateLogReader(paths.log_dir) if logs is None else logs,
+        metrics=StateMetricsSource(state) if metrics is None else metrics,
         setup=setup,
         application_targets=application_targets,
         config_path=paths.config_file,

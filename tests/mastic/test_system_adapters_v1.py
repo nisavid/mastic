@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import os
 import stat
 import socket
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import tomlkit
+import mastic.infrastructure.system_adapters as system_adapters
 
 from mastic.application.config_schema import validate_config
 from mastic.domain.admission import PressureLevel
@@ -158,6 +161,52 @@ def _verified_model(_model):
 
 
 class ProcessLauncherTests(unittest.TestCase):
+    def test_failed_spawn_closes_the_parent_pipe_descriptor_once(self) -> None:
+        class IdleThread:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+        closed: list[int] = []
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(system_adapters.os, "pipe", return_value=(31, 32)),
+            patch.object(system_adapters.os, "close", side_effect=closed.append),
+            patch.object(system_adapters.threading, "Thread", IdleThread),
+        ):
+            launcher = MacOSProcessLauncher(
+                log_dir=Path(directory),
+                popen=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("spawn failed")
+                ),
+            )
+
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                launcher.launch(("/runtime/bin/optiq",), {})
+
+        self.assertEqual(closed.count(32), 1)
+
+    def test_log_storage_failure_does_not_stop_pipe_drain(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        os.write(write_descriptor, b"first")
+        os.write(write_descriptor, b"second")
+        os.close(write_descriptor)
+
+        class FailingWriter:
+            calls = 0
+
+            def write(self, payload: bytes) -> None:
+                del payload
+                self.calls += 1
+                raise OSError("disk full")
+
+        writer = FailingWriter()
+        system_adapters._pump_process_log(read_descriptor, writer)
+
+        self.assertEqual(writer.calls, 1)
+
     def test_launch_uses_exact_argv_allowlisted_environment_and_private_service_log(
         self,
     ) -> None:

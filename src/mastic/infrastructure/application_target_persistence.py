@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
+import secrets
+import stat
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Mapping
 
@@ -47,9 +50,20 @@ def _validate_manifest_paths(
 
 
 def _read(path: Path) -> tuple[bytes, bool]:
-    _safe_target(path, "managed application-target file")
     try:
-        return path.read_bytes(), True
+        with _open_parent(path, create=False) as (parent, name):
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            try:
+                _validate_open_file(descriptor, "managed application-target file")
+            except Exception:
+                os.close(descriptor)
+                raise
+            with os.fdopen(descriptor, "rb") as stream:
+                return stream.read(), True
     except FileNotFoundError:
         return b"", False
 
@@ -67,31 +81,85 @@ def _restore_files(snapshot: tuple[tuple[Path, bytes, bool], ...]) -> None:
         if existed:
             _atomic_replace(path, payload)
         else:
-            path.unlink(missing_ok=True)
+            _unlink(path)
 
 
 def _atomic_replace(path: Path, payload: bytes) -> None:
-    _safe_target(path, "managed application-target file")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
+    with _open_parent(path, create=True) as (parent, name):
+        _safe_target_at(parent, name, "managed application-target file")
+        temporary_name = f".{name}.{secrets.token_hex(8)}.tmp"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent,
+        )
         try:
-            os.fsync(directory)
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+            )
+            os.fsync(parent)
         finally:
-            os.close(directory)
+            try:
+                os.unlink(temporary_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+
+
+def _unlink(path: Path) -> None:
+    try:
+        with _open_parent(path, create=False) as (parent, name):
+            _safe_target_at(parent, name, "managed application-target file")
+            os.unlink(name, dir_fd=parent)
+            os.fsync(parent)
+    except FileNotFoundError:
+        return
+
+
+@contextmanager
+def _open_parent(path: Path, *, create: bool) -> Iterator[tuple[int, str]]:
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(path.parent, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("managed application-target parent must be a directory")
+        if metadata.st_uid != os.getuid():
+            raise PermissionError(
+                "managed application-target parent must be user-owned"
+            )
+        yield descriptor, path.name
     finally:
-        temporary.unlink(missing_ok=True)
+        os.close(descriptor)
+
+
+def _validate_open_file(descriptor: int, label: str) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"{label} must be user-owned")
+
+
+def _safe_target_at(parent: int, name: str, label: str) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file")
+    if metadata.st_uid != os.getuid():
+        raise PermissionError(f"{label} must be user-owned")
 
 
 def _digest(payload: bytes) -> str:
@@ -114,13 +182,3 @@ def _safe_target(path: Path, label: str) -> None:
         raise ValueError(f"{label} must not be a symlink")
     if path.exists() and not path.is_file():
         raise ValueError(f"{label} must be a regular file")
-
-
-def _plain(value: object) -> object:
-    if hasattr(value, "unwrap"):
-        return value.unwrap()  # type: ignore[no-any-return,union-attr]
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_plain(item) for item in value]
-    return value
