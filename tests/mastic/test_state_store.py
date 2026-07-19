@@ -87,6 +87,31 @@ class OperationalStateStoreTests(unittest.TestCase):
                             {"id": f"op-{key}", "details": {key: "secret"}}
                         )
 
+    def test_credential_suffix_requires_an_explicit_key_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(Path(directory) / "state.sqlite3")
+
+            stored = store.put_operation(
+                {
+                    "id": "op-token-vocabulary",
+                    "details": {
+                        "birthtoken": "word fragment",
+                        "cancellationToken": "opaque operation marker",
+                    },
+                }
+            )
+
+            self.assertEqual(stored["details"]["birthtoken"], "word fragment")
+            with self.assertRaisesRegex(
+                SensitiveContentError, "cannot persist credential material"
+            ):
+                store.put_operation(
+                    {
+                        "id": "op-session-token",
+                        "details": {"session_token": "secret"},
+                    }
+                )
+
     def test_persists_operations_progress_events_snapshots_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "mastic" / "state.sqlite3"

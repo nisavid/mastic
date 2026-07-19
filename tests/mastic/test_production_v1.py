@@ -1604,6 +1604,38 @@ class _FakeServer:
 
 
 class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_failure_is_not_masked_by_router_stop_failure(self) -> None:
+        class FailingRouter(_FakeRouter):
+            def start(self):
+                raise ValueError("primary start failure")
+
+            def stop(self):
+                raise RuntimeError("secondary stop failure")
+
+        class IdleServer:
+            closed = False
+
+            async def start(self):
+                return None
+
+            async def close(self):
+                self.closed = True
+
+        server = IdleServer()
+        service = DaemonService(
+            Path("/tmp/masticd-start-failure-test.sock"),
+            lambda request_stop: FailingRouter(request_stop),
+            server_factory=lambda *args, **kwargs: server,
+        )
+
+        with self.assertRaisesRegex(ValueError, "primary start failure") as raised:
+            await service.serve()
+
+        self.assertTrue(server.closed)
+        self.assertTrue(
+            any("secondary stop failure" in note for note in raised.exception.__notes__)
+        )
+
     async def test_explicit_supervisor_stop_closes_control_service(self) -> None:
         routers = []
         servers = []

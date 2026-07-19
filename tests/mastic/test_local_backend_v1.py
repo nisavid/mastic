@@ -86,6 +86,21 @@ revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 installation = "qwen"
 """
 
+_MODEL_ROLLBACK_CONFIG = """\
+schema_version = 1
+
+[models.qwen]
+repository = "mlx-community/Qwen-OptiQ"
+revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[models.qwen-previous]
+repository = "mlx-community/Qwen-OptiQ"
+revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[aliases.coding]
+installation = "qwen"
+"""
+
 
 class _NeverCalled:
     def __getattr__(self, name):
@@ -634,6 +649,36 @@ class LocalOperationBackendTests(unittest.TestCase):
                 call for call in supply.calls if call[0] == "model.install"
             )
             self.assertEqual(execution[1]["revision"], "c" * 40)
+
+    def test_model_rollback_installs_the_retained_target_revision(self) -> None:
+        with TemporaryDirectory() as directory:
+            supply = _DirectInstallSupply()
+            backend, _ = self._backend(
+                Path(directory),
+                config=_MODEL_ROLLBACK_CONFIG,
+                model_supply=supply,
+            )
+            request = OperationRequest(
+                "model.rollback",
+                {"resource": "coding", "target": "qwen-previous"},
+            )
+            preview = backend.prepare(request).events[-1]
+
+            backend.prepare(
+                OperationRequest(
+                    "model.rollback",
+                    {
+                        **dict(request.parameters),
+                        "confirmed": True,
+                        "preview_fingerprint": preview["preview_fingerprint"],
+                    },
+                )
+            ).execute()
+
+            install = next(call for call in supply.calls if call[0] == "install")
+            self.assertEqual(install[1]["alias"], "coding")
+            self.assertEqual(install[1]["repo_id"], "mlx-community/Qwen-OptiQ")
+            self.assertEqual(install[1]["revision"], "b" * 40)
 
     def test_model_mutations_reject_missing_required_parameters(self) -> None:
         with TemporaryDirectory() as directory:

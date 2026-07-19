@@ -114,12 +114,13 @@ class _FakePsutilProcess:
         self.terminate_calls = 0
         self.kill_calls = 0
         self.created_at = 1_721_234_567.125
+        self.status_value = "running"
 
     def is_running(self):
         return self.running
 
     def status(self):
-        return "running"
+        return self.status_value
 
     def create_time(self):
         return self.created_at
@@ -327,6 +328,19 @@ class ProcessLauncherTests(unittest.TestCase):
         self.assertEqual(process.pid, 8123)
         self.assertIsNone(process.poll())
         process.terminate()
+        self.assertEqual(process.poll(), 0)
+
+    def test_attached_process_poll_treats_a_zombie_as_stopped(self) -> None:
+        attached = _FakePsutilProcess(8123)
+        launcher = MacOSProcessLauncher(
+            log_dir=Path("/unused"),
+            process_factory=lambda pid: attached,
+        )
+        process = launcher.attach(8123)
+        self.assertIsNotNone(process)
+
+        attached.status_value = "zombie"
+
         self.assertEqual(process.poll(), 0)
 
 

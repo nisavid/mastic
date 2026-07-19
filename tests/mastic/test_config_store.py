@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import tomlkit
 
+from mastic.infrastructure import config_store as config_store_module
 from mastic.infrastructure.config_store import (
     ConfigChange,
     ConfigStore,
@@ -27,6 +28,14 @@ def _hold_private_lock(path: str, acquired, release, attempting=None) -> None:
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_existing_history_file_reports_the_private_directory_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".config.toml.history").write_text("not a directory")
+
+            with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                ConfigStore(root / "config.toml", lambda data: data)
+
     def test_rejects_an_empty_journal_action_before_writing_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
@@ -254,6 +263,49 @@ class ConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(restored.revision, first.revision)
             self.assertEqual(store.export_text(), first.document.as_string())
+
+    def test_restore_reads_and_validates_the_archive_under_the_config_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            store = ConfigStore(path, lambda data: int(data["generation"]))
+            first = store.import_text("generation = 1\n")
+            store.import_text("generation = 2\n")
+            archive_path = store._history_path / f"{first.revision}.toml"
+            archive_read = threading.Event()
+            original_read = config_store_module._read_private_file
+
+            def observe_read(candidate: Path) -> bytes:
+                if candidate == archive_path:
+                    archive_read.set()
+                return original_read(candidate)
+
+            lock_path = path.with_suffix(f"{path.suffix}.lock")
+            with (
+                patch.object(
+                    config_store_module, "_read_private_file", side_effect=observe_read
+                ),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with private_file_lock(lock_path):
+                    restored = pool.submit(store.restore, first.revision)
+                    self.assertFalse(archive_read.wait(0.2))
+                self.assertEqual(restored.result(timeout=2).revision, first.revision)
+                self.assertTrue(archive_read.is_set())
+
+    def test_restore_reports_an_unknown_revision_before_a_revision_conflict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(
+                Path(directory) / "config.toml",
+                lambda data: int(data["generation"]),
+            )
+            store.import_text("generation = 1\n")
+
+            with self.assertRaisesRegex(KeyError, "unknown config revision"):
+                store.restore("0" * 64, expected_revision="stale")
 
     def test_serializes_concurrent_semantic_edits_without_losing_updates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

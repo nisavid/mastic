@@ -1188,11 +1188,24 @@ class LocalOperationBackend:
             installation_name = self._model_installation_name(resource, config)
             installation = config.models[installation_name]
             alias = str(parameters.get("alias", resource))
+            if name == "model.rollback":
+                target_name = str(parameters["target"])
+                target = config.models.get(target_name)
+                if target is None:
+                    raise _not_found("Model Installation", target_name)
+                if target.revision.repository != installation.revision.repository:
+                    raise ApplicationError(
+                        "invalid_parameter",
+                        "model rollback target must have the same repository",
+                    )
+                revision = target.revision.revision
+            else:
+                revision = str(parameters["revision"])
             return _plain(
                 self._model_supply.install(
                     alias=alias,
                     repo_id=installation.revision.repository,
-                    revision=str(parameters["revision"]),
+                    revision=revision,
                     offline=bool(parameters.get("offline", False)),
                 )
             )

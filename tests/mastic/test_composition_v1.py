@@ -41,6 +41,26 @@ class _FalseyPort(_Port):
 
 
 class CompositionTests(unittest.TestCase):
+    def test_public_catalogue_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            port = _Port()
+            composition = compose_application(
+                paths=paths,
+                activator=_Activator(),
+                runtime_supply=port,
+                model_supply=_ModelSupply(),
+                supervisor=port,
+                setup=port,
+                application_targets=port,
+            )
+
+            with self.assertRaises(TypeError):
+                composition.catalogue["status"] = composition.catalogue["status"]
+
     def test_falsey_injected_collaborators_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

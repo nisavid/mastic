@@ -163,18 +163,17 @@ class ConfigStore(Generic[ValidatedConfig]):
     ) -> ConfigSnapshot[ValidatedConfig]:
         """Restore an exact archived desired-state revision."""
         archive_path = self._archive_path(revision)
-        try:
-            text = _read_private_file(archive_path).decode("utf-8")
-        except FileNotFoundError as error:
-            raise KeyError(f"unknown config revision {revision}") from error
-        if _revision(text.encode()) != revision:
-            raise RuntimeError(f"config revision {revision} failed integrity check")
-        snapshot = self._snapshot(text)
-        return self.save(
-            snapshot.document,
-            action="restore",
-            expected_revision=expected_revision,
-        )
+        with self._locked():
+            try:
+                text = _read_private_file(archive_path).decode("utf-8")
+            except FileNotFoundError as error:
+                raise KeyError(f"unknown config revision {revision}") from error
+            if _revision(text.encode()) != revision:
+                raise RuntimeError(f"config revision {revision} failed integrity check")
+            snapshot = self._snapshot(text)
+            self._require_revision_locked(expected_revision)
+            self._save_locked(snapshot, "restore")
+            return snapshot
 
     def _snapshot(self, text: str) -> ConfigSnapshot[ValidatedConfig]:
         document = tomlkit.parse(text)
@@ -392,8 +391,11 @@ def private_file_lock(path: str | Path) -> Iterator[None]:
 
 
 def _prepare_private_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.lstat()
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise RuntimeError(f"private config path is not a directory: {path}")
     if metadata.st_uid != os.getuid():
