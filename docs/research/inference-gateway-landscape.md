@@ -52,7 +52,7 @@ is promising for development but is explicitly experimental.
 Absorb the historical `codex-ns-proxy` transform into the gateway as a narrowly
 scoped compatibility adapter only after conformance is proven. Its
 `type: "namespace"` request,
-history, and response round trip is not the same contract as an MCP gateway
+history, and response round trip are not the same contract as an MCP gateway
 prefixing tool names. Until the selected gateway can host that adapter without
 semantic or credential regressions, retain the existing proxy as a sidecar.
 

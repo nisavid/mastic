@@ -9,14 +9,14 @@ complete arguments and options of one operation.
 | Command | Behavior |
 | --- | --- |
 | `mastic` | Human and automation interface. With no arguments, opens the TUI. |
-| `masticd` | Runs the foreground per-user Supervisor used by launchd. |
+| `masticd` | Runs the foreground per-user Supervisor directly; the generated LaunchAgent uses the private module entry point. |
 
 ## Top-level commands
 
 | Command | Behavior |
 | --- | --- |
-| `mastic setup` | Previews, resumes, and applies a complete local inference service while recording durable outcomes. |
-| `mastic remove` | Previews and removes MASTIC-owned services, state, and integrations. |
+| `mastic setup` | Previews and applies a complete local-inference Plan, resuming steps whose persisted terminal evidence matches. |
+| `mastic remove` | Previews and removes MASTIC-owned services, product state, and integrations; the external coordination locks and their directory remain. |
 | `mastic status` | Reports runtime state plus durable and current per-target setup outcomes without starting the system. |
 | `mastic check` | Applies operational and current application-target health policy to the status view. |
 | `mastic doctor` | Diagnoses application-target health and context alongside configuration, lifecycle, routing, and service failures. |
@@ -68,10 +68,13 @@ separately from application readiness:
 
 Setup runs the selected Codex and Hindsight application-native canaries as
 resumable terminal steps and stores content-free exact-contract, duration, and
-digest evidence. `status`, `check`, and `doctor` re-observe current target
-ownership before reporting the durable outcome. Drift or missing owned state
-can downgrade retained evidence to `unverified` without deleting it; `check`
-returns nonzero for that health-policy failure.
+digest evidence. A correct canary under a provisional policy and an explicitly
+skipped required canary both remain `unverified`; neither condition alone makes
+`check` fail. Setup evidence preserves whether the canary completed or was
+skipped. `status`, `check`, and `doctor` re-observe current target ownership
+before reporting the durable outcome. Drift or missing owned state can downgrade
+retained evidence to `unverified` without deleting it; `check` returns nonzero
+for that current health-policy failure.
 
 When targets are selected, overall readiness is the first state present in
 this most-to-least dominant order: `pending`, `unverified`, `degraded`,
@@ -87,8 +90,8 @@ invalid.
 | `mastic application-target list` | Lists MASTIC-owned targets. |
 | `mastic application-target inspect TARGET` | Reports owned settings and current health without mutating them. |
 | `mastic application-target configure TARGET` | Previews and applies owned Codex or Hindsight settings. |
-| `mastic application-target test TARGET [--profile PROFILE]` | Requires a healthy target and invokes its bounded native path; the default profile is `coding` for Codex and `retain` for Hindsight. |
-| `mastic application-target remove TARGET` | Previews and removes only fields still owned by MASTIC. |
+| `mastic application-target test TARGET [--profile PROFILE]` | Requires a healthy target and invokes its bounded native path; the canonical v1 canary profile is `coding` for Codex and `retain` for Hindsight. |
+| `mastic application-target remove TARGET` | Previews and removes only fields whose recorded ownership and current digest still match MASTIC's journal. |
 
 A standalone `application-target test` returns native exact-contract evidence
 on demand but does not advance the durable setup outcome. Confirmed setup owns

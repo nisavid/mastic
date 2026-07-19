@@ -11,7 +11,7 @@ and lifecycle.
 | Entry point | Contract |
 | --- | --- |
 | `mastic` | Human and machine CLI; invoking it with no arguments opens the TUI. |
-| `masticd` | Foreground per-user Supervisor used by launchd. |
+| `masticd` | Foreground per-user Supervisor entry point for direct invocation and help. |
 | `python -m mastic.entrypoints daemon` | Private stable target used by MASTIC's generated LaunchAgent. |
 
 The supported release entry point is `bootstrap-mastic.zsh`. Its embedded digest
@@ -31,7 +31,9 @@ Installations.
 - `RunAtLoad`: `false`
 - `KeepAlive`: `false`
 - `Umask`: `0077`
-- stdout and stderr: `~/Library/Logs/mastic/supervisor.log`
+- stdout and stderr: `supervisor.log` in the effective log directory;
+  `~/Library/Logs/mastic/supervisor.log` by default, with the directory
+  overridden by `MASTIC_LOG_DIR`
 
 MASTIC generates a literal executable path and the private module target in
 `ProgramArguments`. The LaunchAgent is registered but inactive. A mutation
@@ -48,7 +50,7 @@ restart it.
 | --- | --- | --- |
 | Desired state | `~/.config/mastic/config.toml` | `MASTIC_CONFIG_DIR` |
 | SQLite state and socket | `~/.local/state/mastic/` | `MASTIC_STATE_DIR` |
-| Setup and removal coordination | `~/.local/state/.mastic-locks/setup-removal.lock` | Derived from `MASTIC_STATE_DIR` and the configured product roots |
+| Setup/removal and composition coordination | `~/.local/state/.mastic-locks/{setup-removal,composition-removal}.lock` | Fixed per-user namespace; product-root and XDG overrides do not change it |
 | Application Configuration Target ownership | `~/.local/state/mastic/application-targets/` | `MASTIC_STATE_DIR` |
 | Runtime Installations | `~/.local/share/mastic/runtimes/` | `MASTIC_DATA_DIR` |
 | Verified bootstrap `uv` | `~/.local/share/mastic/bootstrap-uv/uv` | `MASTIC_DATA_DIR` |
@@ -59,15 +61,19 @@ restart it.
 | Logs | `~/Library/Logs/mastic/` | `MASTIC_LOG_DIR` |
 | External `uv` override | Used only when explicitly selected | `MASTIC_UV_EXECUTABLE` |
 
+When a `MASTIC_*_DIR` override is absent, config, state, and data first follow
+`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_DATA_HOME` respectively. Their
+fallbacks are the default paths shown above. Log placement does not use an XDG
+root.
+
 Directories are user-owned, non-symlink directories with mode `0700`.
 Supervisor and service logs are user-owned regular files with mode `0600`.
 
-The setup and removal coordination directory is placed under the nearest ancestor
-of `MASTIC_STATE_DIR` where its lock is outside the configured config, state,
-data, and log roots. The lock is a user-owned regular file with mode `0600`. The
-directory and `setup-removal.lock` intentionally remain after those product
-roots are removed, so concurrent confirmed setup and removal transactions
-continue to share one stable exclusion boundary.
+The fixed per-user coordination directory is independent of the configured
+config, state, data, and log roots. Each lock is a user-owned regular file with
+mode `0600`. The directory and lock files intentionally remain after those
+product roots are removed, so concurrent composition, confirmed setup, and
+removal transactions continue to share stable exclusion boundaries.
 
 The Hugging Face cache remains shared and is not product-owned. MASTIC manages
 its bytes through model-cache operations and reference checks.
@@ -75,28 +81,36 @@ its bytes through model-cache operations and reference checks.
 Bootstrap leaves an existing external `uv`, Codex, or Hindsight installation
 untouched. Guided setup adopts an exact matching application nonmutatively. A
 different application at the conventional path is a visible conflict; MASTIC
-does not replace it implicitly. Removal deletes only resources whose exact
-ownership and current digest still match MASTIC's journal.
+does not replace it implicitly. Removal previews the product-owned roots and
+retains shared or external resources. It refuses to remove application-target
+fields or managed application artifacts when their current content no longer
+matches MASTIC's ownership evidence.
 
 ## Setup outcomes and performance evidence
 
-Setup exposes two independent axes: `Completion` is `Partial` or `Complete`, and
-`Readiness` is `Pending`, `Unverified`, `Ready`, or `Degraded`. Interrupted work
-persists exact step fingerprints and returns the current axes and failed step;
+Setup exposes two independent serialized axes: `completion` is `partial` or
+`complete`, and `readiness` is `pending`, `unverified`, `ready`, or `degraded`.
+Interrupted work persists exact step fingerprints and returns the current axes
+and failed step;
 the next preview shows the same evidence-derived state before resume.
 
 The repository currently publishes the Phase 1 performance policy as
 `provisional`. It is bound to the exact Plan, application versions, macOS major,
-and host profile, but it cannot produce `Ready` or `Degraded` until measurements
+and host profile. For a selected Application Configuration Target, it cannot
+produce performance-derived `ready` or `degraded` readiness until measurements
 from a supported 48 GiB-or-larger host promote that exact policy to `validated`.
-A correct canary remains `Unverified` while the policy is provisional. Skipping a
-required canary also remains `Unverified`.
+A correct canary remains `unverified` while the policy is provisional. An
+explicitly skipped required canary also remains `unverified`. Neither condition
+alone makes `mastic check` fail. With no selected target, the independent exact
+Gateway verification can still produce `ready` when its saved response digest
+matches the contract.
 
 `status`, `check`, `doctor`, and the TUI reconstruct these outcomes after a
-restart from the content-free setup plan and evidence. They re-inspect every
+restart from the content-free Plan record and evidence. They re-inspect every
 selected Application Configuration Target before reporting it. Unhealthy or
 unobservable target state forces that target and the combined readiness to
-`Unverified`; `check` also fails its health policy.
+`unverified`; unlike provisional or explicitly skipped canary evidence, that
+current target issue also makes `check` fail its health policy.
 
 ## Ownership boundary
 
@@ -123,15 +137,17 @@ over the same desired state.
 ## Control protocol
 
 `mastic` and `masticd` use a private, versioned, length-prefixed JSON protocol on
-`~/.local/state/mastic/masticd.sock`. The shipped client opens a connection,
-negotiates v1, carries one correlated operation, streams bounded progress frames,
-receives one result or stable error, and closes the connection. The server can
-accept multiple correlated requests on one negotiated connection, including a
-cancellation request while an operation is active. Frames are size-bounded. The
-socket is user-owned with mode `0600`, and `masticd` verifies the connecting
-process has the same user identity through peer credentials before accepting
-protocol work. The socket is loopback-equivalent local IPC and is never exposed
-on a network interface.
+`masticd.sock` in the effective state directory. That directory is
+`MASTIC_STATE_DIR` when set; otherwise it is `mastic` under `XDG_STATE_HOME`,
+defaulting to `~/.local/state/mastic`. The shipped client opens a connection,
+negotiates v1, carries one correlated operation, streams bounded progress
+frames, receives one result or stable error, and closes the connection. The
+server can accept multiple correlated requests on one negotiated connection,
+including a cancellation request while an operation is active. Frames are
+size-bounded. The socket is user-owned with mode `0600`, and `masticd` verifies
+the connecting process has the same user identity through peer credentials
+before accepting protocol work. The socket is loopback-equivalent local IPC
+and is never exposed on a network interface.
 
 Physical runtime and model operations receive durable operation identities.
 Public v1 supports listing and inspecting those operations. It does not claim
@@ -145,8 +161,10 @@ Inference Service process binds to a private dynamic loopback port. The public
 request `model` field selects the stable service route.
 
 All managed profile routes and ordinary `/v1` routes require the private bearer
-credential stored at `~/.local/state/mastic/gateway.token`. MASTIC supplies it
-to owned Application Configuration Targets. The credential must be a regular,
+credential stored as `gateway.token` in the effective state directory. That
+directory is `MASTIC_STATE_DIR` when set; otherwise it is `mastic` under
+`XDG_STATE_HOME`, defaulting to `~/.local/state/mastic`. MASTIC supplies the
+credential to owned Application Configuration Targets. It must be a regular,
 non-symlink file owned by the current user with mode `0600`; MASTIC validates
 those properties before reading it. Missing and invalid credentials both return
 `401` with `WWW-Authenticate: Bearer`; the Gateway never forwards the credential
@@ -167,9 +185,9 @@ be verified on the target Mac by following
 The native request procedures are implemented: Codex runs ephemerally through
 its owned configuration, and Hindsight runs against a disposable local API and
 database. The current performance profile is still `provisional`, so successful
-canaries remain `Unverified` until matching clean-host measurements validate
+canaries remain `unverified` until matching clean-host measurements validate
 the profile. Operators must not promote that result by hand.
 
 A standalone `mastic application-target test` returns the same bounded native
 result on demand but does not rewrite setup evidence. Confirmed setup owns
-durable `Completion` and `Readiness`.
+durable `completion` and `readiness`.

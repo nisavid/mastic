@@ -14,7 +14,7 @@ MASTIC stands for **Modular, Adaptive, System-Tailored Inference Connector**.
 
 - **A setup preview before a mutation.** Review the exact runtime, model,
   service, gateway, Application Configuration Targets, host preflight, and
-  ordered operations before anything changes.
+  ordered operations before confirmation permits any previewed setup operation.
 - **Exact local components.** Runtime installations and model revisions are
   recorded, verified, and kept distinct from shared cache bytes.
 - **One stable gateway.** Named inference services remain behind an
@@ -36,12 +36,14 @@ Configuration Targets. The current recommended profile targets Macs with at
 least 48 GiB of unified memory and 24 GiB of free disk. Other exact selections
 use the exact-selection path and carry only the evidence collected for them.
 
-Setup runs a bounded application-native canary for each selected Codex or
-Hindsight target and records content-free exact-contract, phase, digest, and
-duration evidence. The recommended performance policy remains provisional
-until clean-host measurements from a matching 48 GiB-or-larger Mac validate
-its thresholds, so a successful canary currently remains `Unverified`. This
-development target is not yet a support claim.
+Setup records a terminal canary step for each selected Codex or Hindsight
+target. Unless explicitly skipped, the step runs a bounded application-native
+canary and retains content-free exact-contract, phase, digest, and duration
+evidence. A skipped required canary remains `unverified`. The recommended
+performance policy also remains provisional until clean-host measurements from
+a matching 48 GiB-or-larger Mac validate its thresholds, so a successful canary
+currently remains `unverified`. This development target is not yet a support
+claim.
 
 The current milestone is deliberately narrow. MASTIC is not yet a general
 adapter platform, remote inference host, multi-user service, or cross-platform
@@ -51,7 +53,8 @@ a compatibility promise.
 
 ## Get started
 
-Install `git` and `uv`, then install MASTIC from a source checkout:
+To explore MASTIC from source, install `git` and `uv`, then install the command
+line tool:
 
 ```sh
 git clone https://github.com/nisavid/mastic.git
@@ -59,9 +62,21 @@ cd mastic
 uv tool install .
 ```
 
-Open the guided setup:
+You can inspect the command surface and review a recommended setup preview:
 
 ```sh
+mastic setup --profile recommended
+```
+
+Answer `n` at confirmation when following the source-preview path. A source
+install alone does not contain the attested Python, application artifacts, and
+offline dependency closure required for confirmed setup on a clean host.
+
+For a confirmed clean-host setup, obtain `bootstrap-mastic.zsh` and its exact
+closure from the same trusted release artifact set, then run:
+
+```sh
+./bootstrap-mastic.zsh --artifact-dir RELEASE_ARTIFACT_DIRECTORY --yes
 mastic setup
 ```
 
@@ -69,8 +84,8 @@ MASTIC inspects the host, builds an exact setup preview, and asks for
 confirmation before applying it. Model and runtime downloads can be
 substantial; review the selected revisions, projected resources, Application
 Configuration Targets, preflight, and ordered operations before continuing.
-After confirmation, setup reports installation `Completion` separately from
-application `Readiness`, including one result for each selected target.
+After confirmation, setup reports installation `completion` separately from
+application `readiness`, including one result for each selected target.
 
 To learn the workflow without applying the previewed operations, follow
 [Preview your first local inference service](docs/tutorials/first-preview.md).
@@ -85,10 +100,10 @@ mastic tui
 ```
 
 Read-only commands do not start the Supervisor or inference services. `status`
-combines observed runtime state with durable setup `Completion`, overall
-`Readiness`, and current per-target health. `check` applies the same view and
+combines observed runtime state with durable setup `completion`, overall
+`readiness`, and current per-target health. `check` applies the same view and
 exits nonzero for operational failures or current target issues; provisional
-or explicitly skipped `Unverified` canary evidence alone is not a check
+or explicitly skipped `unverified` canary evidence alone is not a check
 failure. `doctor` adds bounded issues and next actions.
 
 See [How to inspect and diagnose a local stack](docs/how-to/inspect-and-diagnose.md)

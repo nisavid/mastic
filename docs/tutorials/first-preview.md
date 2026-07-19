@@ -81,15 +81,13 @@ When MASTIC asks for confirmation, answer `n`. The command exits without
 applying the previewed operations, downloading a runtime or model, starting the
 Supervisor, or changing Codex or Hindsight.
 
-You have now completed the preview path. When you are ready to create the
-stack, rerun `mastic setup`, review the current preview again, and confirm it.
-Material host evidence can change, so an earlier preview is not permission to
-apply later operations unseen.
+You have now completed the preview path.
 
-A confirmed setup finishes with a bounded application-native canary for each
-selected Codex or Hindsight target. Its result reports `Completion`
-independently from overall and per-target `Readiness`; a complete installation
-may remain `Unverified` while its performance policy is provisional.
+## Next steps
+
+When you are ready to create the stack, rerun `mastic setup`, review the current
+preview again, and confirm it. Material host evidence can change, so an earlier
+preview is not permission to apply later operations unseen.
 
 For day-to-day inspection after setup, continue with
 [How to inspect and diagnose a local stack](../how-to/inspect-and-diagnose.md).
