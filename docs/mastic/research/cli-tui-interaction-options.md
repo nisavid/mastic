@@ -1,7 +1,8 @@
 # CLI and terminal-UI interaction options
 
-Research completed 2026-07-15 against `systools` commit
-`2c41892f867a23a86d7282d58d0e0309c5feaa39` and current upstream documentation.
+Research completed 2026-07-15 against the earlier `systools` implementation at
+commit `2c41892f867a23a86d7282d58d0e0309c5feaa39` and upstream documentation. The
+shipped MASTIC architecture below reflects the resulting implementation.
 
 ## Question
 
@@ -16,12 +17,11 @@ migration sequence.
 
 ## Executive finding
 
-The current `argparse` and `curses` implementation remains a viable foundation
-for a small command set, and it can gain dynamic completion without replacing
-the parser. It does not provide the higher-level primitives needed to keep a
-large CLI and terminal UI coherent automatically. The application would still
-need its own shared operation catalogue, semantic presentation models, and
-cross-surface contract tests.
+MASTIC now uses Typer for its scriptable CLI and Textual for its terminal UI.
+Both surfaces derive their operations from one application catalogue and call
+the same dispatcher. This supplies the shared operation model and
+cross-surface contract that the earlier `argparse` and `curses` implementation
+lacked.
 
 For a growing management application, the strongest maintained terminal-UI
 fit is Textual. It provides widgets, focus management, bindings, a command
@@ -29,7 +29,7 @@ palette, layouts, themes, headless interaction testing, terminal resizing, and
 visual snapshot testing. It is not a substitute for a scriptable CLI, and its
 documentation does not establish screen-reader conformance.
 
-There are two credible implementation routes:
+The research identified two credible implementation routes:
 
 1. Keep `argparse`, add argcomplete and better help, and replace the hand-built
    curses dashboard with Textual.
@@ -40,44 +40,40 @@ Neither route creates feature parity by itself. Parity comes from making CLI
 commands and TUI actions adapters over the same application operations and
 testing the resulting capability matrix.
 
-## Current mastic interaction architecture
+## Shipped MASTIC interaction architecture
 
 ### CLI facts
 
-- `mastic` constructs one static `argparse.ArgumentParser` with `start`, `stop`,
-  `status`, `models`, `metrics`, and `dashboard` subcommands.
-- The positional `server` arguments have no help text, choices, or completion.
-  For example, `mastic status --help` renders `[server]` and a blank description.
-- The parser is built before configuration is read, so it has no configured
-  Server Definitions available to show as choices. Dynamic help or completion
-  would need a deliberately side-effect-free configuration lookup.
-- Each non-dashboard command has a `--json` switch. Human rendering and JSON
-  rendering already share the same control response, which is a useful seam to
-  preserve.
-- Every command attempts launchd activation when it cannot reach the control
-  socket. There is no CLI distinction between starting or stopping a Server
-  Definition and activating or shutting down the Supervisor.
-- CLI tests cover installed entry-point help and command behavior, but there is
-  no parser-schema snapshot, completion test, or all-operations parity test.
+- `mastic` builds its Typer command tree from the shared operation catalogue.
+  Catalogue summaries, parameters, accepted values, confirmation policy, and
+  examples drive the CLI rather than a separately maintained parser schema.
+- Running `mastic` without a command opens the Textual TUI. Every catalogue
+  operation also has a non-interactive CLI route.
+- Human, plain, versioned JSON, and NDJSON rendering share the same operation
+  result. Confirmed mutations show the resolved preview before dispatch.
+- Read-only operations remain local. Mutations declare whether they need the
+  Supervisor instead of activating it merely because the control socket is
+  unavailable.
+- Tests cover installed entry-point help, command behavior, structured output,
+  confirmation, and CLI/TUI catalogue parity.
 
 ### Terminal-UI facts
 
-- `dashboard.py` owns separate presentation models and manually handles curses
-  input, terminal resizing, selection, redraws, background control calls, and
-  string truncation.
-- The interactive actions are fixed key branches for start, stop, refresh, and
-  quit. The footer is the only in-context help.
-- A terminal smaller than 60 columns by 10 rows becomes a fixed warning screen.
-  Larger terminals use line slicing rather than reflowing semantic widgets.
-- Non-TTY execution prints one deterministic, escape-free snapshot. This is a
-  strong behavior to keep even if the interactive framework changes.
-- Tests cover deterministic wide and narrow rendering, degraded control-plane
-  output, pseudo-terminal key interaction, resize behavior, and non-blocking
-  refreshes. They do not have semantic focus assertions or framework-level
-  screen queries because curses exposes no widget tree.
+- `MasticApp` uses Textual widgets, responsive layout, contextual operation
+  forms, and a command palette generated from the shared catalogue.
+- Resource views and operations run in workers so slow control work does not
+  block navigation or overwrite a newer workspace.
+- Narrow layouts preserve semantic operation controls and hide secondary
+  navigation or inspection regions instead of truncating values.
+- The plain CLI remains the deterministic non-TTY surface; the TUI does not
+  replace scriptable output.
+- Headless Textual tests query widgets and focus directly, resize the terminal,
+  exercise the command palette, and verify that every catalogue operation can
+  be executed from the TUI.
 
-These are properties of the current implementation, not inherent limitations
-of `argparse` or curses.
+The remaining framework sections preserve the option analysis that led to this
+architecture; their descriptions of `argparse` and curses are alternatives,
+not claims about shipped MASTIC.
 
 ## CLI framework options
 
@@ -219,9 +215,9 @@ full CLI/TUI parity.
 
 | Stack | Discoverable CLI | Dynamic completion | Polished multi-screen TUI | Headless UI tests | Plain/JSON path | Migration weight |
 | --- | --- | --- | --- | --- | --- | --- |
-| argparse + curses | Basic | With argcomplete | Application-built | PTY/application-built | Already present | Low initially; high as UI grows |
+| argparse + curses | Basic | With argcomplete | Application-built | PTY/application-built | Historical baseline | Low initially; high as UI grows |
 | argparse + Textual | Basic; separately improvable | With argcomplete | Strong | Strong | Preserve current CLI | Medium |
-| Typer + Textual | Rich typed help | Built in | Strong | Strong | Explicit output policy needed | Medium-high |
+| Typer + Textual | Rich typed help | Built in | Strong | Strong | Explicit output policy implemented | Implemented |
 | Click + Textual | Rich explicit help | Built in | Strong | Strong | Explicit output policy needed | Medium-high |
 | Cyclopts + Textual | Rich typed help | Built in | Strong | Strong | Explicit output policy needed | Medium-high |
 | CLI framework + prompt_toolkit | Framework-dependent | Framework-dependent | Flexible but custom | Pipe/dummy I/O | Explicit output policy needed | Medium-high |
@@ -268,20 +264,12 @@ should call the other or parse the other's rendered output. Cross-surface tests
 should enumerate the catalogue and prove that every public operation has CLI
 and TUI access, contextual help, and the intended non-interactive behavior.
 
-## Decisions this research surfaces
+## Implemented decisions and remaining questions
 
-The following remain product or architecture choices rather than research
-findings:
+MASTIC selected Typer and Textual, made the operation catalogue authoritative,
+and retained complementary non-interactive output. The following product or
+architecture choices remain:
 
-- Whether to preserve argparse and modernize incrementally or replace the CLI
-  parser before expanding the command model.
-- If replacing it, whether Typer's concise typed API, Click's explicit command
-  graph, or Cyclopts' typed parameter model best fits the desired command
-  grammar and dependency policy.
-- Whether Textual becomes the terminal-UI foundation, and whether the existing
-  curses dashboard remains temporarily as a compatibility surface.
-- What “all operations” means: the authoritative operation and information
-  inventory must be defined before parity can be tested.
 - Whether the default interactive navigation is resource-oriented screens,
   goal-oriented workflows, a command palette, an interactive shell, or a
   deliberate combination.

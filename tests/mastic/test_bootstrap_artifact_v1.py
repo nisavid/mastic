@@ -31,13 +31,12 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertIn("--build-constraints packaging/build-backend.lock", workflow)
             self.assertIn("--require-hashes", workflow)
 
-        quality_workflow = (
-            ROOT / ".github" / "workflows" / "python-quality.yml"
-        ).read_text()
-        self.assertIn(
-            "enable-cache: ${{ github.event_name != 'pull_request' }}",
-            quality_workflow,
-        )
+        for workflow_name in ("bootstrap-artifact.yml", "python-quality.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+            self.assertIn(
+                "enable-cache: ${{ github.event_name != 'pull_request' }}",
+                workflow,
+            )
 
     def test_closure_builder_bounds_and_retries_all_direct_downloads(self) -> None:
         builder = CLOSURE_BUILDER.read_text()

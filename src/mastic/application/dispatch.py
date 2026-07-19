@@ -10,7 +10,8 @@ from .catalogue import Operation, OperationKind, SupervisorRequirement
 
 
 class SupervisorActivator(Protocol):
-    def activate(self) -> None: ...
+    def activate(self) -> None:
+        pass
 
 
 class ApplicationError(RuntimeError):
@@ -67,7 +68,8 @@ class PreparedOperation:
 
 
 class OperationBackend(Protocol):
-    def prepare(self, request: OperationRequest) -> PreparedOperation: ...
+    def prepare(self, request: OperationRequest) -> PreparedOperation:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +90,11 @@ class OperationResult:
 
 
 class OperationDispatch(Protocol):
-    def preview(self, request: OperationRequest) -> OperationResult: ...
+    def preview(self, request: OperationRequest) -> OperationResult:
+        pass
 
-    def execute(self, request: OperationRequest) -> OperationResult: ...
+    def execute(self, request: OperationRequest) -> OperationResult:
+        pass
 
 
 class OperationDispatcher:

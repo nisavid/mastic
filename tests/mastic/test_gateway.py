@@ -288,6 +288,22 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(upstream.entered)
         self.assertTrue(upstream.closed)
 
+    def test_models_rejects_non_loopback_browser_origin_without_authenticator(
+        self,
+    ) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        app = create_gateway(resolver)
+
+        with TestClient(app) as client:
+            response = client.get(
+                "/v1/models", headers={"origin": "https://attacker.example"}
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "origin_not_allowed")
+
     def test_profiled_models_lists_only_the_profile_service_and_rejects_unknown_profiles(
         self,
     ) -> None:
