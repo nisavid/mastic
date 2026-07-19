@@ -551,8 +551,8 @@ class RuntimeManager:
             if before_publish is not None:
                 before_publish(stage, installation)
             stage.replace(final)
-            _fsync_directory(root)
             published = True
+            _fsync_directory(root)
             if stage_finished is not None:
                 stage_finished(stage, installation_id)
             return installation

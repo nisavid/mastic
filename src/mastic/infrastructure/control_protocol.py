@@ -117,9 +117,6 @@ def resolve_peer_uid(peer_socket: socket.socket) -> int | None:
         credentials = peer_socket.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         _, uid, _ = struct.unpack("3i", credentials)
         return uid
-    if hasattr(peer_socket, "getpeereid"):
-        uid, _ = peer_socket.getpeereid()  # type: ignore[attr-defined]
-        return uid
     if hasattr(socket, "LOCAL_PEERCRED"):
         # Darwin's xucred begins with cr_version and cr_uid. SOL_LOCAL is 0.
         credentials = peer_socket.getsockopt(0, socket.LOCAL_PEERCRED, 8)
@@ -295,11 +292,11 @@ class UnixControlServer:
                 if peer_socket is not None
                 else None
             )
-            if peer_uid is not None and peer_uid != self._expected_uid:
+            if peer_uid != self._expected_uid:
                 await send(
                     self._error(
                         "peer_not_authorized",
-                        "The control peer has a different user identity.",
+                        "The control peer identity is unavailable or belongs to a different user.",
                     )
                 )
                 return

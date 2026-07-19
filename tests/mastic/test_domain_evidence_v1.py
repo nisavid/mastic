@@ -79,6 +79,19 @@ class EvidenceTests(unittest.TestCase):
             ),
             TrustDecision.NOT_GRANTED,
         )
+
+    def test_trust_grant_copies_accepted_risks_into_immutable_state(self) -> None:
+        accepted_risks = {"remote_code"}
+        grant = TrustGrant(
+            model_revision=self.revision,
+            runtime_installation="optiq@0.2.18",
+            accepted_risks=accepted_risks,  # type: ignore[arg-type]
+        )
+
+        accepted_risks.add("repository_code")
+
+        self.assertEqual(grant.accepted_risks, frozenset({"remote_code"}))
+        hash(grant)
         self.assertEqual(
             grant.decide(
                 revision=self.revision,

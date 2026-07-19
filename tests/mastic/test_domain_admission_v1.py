@@ -31,6 +31,12 @@ class AdmissionPolicyTests(unittest.TestCase):
         self.assertEqual(fit.decision, AdmissionDecision.TRANSITION_SEQUENCE)
         with self.assertRaisesRegex(ValueError, "named transition"):
             fit.approve_transition(())
+        for unnamed in (("",), ("   ",), ("stop:chat", "")):
+            with (
+                self.subTest(unnamed=unnamed),
+                self.assertRaisesRegex(ValueError, "named transition"),
+            ):
+                fit.approve_transition(unnamed)
         self.assertEqual(fit.approve_transition(("stop:chat",)), ("stop:chat",))
 
     def test_critical_pressure_sheds_then_stops_lru_idle_unpinned(self) -> None:

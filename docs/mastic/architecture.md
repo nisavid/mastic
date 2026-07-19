@@ -10,7 +10,8 @@ Dependencies point inward:
 
 ```text
 interfaces -> application -> domain
-infrastructure ----^          ^
+                  ^           ^
+infrastructure ---+-----------+
 ```
 
 - `domain` defines immutable resource identities, desired and observed states,
@@ -20,10 +21,11 @@ infrastructure ----^          ^
   domain types and declared ports.
 - `infrastructure` implements application ports for TOML configuration, SQLite
   state, Hugging Face Hub access, uv runtime environments, process and launchd
-  control, probes, logs, and the Gateway.
+  control, probes, logs, the Gateway, and Unix-socket control transport. The
+  framed protocol and its clients live in `control_protocol.py` and
+  `control_client.py` here.
 - `interfaces` adapts the application operations to the Typer CLI, Textual TUI,
-  Unix-socket control protocol, and JSON or NDJSON output. Interfaces contain
-  no product behavior.
+  and JSON or NDJSON output. Interfaces contain no product behavior.
 
 The CLI and TUI derive help, availability, confirmation, progress,
 remediation, and contextual actions from the same operation catalogue. Parity

@@ -77,7 +77,12 @@ class GatewayCredential:
         candidate = ""
         if authorization is not None and authorization.startswith("Bearer "):
             candidate = authorization.removeprefix("Bearer ")
-        return hmac.compare_digest(candidate, expected)
+        try:
+            candidate_bytes = candidate.encode("ascii")
+            expected_bytes = expected.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(candidate_bytes, expected_bytes)
 
     def authorization_header(self) -> str:
         return f"Bearer {self.load_or_create()}"

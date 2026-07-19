@@ -27,6 +27,7 @@ class GatewayCredentialTests(unittest.TestCase):
             self.assertEqual(path.stat().st_uid, os.getuid())
             self.assertFalse(credential.authenticate(None))
             self.assertFalse(credential.authenticate("Bearer wrong"))
+            self.assertFalse(credential.authenticate("Bearer café"))
             self.assertTrue(credential.authenticate(f"Bearer {first}"))
 
             path.unlink()

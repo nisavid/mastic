@@ -67,6 +67,9 @@ class TrustGrant:
 
     _FORBIDDEN = frozenset({"known_security_finding", "integrity_mismatch"})
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "accepted_risks", frozenset(self.accepted_risks))
+
     def decide(
         self,
         *,

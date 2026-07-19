@@ -76,6 +76,7 @@ class RuntimeInstallation:
         validate_runtime_installation_id(self.installation_id)
         if not self.version or not self.provenance:
             raise ValueError("runtime version and provenance are required")
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +85,13 @@ class ModelRevision:
     revision: str
 
     def __post_init__(self) -> None:
-        if not self.repository or self.repository.startswith(("/", ".")):
+        if (
+            not isinstance(self.repository, str)
+            or "\\" in self.repository
+            or any(
+                component in {"", ".", ".."} for component in self.repository.split("/")
+            )
+        ):
             raise ValueError("model repository must be a repository ID")
         if _IMMUTABLE_REVISION.fullmatch(self.revision) is None:
             raise ValueError("model revision must be an immutable commit SHA")

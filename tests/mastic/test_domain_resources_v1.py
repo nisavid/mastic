@@ -61,6 +61,23 @@ class ResourceIdentityTests(unittest.TestCase):
         self.assertEqual(runtime.provenance, "mastic-tested")
         self.assertIn("max_context", runtime.capabilities)
 
+    def test_runtime_installation_copies_capabilities_into_immutable_state(
+        self,
+    ) -> None:
+        capabilities = {"model", "host"}
+        runtime = RuntimeInstallation(
+            installation_id="mlx-lm@0.31.3",
+            family=RuntimeFamily.MLX_LM,
+            version="0.31.3",
+            provenance="mastic-tested",
+            capabilities=capabilities,  # type: ignore[arg-type]
+        )
+
+        capabilities.add("port")
+
+        self.assertEqual(runtime.capabilities, frozenset({"model", "host"}))
+        hash(runtime)
+
     def test_resource_name_fields_are_canonicalized_and_validated(self) -> None:
         alias = ModelAlias("coding-model", "qwen-exact")  # type: ignore[arg-type]
         service = InferenceService(
@@ -126,6 +143,24 @@ class ResourceIdentityTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "immutable commit SHA"),
             ):
                 ModelRevision("org/model", "a" * length)
+
+    def test_model_repositories_reject_unsafe_path_components(self) -> None:
+        for repository in (
+            "",
+            "/org/model",
+            "org/model/",
+            "org//model",
+            "./org/model",
+            "../org/model",
+            "org/./model",
+            "org/../model",
+            "org\\model",
+        ):
+            with (
+                self.subTest(repository=repository),
+                self.assertRaisesRegex(ValueError, "repository ID"),
+            ):
+                ModelRevision(repository, "a" * 40)
 
     def test_runtime_installation_ids_reject_non_strings_consistently(self) -> None:
         with self.assertRaisesRegex(ValueError, "installation ID"):
