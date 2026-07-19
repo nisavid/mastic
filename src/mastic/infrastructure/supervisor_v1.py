@@ -157,12 +157,20 @@ class ManagedProcess(Protocol):
     def wait(self, timeout: float) -> int: ...
 
 
+class PendingProcess(ManagedProcess, Protocol):
+    """A spawned process that cannot exec its runtime before commit."""
+
+    def commit(self) -> None: ...
+
+    def abort(self) -> None: ...
+
+
 class ProcessLauncher(Protocol):
     def allocate_loopback_port(self, host: str) -> int: ...
 
     def launch(
         self, argv: Sequence[str], environment: Mapping[str, str]
-    ) -> ManagedProcess: ...
+    ) -> PendingProcess: ...
 
     def attach(self, pid: int) -> ManagedProcess | None: ...
 
@@ -441,25 +449,33 @@ class Supervisor:
             run.launch = launch
             self._gateway.set_route(self._gateway_route(service), "unavailable", None)
             self._event_locked(operation_id, "launch_prepared", run_id=run_id)
+            pending: PendingProcess | None = None
             try:
-                process = self._processes.launch(launch.argv, launch.environment)
+                pending = self._processes.launch(launch.argv, launch.environment)
+                process = pending
                 run.process = process
                 identity = self._probe.identity(process)
+                run.identity = identity
+                run.status = ServiceRunStatus(
+                    name,
+                    run_id,
+                    ServiceRunState.STARTING,
+                    upstream_port=port,
+                    pid=process.pid,
+                )
+                self._persist_run_locked(run)
+                process.commit()
             except Exception as error:
-                if run.process is not None and run.identity is None:
-                    self._terminate_direct_locked(run.process)
+                if pending is not None:
+                    pending.abort()
+                    if run.identity is None:
+                        self._terminate_direct_locked(pending)
+                        run.process = None
+                    else:
+                        self._terminate_locked(run)
                 return self._failed_start_locked(
                     run, operation_id, f"process launch failed: {error}", needs_start
                 )
-            run.identity = identity
-            run.status = ServiceRunStatus(
-                name,
-                run_id,
-                ServiceRunState.STARTING,
-                upstream_port=port,
-                pid=process.pid,
-            )
-            self._persist_run_locked(run)
 
         deadline = self._clock.monotonic() + self._readiness_timeout
         endpoint = f"http://127.0.0.1:{port}"

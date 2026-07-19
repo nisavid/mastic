@@ -79,6 +79,7 @@ class FakeStateStore:
         self.operation_items: dict[str, dict[str, object]] = {}
         self.event_items: list[dict[str, object]] = []
         self.snapshot_items: list[dict[str, object]] = []
+        self.lifecycle: list[str] = []
 
     def put_operation(self, item):
         self.operation_items[str(item["id"])] = dict(item)
@@ -90,6 +91,8 @@ class FakeStateStore:
 
     def put_snapshot(self, item):
         self.snapshot_items.append(dict(item))
+        if item.get("kind") == "service_run":
+            self.lifecycle.append(f"persist:{item['state']}")
         return item
 
     def snapshots(self, kind=None):
@@ -106,6 +109,10 @@ class FakeProcess:
     ignores_kill: bool = False
     terminate_calls: int = 0
     kill_calls: int = 0
+    commit_calls: int = 0
+    abort_calls: int = 0
+    commit_error: Exception | None = None
+    lifecycle: list[str] | None = None
 
     def poll(self):
         return None if self.running else 0
@@ -125,6 +132,16 @@ class FakeProcess:
             raise TimeoutError
         return 0
 
+    def commit(self):
+        self.commit_calls += 1
+        if self.lifecycle is not None:
+            self.lifecycle.append("commit")
+        if self.commit_error is not None:
+            raise self.commit_error
+
+    def abort(self):
+        self.abort_calls += 1
+
 
 class FakeProcesses:
     def __init__(self) -> None:
@@ -132,6 +149,8 @@ class FakeProcesses:
         self.launched: list[tuple[tuple[str, ...], dict[str, str]]] = []
         self.processes: dict[int, FakeProcess] = {}
         self.attached: list[int] = []
+        self.commit_error: Exception | None = None
+        self.lifecycle: list[str] | None = None
 
     def allocate_loopback_port(self, host: str) -> int:
         port = self.next_port
@@ -139,7 +158,11 @@ class FakeProcesses:
         return port
 
     def launch(self, argv, environment):
-        process = FakeProcess(1000 + len(self.processes))
+        process = FakeProcess(
+            1000 + len(self.processes),
+            commit_error=self.commit_error,
+            lifecycle=self.lifecycle,
+        )
         self.processes[process.pid] = process
         self.launched.append((tuple(argv), dict(environment)))
         return process
@@ -350,6 +373,63 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(len(self.processes.launched), 2)
         self.assertEqual(self.gateway.routes["coding"][0], "ready")
         self.assertEqual(self.gateway.routes["memory"][0], "ready")
+
+    def test_service_start_persists_identity_before_committing_runtime_exec(self):
+        lifecycle: list[str] = []
+        self.store.lifecycle = lifecycle
+        self.processes.lifecycle = lifecycle
+
+        result = self.supervisor.start_service("coding")
+
+        self.assertEqual(result.run.state, ServiceRunState.READY)
+        self.assertEqual(lifecycle[:2], ["persist:starting", "commit"])
+        process = self.processes.processes[result.run.pid]  # type: ignore[index]
+        self.assertEqual(process.commit_calls, 1)
+
+    def test_commit_failure_stops_gate_and_records_failed_start(self) -> None:
+        self.processes.commit_error = OSError("commit pipe closed")
+
+        result = self.supervisor.start_service("coding")
+
+        process = next(iter(self.processes.processes.values()))
+        self.assertEqual(result.run.state, ServiceRunState.FAILED)
+        self.assertFalse(process.running)
+        self.assertEqual(process.abort_calls, 1)
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertEqual(self.store.snapshot_items[-1]["state"], "failed")
+
+    def test_starting_snapshot_failure_aborts_without_committing_runtime(self) -> None:
+        class FailingStateStore(FakeStateStore):
+            def put_snapshot(self, item):
+                if (
+                    item.get("kind") == "service_run"
+                    and item.get("state") == "starting"
+                ):
+                    raise OSError("journal unavailable")
+                return super().put_snapshot(item)
+
+        store = FailingStateStore()
+        supervisor = Supervisor(
+            desired_state=self.desired,
+            runtime_supply=self.runtime,
+            state_store=store,
+            gateway=self.gateway,
+            processes=self.processes,
+            probe=self.probe,
+            memory_pressure=self.pressure,
+            clock=self.clock,
+            readiness_timeout=3,
+            drain_timeout=2,
+            terminate_timeout=1,
+        )
+
+        result = supervisor.start_service("coding")
+
+        process = next(iter(self.processes.processes.values()))
+        self.assertEqual(result.run.state, ServiceRunState.FAILED)
+        self.assertEqual(process.commit_calls, 0)
+        self.assertEqual(process.abort_calls, 1)
+        self.assertFalse(process.running)
 
     def test_service_start_claims_one_run_before_launch_preparation(self) -> None:
         supervisor: Supervisor
@@ -650,6 +730,7 @@ class SupervisorTests(unittest.TestCase):
         process = FakeProcess(1234)
         self.processes.processes[1234] = process
         self.probe.identities[1234] = identity
+        process.commit()
         launch = self.runtime.prepare_launch(
             self.desired.service("coding"),
             "127.0.0.1",
@@ -662,7 +743,7 @@ class SupervisorTests(unittest.TestCase):
                 "version": 1,
                 "service": "coding",
                 "run_id": "run-old",
-                "state": "ready",
+                "state": "starting",
                 "pid": 1234,
                 "process_identity": "birth-1234",
                 "launch_identity": _launch_identity(launch),
@@ -673,6 +754,7 @@ class SupervisorTests(unittest.TestCase):
         recovered = self.supervisor.start().runs[0]
 
         self.assertEqual(recovered.run_id, "run-old")
+        self.assertEqual(recovered.state, ServiceRunState.READY)
         self.assertEqual(self.processes.attached, [1234])
 
         self.processes.attached.clear()
