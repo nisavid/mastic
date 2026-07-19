@@ -1534,9 +1534,12 @@ def _validate_required_parameters(
     operation: Operation, request: OperationRequest
 ) -> None:
     for parameter in operation.parameters:
+        value = request.parameters.get(parameter.name)
         if parameter.required and (
-            parameter.name not in request.parameters
-            or request.parameters[parameter.name] is None
+            value is None
+            or parameter.value_type == "string"
+            and isinstance(value, str)
+            and not value.strip()
         ):
             raise ApplicationError(
                 "invalid_parameter",
