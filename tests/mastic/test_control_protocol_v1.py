@@ -389,6 +389,24 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
             response = await read_message(reader)
             self.assertEqual(response["error"]["code"], "peer_not_authorized")
 
+    async def test_peer_without_available_credentials_is_rejected(self) -> None:
+        async def handle(request, emit_progress):
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = UnixControlServer(
+                Path(directory) / "masticd.sock",
+                handle,
+                peer_uid_resolver=lambda peer: None,
+            )
+            await server.start()
+            self.addAsyncCleanup(server.close)
+            reader, writer = await asyncio.open_unix_connection(server.socket_path)
+            self.addAsyncCleanup(self._close_writer, writer)
+
+            response = await read_message(reader)
+            self.assertEqual(response["error"]["code"], "peer_not_authorized")
+
     async def test_start_replaces_only_a_stale_user_owned_socket(self) -> None:
         async def handle(request, emit_progress):
             return {}

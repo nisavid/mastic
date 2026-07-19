@@ -430,6 +430,51 @@ port = 8766
         self.assertFalse(stage.exists())
         self.assertFalse((stage.parent / f"{stage.name}.json").exists())
 
+    def test_runtime_stage_journal_is_invisible_until_its_payload_is_durable(
+        self,
+    ) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        stage = port._installation_root / ".optiq-0.3-custom.staging-crashed"
+        transition = stage.parent / f"{stage.name}.json"
+
+        with (
+            patch(
+                "mastic.infrastructure.supply_ports.os.fsync",
+                side_effect=OSError("journal sync failed"),
+            ),
+            self.assertRaisesRegex(OSError, "journal sync failed"),
+        ):
+            port._record_runtime_stage(stage, "optiq-0.3-custom")
+
+        self.assertFalse(transition.exists())
+        self.assertEqual(tuple(stage.parent.glob(f"{transition.name}.tmp-*")), ())
+
+    def test_runtime_stage_journal_remains_valid_when_directory_sync_fails(
+        self,
+    ) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        stage = port._installation_root / ".optiq-0.3-custom.staging-crashed"
+        transition = stage.parent / f"{stage.name}.json"
+
+        with (
+            patch(
+                "mastic.infrastructure.supply_ports._fsync_directory",
+                side_effect=OSError("directory sync failed"),
+            ),
+            self.assertRaisesRegex(OSError, "directory sync failed"),
+        ):
+            port._record_runtime_stage(stage, "optiq-0.3-custom")
+
+        self.assertEqual(
+            port._read_runtime_stage_transition(transition),
+            (stage, "optiq-0.3-custom"),
+        )
+
+        RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        self.assertFalse(transition.exists())
+
     def test_runtime_startup_never_deletes_an_unjournaled_stage(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
         stage = self.root / "runtimes" / ".optiq-0.3-custom.staging-unknown"

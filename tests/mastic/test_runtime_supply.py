@@ -3,6 +3,7 @@ import unittest
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import tomlkit
 
@@ -493,6 +494,43 @@ class RuntimeManagerTests(unittest.TestCase):
 
             self.assertEqual(finished, started)
             self.assertFalse(started[0][0].exists())
+
+    def test_published_install_retains_its_journal_until_directory_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            started = []
+            finished = []
+            manager = RuntimeManager(
+                RuntimeCatalogue.load_builtin(),
+                runner=FakeRunner(),
+                probe=FakeProbe("0.3.3", {"--model", "--host", "--port"}),
+                staging_token=lambda: "sync-failed",
+            )
+
+            with (
+                patch(
+                    "mastic.infrastructure.runtime_supply._fsync_directory",
+                    side_effect=OSError("directory sync failed"),
+                ),
+                self.assertRaisesRegex(OSError, "directory sync failed"),
+            ):
+                manager.install_custom(
+                    "optiq",
+                    "0.3.3",
+                    python="3.13",
+                    installation_root=root,
+                    stage_started=lambda stage, installation_id: started.append(
+                        (stage, installation_id)
+                    ),
+                    stage_finished=lambda stage, installation_id: finished.append(
+                        (stage, installation_id)
+                    ),
+                )
+
+            self.assertEqual(len(started), 1)
+            self.assertEqual(finished, [])
+            self.assertFalse(started[0][0].exists())
+            self.assertTrue((root / "optiq-0.3.3-custom").is_dir())
 
     def test_tested_bundle_is_installed_immutably_from_an_exact_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

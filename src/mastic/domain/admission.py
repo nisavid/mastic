@@ -47,7 +47,12 @@ class FitAssessment:
         return AdmissionDecision.TRANSITION_SEQUENCE
 
     def approve_transition(self, transitions: tuple[str, ...]) -> tuple[str, ...]:
-        if self.classification is FitClass.NO_FIT and not transitions:
+        if self.classification is FitClass.NO_FIT and (
+            not transitions
+            or any(
+                not isinstance(item, str) or not item.strip() for item in transitions
+            )
+        ):
             raise ValueError("no-fit admission requires a named transition sequence")
         return transitions
 

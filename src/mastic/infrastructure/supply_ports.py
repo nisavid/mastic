@@ -978,28 +978,32 @@ class RuntimeSupplyPort:
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
-        descriptor = os.open(
-            transition,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_CLOEXEC
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f"{transition.name}.tmp-",
+            dir=self._installation_root,
         )
+        temporary = Path(temporary_name)
+        published = False
         try:
             os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
                 stream.write(payload)
                 stream.flush()
-            os.fsync(descriptor)
+                os.fsync(stream.fileno())
+            if os.path.lexists(transition):
+                raise FileExistsError(
+                    f"runtime staging transition exists: {transition}"
+                )
+            temporary.replace(transition)
+            published = True
             _fsync_directory(self._installation_root)
-        except Exception:
-            os.close(descriptor)
-            transition.unlink(missing_ok=True)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if not published:
+                temporary.unlink(missing_ok=True)
             raise
-        else:
-            os.close(descriptor)
 
     def _clear_runtime_stage(self, stage: Path, installation_id: str) -> None:
         transition = self._runtime_stage_transition(stage)

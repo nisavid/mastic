@@ -130,9 +130,11 @@ request `model` field selects the stable service route.
 
 All managed profile routes and ordinary `/v1` routes require the private bearer
 credential stored at `~/.local/state/mastic/gateway.token`. MASTIC supplies it
-to owned Application Configuration Targets. Missing and invalid credentials
-both return `401` with `WWW-Authenticate: Bearer`; the Gateway never forwards
-the credential to an Inference Service.
+to owned Application Configuration Targets. The credential must be a regular,
+non-symlink file owned by the current user with mode `0600`; MASTIC validates
+those properties before reading it. Missing and invalid credentials both return
+`401` with `WWW-Authenticate: Bearer`; the Gateway never forwards the credential
+to an Inference Service.
 
 Several services may run concurrently. The Gateway does not start a stopped
 service in response to traffic. Runtime processes are launched from exact
