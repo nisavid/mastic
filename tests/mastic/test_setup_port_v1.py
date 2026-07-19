@@ -1876,7 +1876,8 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(len(self.runtime.calls), 2)
 
     def test_resume_reexecutes_only_invalid_dependency_material(self) -> None:
-        port = self.port()
+        plans = FakePlanStore()
+        port = self.port(plan_store=plans)
         preview = port.preview({})
         completed = port.execute(
             "setup",
@@ -1912,6 +1913,9 @@ class SetupOperationPortTests(unittest.TestCase):
                     step for step in resumed["steps"] if step["id"] == step_id
                 )
                 self.assertEqual(producer["state"], "ready")
+                self.assertEqual(resumed["completion"], "partial")
+                durable = DurableSetupOutcomeProvider(plans, self.evidence).outcome()
+                self.assertEqual(durable["completion"], "partial")
 
                 repaired = port.execute(
                     "setup",
