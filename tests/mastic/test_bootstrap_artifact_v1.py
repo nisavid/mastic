@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,18 @@ _SUBPROCESS_TIMEOUT = 30
 
 
 class BootstrapArtifactV1Tests(unittest.TestCase):
+    def test_every_distribution_build_uses_the_exact_hashed_backend(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        self.assertEqual(project["build-system"]["requires"], ["hatchling==1.27.0"])
+
+        build_lock = (ROOT / "packaging" / "build-backend.lock").read_text()
+        self.assertIn("hatchling==1.27.0", build_lock)
+        self.assertIn("--hash=sha256:", build_lock)
+        for workflow_name in ("bootstrap-artifact.yml", "python-quality.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+            self.assertIn("--build-constraints packaging/build-backend.lock", workflow)
+            self.assertIn("--require-hashes", workflow)
+
     def test_builder_embeds_exact_release_closure_and_produces_valid_zsh(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

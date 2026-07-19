@@ -46,4 +46,7 @@ jobs:
         run: uv run --frozen python -m unittest discover -s tests -t .
 
       - name: Build distributions
-        run: uv build
+        run: >-
+          uv build
+          --build-constraints packaging/build-backend.lock
+          --require-hashes
