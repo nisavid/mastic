@@ -16,6 +16,11 @@ from typing import Iterator, Mapping
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_VERSION = 1
 _DEFAULT_MAX_METRICS = 10_000
+_DEFAULT_MAX_LIFECYCLE_SNAPSHOT_HISTORY = 10_000
+_LIFECYCLE_SNAPSHOT_KINDS = ("gateway", "service_run", "supervisor")
+_LIFECYCLE_SNAPSHOT_KIND_PLACEHOLDERS = ", ".join(
+    "?" for _kind in _LIFECYCLE_SNAPSHOT_KINDS
+)
 
 
 def _canonical_key(value: str) -> str:
@@ -80,12 +85,24 @@ class OperationalStateStore:
     """Persist deterministic operational DTOs in a private SQLite database."""
 
     def __init__(
-        self, path: str | Path, *, max_metrics: int = _DEFAULT_MAX_METRICS
+        self,
+        path: str | Path,
+        *,
+        max_metrics: int = _DEFAULT_MAX_METRICS,
+        max_lifecycle_snapshot_history: int = (_DEFAULT_MAX_LIFECYCLE_SNAPSHOT_HISTORY),
     ) -> None:
         if type(max_metrics) is not int or max_metrics <= 0:
             raise ValueError("maximum retained metrics must be a positive integer")
+        if (
+            type(max_lifecycle_snapshot_history) is not int
+            or max_lifecycle_snapshot_history < 0
+        ):
+            raise ValueError(
+                "maximum retained lifecycle snapshot history must be a nonnegative integer"
+            )
         self._path = Path(path)
         self._max_metrics = max_metrics
+        self._max_lifecycle_snapshot_history = max_lifecycle_snapshot_history
         self._prepare_path()
         with _SCHEMA_LOCK, self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -115,6 +132,8 @@ class OperationalStateStore:
                         dto_json TEXT NOT NULL,
                         UNIQUE(kind, resource_id, version)
                     );
+                    CREATE INDEX IF NOT EXISTS snapshots_by_resource
+                        ON snapshots(kind, resource_id, sequence);
                     CREATE TABLE IF NOT EXISTS metrics (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                         kind TEXT NOT NULL,
@@ -126,6 +145,13 @@ class OperationalStateStore:
                     COMMIT;
                     """
                 )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS snapshots_by_resource
+                ON snapshots(kind, resource_id, sequence)
+                """
+            )
+            self._prune_snapshot_history(connection)
         self._secure_files()
 
     def metadata(self) -> dict[str, object]:
@@ -289,7 +315,31 @@ class OperationalStateStore:
                         f"snapshot {kind}/{resource_id} version {dto['version']!r} "
                         "is immutable"
                     )
+            self._prune_snapshot_history(connection)
         return dto
+
+    def _prune_snapshot_history(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            f"""
+            DELETE FROM snapshots
+            WHERE sequence IN (
+                SELECT sequence FROM snapshots
+                WHERE kind IN ({_LIFECYCLE_SNAPSHOT_KIND_PLACEHOLDERS})
+                AND sequence NOT IN (
+                    SELECT MAX(sequence) FROM snapshots
+                    WHERE kind IN ({_LIFECYCLE_SNAPSHOT_KIND_PLACEHOLDERS})
+                    GROUP BY kind, resource_id
+                )
+                ORDER BY sequence DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (
+                *_LIFECYCLE_SNAPSHOT_KINDS,
+                *_LIFECYCLE_SNAPSHOT_KINDS,
+                self._max_lifecycle_snapshot_history,
+            ),
+        )
 
     def snapshot(
         self, kind: str, resource_id: str, *, version: str | int | None = None
@@ -343,7 +393,7 @@ class OperationalStateStore:
     def snapshot_history(
         self, kind: str | None = None
     ) -> tuple[dict[str, object], ...]:
-        """Return every immutable snapshot in insertion order."""
+        """Return retained immutable snapshots in insertion order."""
         if kind is None:
             sql = "SELECT dto_json FROM snapshots ORDER BY sequence"
             parameters: tuple[object, ...] = ()

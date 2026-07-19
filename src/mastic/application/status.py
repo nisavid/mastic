@@ -47,4 +47,5 @@ class StatusSnapshot:
 
 
 class SnapshotProvider(Protocol):
-    def snapshot(self) -> StatusSnapshot: ...
+    def snapshot(self) -> StatusSnapshot:
+        pass

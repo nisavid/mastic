@@ -271,6 +271,146 @@ class OperationalStateStoreTests(unittest.TestCase):
                     {"kind": "service", "id": "chat", "state": "failed", "version": 1}
                 )
 
+    def test_bounds_superseded_snapshot_history_and_preserves_every_latest_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(
+                Path(directory) / "state.sqlite3", max_lifecycle_snapshot_history=2
+            )
+            chat_first = store.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "chat",
+                    "state": "starting",
+                    "version": 1,
+                }
+            )
+            alpha_first = store.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "alpha",
+                    "state": "starting",
+                    "version": 1,
+                }
+            )
+            chat_second = store.put_snapshot(
+                {"kind": "service_run", "id": "chat", "state": "ready", "version": 2}
+            )
+            beta = store.put_snapshot(
+                {"kind": "service_run", "id": "beta", "state": "ready", "version": 1}
+            )
+            alpha_second = store.put_snapshot(
+                {"kind": "service_run", "id": "alpha", "state": "ready", "version": 2}
+            )
+            chat_third = store.put_snapshot(
+                {
+                    "kind": "service_run",
+                    "id": "chat",
+                    "state": "stopped",
+                    "version": 3,
+                }
+            )
+
+            self.assertIsNone(store.snapshot("service_run", "chat", version=1))
+            self.assertEqual(
+                store.snapshot("service_run", "chat", version=2), chat_second
+            )
+            self.assertEqual(
+                store.snapshot_history("service_run"),
+                (alpha_first, chat_second, beta, alpha_second, chat_third),
+            )
+            self.assertEqual(
+                store.snapshots("service_run"), (alpha_second, beta, chat_third)
+            )
+            self.assertNotIn(chat_first, store.snapshot_history("service_run"))
+
+    def test_applies_snapshot_retention_when_reopening_an_existing_database(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite3"
+            store = OperationalStateStore(path)
+            for version in range(1, 6):
+                store.put_snapshot(
+                    {
+                        "kind": "service_run",
+                        "id": "chat",
+                        "state": f"state-{version}",
+                        "version": version,
+                    }
+                )
+
+            reopened = OperationalStateStore(path, max_lifecycle_snapshot_history=2)
+
+            self.assertEqual(
+                tuple(
+                    item["version"] for item in reopened.snapshot_history("service_run")
+                ),
+                (3, 4, 5),
+            )
+            self.assertEqual(reopened.snapshot("service_run", "chat")["version"], 5)
+
+    def test_snapshot_retention_preserves_immutable_contract_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(
+                Path(directory) / "state.sqlite3",
+                max_lifecycle_snapshot_history=0,
+            )
+            trust = store.put_snapshot(
+                {
+                    "kind": "trust",
+                    "id": "model@runtime",
+                    "version": "rev-a",
+                    "accepted_risks": ["risk-a"],
+                }
+            )
+            evidence = store.put_snapshot(
+                {
+                    "kind": "setup_evidence",
+                    "id": "verify.request",
+                    "version": "evidence-a",
+                    "fingerprint": "request-a",
+                    "state": "complete",
+                }
+            )
+            store.put_snapshot(
+                {
+                    "kind": "trust",
+                    "id": "model@runtime",
+                    "version": "rev-b",
+                    "accepted_risks": ["risk-b"],
+                }
+            )
+            store.put_snapshot(
+                {
+                    "kind": "setup_evidence",
+                    "id": "verify.request",
+                    "version": "evidence-b",
+                    "fingerprint": "request-b",
+                    "state": "complete",
+                }
+            )
+
+            self.assertEqual(
+                store.snapshot("trust", "model@runtime", version="rev-a"), trust
+            )
+            self.assertEqual(
+                store.snapshot(
+                    "setup_evidence", "verify.request", version="evidence-a"
+                ),
+                evidence,
+            )
+            with self.assertRaisesRegex(ValueError, "version 'rev-a' is immutable"):
+                store.put_snapshot(
+                    {
+                        "kind": "trust",
+                        "id": "model@runtime",
+                        "version": "rev-a",
+                        "accepted_risks": ["different-risk"],
+                    }
+                )
+
     def test_progress_filters_by_kind_before_applying_its_page_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = OperationalStateStore(Path(directory) / "state.sqlite3")

@@ -21,8 +21,8 @@ from mastic.infrastructure.application_target_contracts import (
     ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
     CodexModelMetadata,
-    CodexTargetOptions as CodexTargetOptions,
-    HindsightTargetOptions as HindsightTargetOptions,
+    CodexTargetOptions,
+    HindsightTargetOptions,
     SemanticChange,
 )
 from mastic.infrastructure.application_target_ownership import (
@@ -134,7 +134,9 @@ __all__ = [
     "ApplicationTargetRemovalResult",
     "CodexApplicationTargetIntegration",
     "CodexModelMetadata",
+    "CodexTargetOptions",
     "HindsightApplicationTargetIntegration",
+    "HindsightTargetOptions",
     "LocalApplicationTargetIntegrationFactory",
     "OwnershipDiscoveryPolicy",
     "SamplingProfile",

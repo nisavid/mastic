@@ -7,8 +7,8 @@ import json
 import os
 import secrets
 import stat
-from contextlib import contextmanager
 from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Mapping
 
@@ -108,10 +108,8 @@ def _atomic_replace(path: Path, payload: bytes) -> None:
             )
             os.fsync(parent)
         finally:
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(temporary_name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
 
 
 def _unlink(path: Path) -> None:

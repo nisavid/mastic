@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -891,10 +891,8 @@ class ApplicationSupply:
             os.fsync(parent_fd)
         finally:
             if temporary is not None:
-                try:
+                with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    pass
             os.close(parent_fd)
 
     def _artifact_path(self, artifact: _Artifact) -> Path:

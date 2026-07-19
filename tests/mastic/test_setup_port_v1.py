@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import (
     CapacityProfile,
@@ -24,6 +25,9 @@ from mastic.application.setup import (
 )
 from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.application_supply import ApplicationSupply
+from mastic.infrastructure.application_target_canaries import (
+    application_canary_evidence_sha256,
+)
 from mastic.infrastructure.paths_v1 import MasticPaths
 from mastic.infrastructure.production import _setup_transition
 from mastic.infrastructure.production_host import OwnedStateRemover
@@ -149,32 +153,18 @@ def validated_performance_profile(*, plan_sha256: str) -> dict[str, object]:
 
 
 def canary_phases(target: str) -> list[str]:
-    return {
-        "codex": ["codex.exec", "responses.exact"],
-        "hindsight": [
-            "hindsight.start",
-            "bank.create",
-            "memory.retain",
-            "memory.reflect",
-        ],
-    }[target]
+    return list(APPLICATION_CANARY_CONTRACTS[target].phases)
 
 
 def canary_evidence_sha256(target: str, *, service: str = "coding") -> str:
-    profile = {"codex": "coding", "hindsight": "retain"}[target]
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "target": target,
-                "profile": profile,
-                "service": service,
-                "phases": canary_phases(target),
-                "exact_contract": True,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    contract = APPLICATION_CANARY_CONTRACTS[target]
+    return application_canary_evidence_sha256(
+        target=target,
+        profile=contract.profile,
+        service=service,
+        phases=contract.phases,
+        exact_contract=True,
+    )
 
 
 class SetupOperationPortTests(unittest.TestCase):
@@ -342,6 +332,32 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(plan_store.plan["application_targets"], ("codex", "hindsight"))
         self.assertTrue(plan_store.plan["steps"])
+        self.assertTrue(
+            all(
+                {"id", "fingerprint", "state"}.issubset(step)
+                and set(step).issubset(
+                    {"id", "fingerprint", "state", "expected_result"}
+                )
+                for step in plan_store.plan["steps"]
+            )
+        )
+        material_contracts = {
+            step["id"]: step["expected_result"]
+            for step in plan_store.plan["steps"]
+            if "expected_result" in step
+        }
+        self.assertEqual(
+            material_contracts,
+            {
+                "runtime.install": {
+                    "runtime": "optiq",
+                    "version": "0.3.3",
+                    "provenance": "tested",
+                    "lock_sha256": "a" * 64,
+                },
+                "model.install": {"revision": MODEL_REVISION},
+            },
+        )
         self.assertEqual(
             set(plan_store.plan),
             {
@@ -463,10 +479,15 @@ class SetupOperationPortTests(unittest.TestCase):
         plans.plan = {
             "plan_identity": "a" * 64,
             "steps": (
-                {"id": "application.canary.codex", "fingerprint": "codex-v1"},
+                {
+                    "id": "application.canary.codex",
+                    "fingerprint": "codex-v1",
+                    "state": "skipped",
+                },
                 {
                     "id": "application.canary.hindsight",
                     "fingerprint": "hindsight-v1",
+                    "state": "skipped",
                 },
             ),
             "application_targets": ("codex", "hindsight"),
@@ -564,7 +585,13 @@ class SetupOperationPortTests(unittest.TestCase):
         plans = FakePlanStore()
         plans.plan = {
             "plan_identity": "a" * 64,
-            "steps": ({"id": "application.canary.codex", "fingerprint": "codex-v1"},),
+            "steps": (
+                {
+                    "id": "application.canary.codex",
+                    "fingerprint": "codex-v1",
+                    "state": "skipped",
+                },
+            ),
             "application_targets": ("codex",),
             "performance_binding": {
                 "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
@@ -650,7 +677,13 @@ class SetupOperationPortTests(unittest.TestCase):
         plans = FakePlanStore()
         plans.plan = {
             "plan_identity": "a" * 64,
-            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "steps": (
+                {
+                    "id": "application.canary.codex",
+                    "fingerprint": "canary-v1",
+                    "state": "ready",
+                },
+            ),
             "application_targets": ("codex",),
             "performance_binding": {
                 "selection_sha256": "a" * 64,
@@ -719,7 +752,13 @@ class SetupOperationPortTests(unittest.TestCase):
         plans = FakePlanStore()
         plans.plan = {
             "plan_identity": "a" * 64,
-            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "steps": (
+                {
+                    "id": "application.canary.codex",
+                    "fingerprint": "canary-v1",
+                    "state": "ready",
+                },
+            ),
             "application_targets": ("codex",),
         }
         profile = validated_performance_profile(plan_sha256="c" * 64)
@@ -807,7 +846,13 @@ class SetupOperationPortTests(unittest.TestCase):
         plans = FakePlanStore()
         plans.plan = {
             "plan_identity": "a" * 64,
-            "steps": ({"id": "application.canary.codex", "fingerprint": "canary-v1"},),
+            "steps": (
+                {
+                    "id": "application.canary.codex",
+                    "fingerprint": "canary-v1",
+                    "state": "skipped",
+                },
+            ),
             "application_targets": ("codex",),
         }
         evidence = FakeEvidenceStore()
@@ -842,11 +887,19 @@ class SetupOperationPortTests(unittest.TestCase):
         exact_alternate_plan = DurableSetupOutcomeProvider(
             plans, evidence, profile
         ).outcome()
+        plans.plan["steps"] = (
+            {
+                **plans.plan["steps"][0],
+                "state": "ready",
+            },
+        )
+        unauthorized = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
 
         self.assertEqual(missing["completion"], "partial")
         self.assertEqual(malformed["completion"], "partial")
         self.assertEqual(exact_alternate_plan["completion"], "complete")
         self.assertEqual(exact_alternate_plan["readiness"], "unverified")
+        self.assertEqual(unauthorized["completion"], "partial")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1432,6 +1485,58 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(repaired["readiness"], "ready")
         self.assertEqual([call[0] for call in self.verifier.calls], ["verify.request"])
 
+    def test_resumed_preview_rejects_unauthorized_skipped_canary_evidence(
+        self,
+    ) -> None:
+        port = self.port()
+        preview = port.preview({})
+        port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+        index, canary = next(
+            (index, item)
+            for index, item in enumerate(self.evidence.items["setup"])
+            if item.step_id == "application.canary.codex"
+        )
+        self.evidence.items["setup"][index] = replace(
+            canary,
+            state=StepState.SKIPPED,
+            detail="",
+        )
+
+        resumed = port.preview({})
+        canary_step = next(
+            step
+            for step in resumed["steps"]
+            if step["id"] == "application.canary.codex"
+        )
+
+        self.assertEqual(canary_step["state"], "ready")
+        self.assertEqual(resumed["completion"], "partial")
+
+        self.application_targets.calls.clear()
+        repaired = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": resumed["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(repaired["completion"], "complete")
+        self.assertEqual(
+            [
+                call[1]["application_target"]
+                for call in self.application_targets.calls
+                if call[0] == "application-target.test"
+            ],
+            ["codex"],
+        )
+
     def test_skipped_required_canary_precedes_a_degraded_target(self) -> None:
         self.application_targets.results["application-target.test"] = (
             lambda parameters: {
@@ -1936,18 +2041,51 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(completed["completion"], "complete")
 
         cases = (
-            ("runtime.install", "{", self.runtime),
+            ("runtime-malformed", "runtime.install", "{", self.runtime),
             (
+                "runtime-wrong-exact-shape",
+                "runtime.install",
+                json.dumps(
+                    {
+                        "result": {
+                            "installation_id": "other@9.9.9",
+                            "runtime": "other",
+                            "version": "9.9.9",
+                            "provenance": "tested",
+                            "bundle_id": "other-bundle",
+                            "lock_sha256": "b" * 64,
+                        }
+                    }
+                ),
+                self.runtime,
+            ),
+            (
+                "model-malformed",
                 "model.install",
                 json.dumps({"result": {"revision": "wrong"}}),
                 self.model,
             ),
+            (
+                "model-wrong-exact-shape",
+                "model.install",
+                json.dumps(
+                    {
+                        "result": {
+                            "installation_id": "qwen-optiq@wrong",
+                            "revision": "2" * 40,
+                        }
+                    }
+                ),
+                self.model,
+            ),
         )
-        for step_id, detail, owner in cases:
-            with self.subTest(step_id=step_id):
+        for case, step_id, detail, owner in cases:
+            with self.subTest(case=case):
                 index, evidence = next(
                     (index, item)
-                    for index, item in enumerate(self.evidence.items["setup"])
+                    for index, item in reversed(
+                        tuple(enumerate(self.evidence.items["setup"]))
+                    )
                     if item.step_id == step_id and item.state is StepState.COMPLETE
                 )
                 self.evidence.items["setup"][index] = replace(evidence, detail=detail)

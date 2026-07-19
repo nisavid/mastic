@@ -194,6 +194,9 @@ def create_gateway(
         denied = _authenticate(request, authenticate)
         if denied is not None:
             return denied
+        origin_denied = _reject_non_loopback_origin(request)
+        if origin_denied is not None:
+            return origin_denied
         routes = await _await_if_needed(route_resolver.list_routes())
         application_target_name = request.path_params.get("application_target")
         profile_name = request.path_params.get("profile")
@@ -244,13 +247,9 @@ def create_gateway(
                 "The Gateway accepts application/json request bodies only.",
                 action="Set Content-Type to application/json and retry.",
             )
-        if not _origin_is_allowed(request.headers.get("origin")):
-            return _error_response(
-                403,
-                "origin_not_allowed",
-                "Browser requests must originate from a loopback HTTP origin.",
-                action="Use a native local application or a loopback-hosted application.",
-            )
+        origin_denied = _reject_non_loopback_origin(request)
+        if origin_denied is not None:
+            return origin_denied
         try:
             body = await _read_limited_body(request, max_request_bytes)
             payload = json.loads(body)
@@ -694,6 +693,17 @@ def _origin_is_allowed(origin: str | None) -> bool:
         return ipaddress.ip_address(parsed.hostname).is_loopback
     except ValueError:
         return False
+
+
+def _reject_non_loopback_origin(request: Request) -> JSONResponse | None:
+    if _origin_is_allowed(request.headers.get("origin")):
+        return None
+    return _error_response(
+        403,
+        "origin_not_allowed",
+        "Browser requests must originate from a loopback HTTP origin.",
+        action="Use a native local application or a loopback-hosted application.",
+    )
 
 
 def _authenticate(

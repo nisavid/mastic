@@ -409,9 +409,9 @@ class MasticApp(App[None]):
             title="mastic",
         )
         rendered = self._render_result(result.value)
-        events = ""
+        event_text = ""
         if result.events:
-            events = "\n\nEvents\n" + "\n".join(
+            event_text = "\n\nEvents\n" + "\n".join(
                 json.dumps(dict(event), sort_keys=True, default=str)
                 for event in result.events
             )
@@ -429,7 +429,7 @@ class MasticApp(App[None]):
             f"{name.replace('.', '  ›  ')} · complete"
         )
         self.query_one("#view-body", Static).update(
-            f"Result\n\n{rendered}{events}\n\nNext actions\n{next_text}"
+            f"Result\n\n{rendered}{event_text}\n\nNext actions\n{next_text}"
         )
         self.pending_parameters = None
         self.query_one("#operation-confirm", Button).styles.display = "none"

@@ -118,12 +118,15 @@ over the same desired state.
 ## Control protocol
 
 `mastic` and `masticd` use a private, versioned, length-prefixed JSON protocol on
-`~/.local/state/mastic/masticd.sock`. Each connection negotiates v1, carries one
-correlated operation, streams bounded progress frames, and returns one result
-or stable error. Frames are size-bounded. The socket is user-owned with mode
-`0600`, and `masticd` verifies the connecting process has the same user identity
-through peer credentials before accepting protocol work. The socket is
-loopback-equivalent local IPC and is never exposed on a network interface.
+`~/.local/state/mastic/masticd.sock`. The shipped client opens a connection,
+negotiates v1, carries one correlated operation, streams bounded progress frames,
+receives one result or stable error, and closes the connection. The server can
+accept multiple correlated requests on one negotiated connection, including a
+cancellation request while an operation is active. Frames are size-bounded. The
+socket is user-owned with mode `0600`, and `masticd` verifies the connecting
+process has the same user identity through peer credentials before accepting
+protocol work. The socket is loopback-equivalent local IPC and is never exposed
+on a network interface.
 
 Physical runtime and model operations receive durable operation identities.
 Public v1 supports listing and inspecting those operations. It does not claim

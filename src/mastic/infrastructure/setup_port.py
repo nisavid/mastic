@@ -377,7 +377,7 @@ class SetupOperationPort:
                 {
                     "plan_identity": str(preview["preview_fingerprint"]),
                     "steps": tuple(
-                        {"id": step.id, "fingerprint": step.fingerprint}
+                        _durable_plan_step(resolved.selection, step)
                         for step in resolved.steps
                     ),
                     "application_targets": resolved.selection.application_targets,
@@ -1126,6 +1126,63 @@ def _evidence_result(evidence: SetupEvidence) -> Mapping[str, object] | None:
     return result if isinstance(result, Mapping) else None
 
 
+def _material_expectation(
+    selection: ExactSetupSelection, step_id: str
+) -> Mapping[str, object] | None:
+    if step_id == "runtime.install":
+        return {
+            "runtime": selection.runtime_name,
+            "version": selection.runtime_version,
+            "provenance": "tested",
+            "lock_sha256": selection.runtime_lock_digest.removeprefix("sha256:"),
+        }
+    if step_id == "model.install":
+        return {"revision": selection.model_revision}
+    return None
+
+
+def _material_expectation_valid(step_id: str, value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if step_id == "runtime.install":
+        if set(value) != {"runtime", "version", "provenance", "lock_sha256"}:
+            return False
+        lock_sha256 = value.get("lock_sha256")
+        return bool(
+            isinstance(value.get("runtime"), str)
+            and bool(value.get("runtime"))
+            and isinstance(value.get("version"), str)
+            and bool(value.get("version"))
+            and value.get("provenance") == "tested"
+            and isinstance(lock_sha256, str)
+            and len(lock_sha256) == 64
+            and all(character in "0123456789abcdef" for character in lock_sha256)
+        )
+    if step_id == "model.install":
+        revision = value.get("revision")
+        return bool(
+            set(value) == {"revision"}
+            and isinstance(revision, str)
+            and len(revision) in {40, 64}
+            and all(character in "0123456789abcdef" for character in revision)
+        )
+    return False
+
+
+def _durable_plan_step(
+    selection: ExactSetupSelection, step: MutationStep
+) -> Mapping[str, object]:
+    record: dict[str, object] = {
+        "id": step.id,
+        "fingerprint": step.fingerprint,
+        "state": step.state.value,
+    }
+    expected_result = _material_expectation(selection, step.id)
+    if expected_result is not None:
+        record["expected_result"] = expected_result
+    return record
+
+
 def _resumable_material_valid(resolved: ResolvedSetup, evidence: SetupEvidence) -> bool:
     if evidence.step_id not in {"runtime.install", "model.install"}:
         return True
@@ -1142,9 +1199,14 @@ def _resumable_material_valid(resolved: ResolvedSetup, evidence: SetupEvidence) 
     return True
 
 
-def _durable_resumable_material_valid(step_id: str, evidence: SetupEvidence) -> bool:
+def _durable_resumable_material_valid(
+    step_id: str, evidence: SetupEvidence, expected_result: object
+) -> bool:
     if step_id not in {"runtime.install", "model.install"}:
         return True
+    if not _material_expectation_valid(step_id, expected_result):
+        return False
+    assert isinstance(expected_result, Mapping)
     result = _evidence_result(evidence)
     if result is None:
         return False
@@ -1154,13 +1216,15 @@ def _durable_resumable_material_valid(step_id: str, evidence: SetupEvidence) -> 
     revision = result.get("revision")
     if step_id == "model.install":
         return bool(
-            isinstance(revision, str)
+            revision == expected_result["revision"]
+            and isinstance(revision, str)
             and len(revision) in {40, 64}
             and all(character in "0123456789abcdef" for character in revision)
         )
     lock_sha256 = result.get("lock_sha256")
     return bool(
-        isinstance(result.get("runtime"), str)
+        all(result.get(field) == value for field, value in expected_result.items())
+        and isinstance(result.get("runtime"), str)
         and bool(result.get("runtime"))
         and isinstance(result.get("version"), str)
         and bool(result.get("version"))
@@ -1300,13 +1364,18 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
         raise ValueError("setup Plan performance binding must be an object")
     if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, str | bytes):
         raise ValueError("setup Plan steps must be a sequence")
-    steps: list[dict[str, str]] = []
+    steps: list[dict[str, object]] = []
     identities: set[str] = set()
     for raw_step in raw_steps:
         if not isinstance(raw_step, Mapping):
             raise ValueError("setup Plan steps must be objects")
-        if set(raw_step) != {"id", "fingerprint"}:
-            raise ValueError("setup Plan steps require exact id and fingerprint fields")
+        if not {"id", "fingerprint"}.issubset(raw_step) or set(raw_step) - {
+            "id",
+            "fingerprint",
+            "state",
+            "expected_result",
+        }:
+            raise ValueError("setup Plan steps have invalid fields")
         step_id = raw_step.get("id")
         fingerprint = raw_step.get("fingerprint")
         if not isinstance(step_id, str) or not step_id:
@@ -1315,8 +1384,29 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
             raise ValueError("setup Plan step fingerprint must be nonempty")
         if step_id in identities:
             raise ValueError("setup Plan step ids must be unique")
+        state = raw_step.get("state")
+        if state is not None and state not in {item.value for item in StepState}:
+            raise ValueError("setup Plan step state is invalid")
+        expected_result = raw_step.get("expected_result")
+        if expected_result is not None and not _material_expectation_valid(
+            step_id, expected_result
+        ):
+            raise ValueError("setup Plan step expected result is invalid")
+        if (
+            step_id not in {"runtime.install", "model.install"}
+            and expected_result is not None
+        ):
+            raise ValueError("setup Plan step has an unexpected result contract")
         identities.add(step_id)
-        steps.append({"id": step_id, "fingerprint": fingerprint})
+        normalized_step: dict[str, object] = {
+            "id": step_id,
+            "fingerprint": fingerprint,
+        }
+        if state is not None:
+            normalized_step["state"] = state
+        if expected_result is not None:
+            normalized_step["expected_result"] = dict(expected_result)
+        steps.append(normalized_step)
     if not steps:
         raise ValueError("setup Plan requires steps")
     raw_targets = plan.get("application_targets")
@@ -1431,11 +1521,7 @@ def _durable_setup_outcome(
 ) -> Mapping[str, object]:
     raw_steps = plan["steps"]
     assert isinstance(raw_steps, Sequence)
-    steps = tuple(
-        (str(step["id"]), str(step["fingerprint"]))
-        for step in raw_steps
-        if isinstance(step, Mapping)
-    )
+    steps = tuple(step for step in raw_steps if isinstance(step, Mapping))
     current = {
         (item.step_id, item.fingerprint): item
         for item in evidence
@@ -1450,13 +1536,16 @@ def _durable_setup_outcome(
     completion = (
         Completion.COMPLETE
         if all(
-            (outcome := current.get(step)) is not None
+            (outcome := current.get((str(step["id"]), str(step["fingerprint"]))))
+            is not None
             and _durable_terminal_setup_evidence_valid(
-                step[0],
+                str(step["id"]),
                 outcome,
                 performance_profile,
                 expected_service,
                 binding_valid,
+                skip_authorized=step.get("state") == StepState.SKIPPED.value,
+                expected_result=step.get("expected_result"),
             )
             for step in steps
         )
@@ -1468,9 +1557,9 @@ def _durable_setup_outcome(
     for raw_target in raw_targets:
         target = str(raw_target)
         canary = next(
-            step for step in steps if step[0] == f"application.canary.{target}"
+            step for step in steps if step["id"] == f"application.canary.{target}"
         )
-        outcome = current.get(canary)
+        outcome = current.get((str(canary["id"]), str(canary["fingerprint"])))
         if outcome is None:
             target_readiness[target] = Readiness.PENDING.value
         elif outcome.state is StepState.SKIPPED:
@@ -1487,9 +1576,10 @@ def _durable_setup_outcome(
     else:
         verification = next(
             (
-                current[step]
+                current[(str(step["id"]), str(step["fingerprint"]))]
                 for step in steps
-                if step[0] == "verify.request" and step in current
+                if step["id"] == "verify.request"
+                and (str(step["id"]), str(step["fingerprint"])) in current
             ),
             None,
         )
@@ -1571,16 +1661,19 @@ def _durable_terminal_setup_evidence_valid(
     performance_profile: Mapping[str, object],
     expected_service: str | None,
     performance_binding_valid: bool,
+    *,
+    skip_authorized: bool,
+    expected_result: object,
 ) -> bool:
     if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
         return False
-    if not _durable_resumable_material_valid(step_id, evidence):
+    if not _durable_resumable_material_valid(step_id, evidence, expected_result):
         return False
     if step_id.startswith("application.canary."):
         if not performance_binding_valid:
             return False
         if evidence.state is StepState.SKIPPED:
-            return True
+            return skip_authorized
         target = step_id.removeprefix("application.canary.")
         return (
             _durable_canary_band(
@@ -1960,7 +2053,7 @@ def _terminal_setup_evidence_valid(
         return False
     if evidence.step_id.startswith("application.canary."):
         if evidence.state is StepState.SKIPPED:
-            return True
+            return _skipped_evidence_authorized(resolved, evidence)
         target = evidence.step_id.removeprefix("application.canary.")
         return (
             _evidenced_canary_band(resolved, target, evidence, performance_profile)
@@ -1975,6 +2068,17 @@ def _terminal_setup_evidence_valid(
     return True
 
 
+def _skipped_evidence_authorized(
+    resolved: ResolvedSetup, evidence: SetupEvidence
+) -> bool:
+    return any(
+        step.id == evidence.step_id
+        and step.fingerprint == evidence.fingerprint
+        and step.state is StepState.SKIPPED
+        for step in resolved.steps
+    )
+
+
 def _reusable_setup_evidence(
     resolved: ResolvedSetup,
     evidence: Sequence[SetupEvidence],
@@ -1985,7 +2089,7 @@ def _reusable_setup_evidence(
         for item in evidence
         if (
             item.state is not StepState.SKIPPED
-            or item.step_id.startswith("application.canary.")
+            or _skipped_evidence_authorized(resolved, item)
         )
         and (
             item.state is not StepState.COMPLETE

@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -204,7 +205,7 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
             self.assertNotIn("capture_output", command_kwargs)
             self.assertIs(command_kwargs["stderr"], subprocess.DEVNULL)
 
-    def test_hindsight_retries_when_the_selected_port_is_claimed_before_bind(
+    def test_hindsight_cleans_up_exited_server_before_retrying_selected_port(
         self,
     ) -> None:
         class Process:
@@ -220,6 +221,7 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
 
         processes = [Process(111_111_111, 1), Process(222_222_222, None)]
         spawned = []
+        terminated = []
 
         def spawn(command, **kwargs):
             spawned.append(list(command))
@@ -252,7 +254,12 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
                         {"text": "mastic gateway contract ok"},
                     ),
                 ) as command,
-                patch("os.killpg"),
+                patch(
+                    "os.killpg",
+                    side_effect=lambda pid, sent_signal: terminated.append(
+                        (pid, sent_signal)
+                    ),
+                ),
                 patch("uuid.uuid4", return_value=type("UUID", (), {"hex": "fixed"})()),
             ):
                 result = canary.run(
@@ -268,6 +275,10 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
         self.assertIn("41001", spawned[0])
         self.assertIn("41002", spawned[1])
         self.assertEqual(command.call_count, 3)
+        self.assertEqual(
+            terminated,
+            [(111_111_111, signal.SIGTERM), (222_222_222, signal.SIGTERM)],
+        )
         self.assertTrue(result["exact_contract"])
 
     def test_codex_rejects_an_oversized_result_file(self) -> None:

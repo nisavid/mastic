@@ -133,7 +133,7 @@ class NativeApplicationTargetCanary:
                 "-C",
                 str(work),
                 "This is a health check. Do not call tools or inspect files. "
-                "Respond with exactly: mastic gateway contract ok",
+                + "Respond with exactly: mastic gateway contract ok",
             ]
             try:
                 completed = self._run(
@@ -237,10 +237,10 @@ class NativeApplicationTargetCanary:
                 try:
                     self._await_hindsight(hindsight, environment, process, 90.0)
                 except ApplicationError:
-                    if process.poll() is None:
-                        self._stop_process(process)
+                    process_exited = process.poll() is not None
+                    self._stop_process(process)
+                    if not process_exited:
                         raise
-                    process.wait(timeout=5.0)
                     if attempt == 2:
                         raise
                     continue
@@ -326,6 +326,7 @@ class NativeApplicationTargetCanary:
                     "application_target_canary_failed",
                     "The disposable Hindsight server exited before becoming ready",
                 )
+            completed = None
             try:
                 completed = self._run(
                     [str(hindsight), "health", "-o", "json"],
@@ -335,10 +336,10 @@ class NativeApplicationTargetCanary:
                     timeout=min(5.0, max(0.1, deadline - self._monotonic())),
                     check=False,
                 )
-                if completed.returncode == 0:
-                    return
             except subprocess.TimeoutExpired:
-                pass
+                completed = None
+            if completed is not None and completed.returncode == 0:
+                return
             self._sleep(0.1)
         raise _canary_error(
             "application_target_canary_timeout",

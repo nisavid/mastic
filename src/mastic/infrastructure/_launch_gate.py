@@ -78,7 +78,7 @@ def _gate(descriptor: int) -> int:
     except (json.JSONDecodeError, RecursionError, TypeError, UnicodeError, ValueError):
         return _EXIT_DATA
     finally:
-        payload = b""
+        del payload
     try:
         os.close(descriptor)
     except OSError:
@@ -89,8 +89,10 @@ def _gate(descriptor: int) -> int:
         try:
             os.write(2, b"mastic launch gate could not exec the runtime\n")
         except OSError:
+            # The diagnostic is best-effort; preserve the cannot-exec exit status.
             pass
         return _EXIT_CANNOT_EXEC
+    return _EXIT_SOFTWARE
 
 
 def main(argv: Sequence[str] | None = None) -> int:
