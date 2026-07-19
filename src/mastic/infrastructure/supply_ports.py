@@ -10,13 +10,14 @@ import shutil
 import stat
 import tempfile
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 import tomlkit
 
 from mastic.application.config_schema import ConfiguredRuntime, MasticConfig
-from mastic.infrastructure.config_store import ConfigStore
+from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.model_intelligence import (
     ModelIntelligence,
     ModelIntelligenceReport,
@@ -537,6 +538,7 @@ class RuntimeSupplyPort:
         self._catalogue = catalogue or RuntimeCatalogue.load_builtin()
         self._resolver = resolver or RuntimeChangeResolver()
         self._filesystem = filesystem or LocalRuntimeFilesystem()
+        self._reconcile_runtime_transitions()
 
     def execute(
         self, operation: str, parameters: Mapping[str, object]
@@ -586,9 +588,13 @@ class RuntimeSupplyPort:
                     "publish desired state",
                 ),
             )
-            installation = self._manager.install_tested(
-                bundle.bundle_id, self._installation_root
+            install: Callable[[], RuntimeInstallation] = partial(
+                self._manager.install_tested,
+                bundle.bundle_id,
+                self._installation_root,
             )
+            requested_version = bundle.version
+            requested_bundle_id: str | None = bundle.bundle_id
             lock_sha256 = bundle.lock_sha256
         elif channel == "custom":
             if version is None:
@@ -604,17 +610,31 @@ class RuntimeSupplyPort:
                     "publish desired state",
                 ),
             )
-            installation = self._manager.install_custom(
+            install = partial(
+                self._manager.install_custom,
                 runtime,
                 version,
                 python=python,
                 installation_root=self._installation_root,
             )
+            requested_version = version
+            requested_bundle_id = None
             lock_sha256 = None
         else:
             raise SupplyPortError(f"unknown runtime installation channel: {channel}")
-        self.record_managed_installation(installation)
-        self.persist_runtime(self._config_store, installation)
+        with private_file_lock(self._installation_root / ".mastic-transition.lock"):
+            installation = (
+                self._resume_managed_installation(
+                    intended_id,
+                    runtime=runtime,
+                    version=requested_version,
+                    provenance=channel,
+                    bundle_id=requested_bundle_id,
+                )
+                or install()
+            )
+            self.record_managed_installation(installation)
+            self.persist_runtime(self._config_store, installation)
         result = _runtime_result(installation, preview)
         result["lock_sha256"] = lock_sha256
         return result
@@ -724,10 +744,34 @@ class RuntimeSupplyPort:
                 + ", ".join(preview.referenced_services)
             )
         _require_confirmed(parameters, "runtime removal")
-        if installation.provenance != "adopted":
-            self._validate_managed_installation(installation)
-            self._filesystem.remove(installation.root)
-        self._remove_runtime_record(resource)
+        with private_file_lock(self._installation_root / ".mastic-transition.lock"):
+            config = self._config_store.load().value
+            installation = _runtime_installation(config.runtimes, resource)
+            references = _runtime_references(config, resource)
+            if references:
+                raise SupplyPortError(
+                    f"runtime installation {resource!r} is referenced by "
+                    + ", ".join(references)
+                )
+            if installation.provenance == "adopted":
+                self._remove_runtime_record(resource)
+            else:
+                self._validate_managed_installation(installation)
+                tombstone = self._runtime_tombstone(resource)
+                if tombstone.exists():
+                    raise SupplyPortError(
+                        f"runtime removal transition already exists: {resource!r}"
+                    )
+                installation.root.replace(tombstone)
+                _fsync_directory(self._installation_root)
+                try:
+                    self._remove_runtime_record(resource)
+                except Exception:
+                    tombstone.replace(installation.root)
+                    _fsync_directory(self._installation_root)
+                    raise
+                self._filesystem.remove(tombstone)
+                _fsync_directory(self._installation_root)
         return {
             "installation_id": resource,
             "removed_environment": installation.provenance != "adopted",
@@ -756,12 +800,7 @@ class RuntimeSupplyPort:
         if candidates:
             _require_confirmed(parameters, "runtime pruning")
         for installation in candidates:
-            if installation.provenance != "adopted":
-                self._validate_managed_installation(installation)
-        for installation in candidates:
-            if installation.provenance != "adopted":
-                self._filesystem.remove(installation.root)
-            self._remove_runtime_record(installation.installation_id)
+            self._remove({"resource": installation.installation_id, "confirmed": True})
         return {
             "removed": [item.installation_id for item in candidates],
             "previews": [_plain_runtime_preview(item) for item in previews],
@@ -777,15 +816,13 @@ class RuntimeSupplyPort:
         )
         marker = root / ".mastic-runtime-owner.json"
         payload = json.dumps(
-            {
-                "installation_id": installation.installation_id,
-                "owner": "mastic",
-                "root": str(root),
-                "schema_version": 1,
-            },
+            _runtime_marker_payload(installation, root),
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
+        if marker.exists():
+            self._validate_managed_installation(installation)
+            return
         descriptor = os.open(
             marker,
             os.O_WRONLY
@@ -804,6 +841,7 @@ class RuntimeSupplyPort:
                 stream.write(payload)
                 stream.flush()
             os.fsync(descriptor)
+            _fsync_directory(root)
         except Exception:
             os.close(descriptor)
             marker.unlink(missing_ok=True)
@@ -812,12 +850,52 @@ class RuntimeSupplyPort:
             os.close(descriptor)
 
     def _validate_managed_installation(self, installation: RuntimeInstallation) -> None:
-        root = _validate_runtime_directory(
-            installation.root,
-            self._installation_root,
-            installation.installation_id,
+        observed = self._read_managed_installation(
+            installation.installation_id, root=installation.root
         )
-        marker = root / ".mastic-runtime-owner.json"
+        if observed != installation:
+            raise SupplyPortError(
+                "runtime ownership marker does not match the registry"
+            )
+
+    def _resume_managed_installation(
+        self,
+        installation_id: str,
+        *,
+        runtime: str,
+        version: str,
+        provenance: str,
+        bundle_id: str | None,
+    ) -> RuntimeInstallation | None:
+        root = self._installation_root / installation_id
+        if not root.exists():
+            return None
+        installation = self._read_managed_installation(installation_id)
+        if (
+            installation.runtime != runtime
+            or installation.version != version
+            or installation.provenance != provenance
+            or installation.bundle_id != bundle_id
+        ):
+            raise SupplyPortError(
+                f"existing runtime installation {installation_id!r} does not match the exact request"
+            )
+        return installation
+
+    def _read_managed_installation(
+        self, installation_id: str, *, root: Path | None = None
+    ) -> RuntimeInstallation:
+        root = _validate_runtime_directory(
+            root or self._installation_root / installation_id,
+            self._installation_root,
+            installation_id,
+        )
+        return self._read_runtime_marker(root, expected_root=root)
+
+    def _read_runtime_marker(
+        self, marker_root: Path, *, expected_root: Path
+    ) -> RuntimeInstallation:
+        marker = marker_root / ".mastic-runtime-owner.json"
         try:
             descriptor = os.open(
                 marker,
@@ -839,20 +917,58 @@ class RuntimeSupplyPort:
             os.close(descriptor)
         if len(raw) > 16 * 1024:
             raise SupplyPortError("runtime ownership marker exceeds the size limit")
-        expected = {
-            "installation_id": installation.installation_id,
-            "owner": "mastic",
-            "root": str(root),
-            "schema_version": 1,
-        }
         try:
             observed = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            installation = _runtime_installation_from_marker(observed, expected_root)
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as error:
             raise SupplyPortError("runtime ownership marker is invalid") from error
-        if observed != expected:
-            raise SupplyPortError(
-                "runtime ownership marker does not match the registry"
+        return installation
+
+    def _runtime_tombstone(self, installation_id: str) -> Path:
+        return self._installation_root / f".{installation_id}.removing"
+
+    def _reconcile_runtime_transitions(self) -> None:
+        config = self._config_store.load().value if self._config_store.exists else None
+        configured = config.runtimes if config is not None else {}
+        for candidate in self._installation_root.iterdir():
+            match = re.fullmatch(
+                r"\.([A-Za-z0-9][A-Za-z0-9._@+-]*)\.removing", candidate.name
             )
+            if match is None:
+                continue
+            installation_id = match.group(1)
+            metadata = candidate.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise SupplyPortError(
+                    f"runtime removal transition is unsafe: {candidate}"
+                )
+            destination = self._installation_root / installation_id
+            installation = self._read_runtime_marker(
+                candidate, expected_root=destination
+            )
+            if installation.installation_id != installation_id:
+                raise SupplyPortError(
+                    f"runtime removal transition identity is invalid: {candidate}"
+                )
+            if installation_id in configured:
+                if _runtime_installation(configured, installation_id) != installation:
+                    raise SupplyPortError(
+                        f"runtime removal transition does not match desired state: {candidate}"
+                    )
+                if destination.exists():
+                    raise SupplyPortError(
+                        f"runtime removal recovery conflicts with {destination}"
+                    )
+                candidate.replace(destination)
+                _fsync_directory(self._installation_root)
+            else:
+                self._filesystem.remove(candidate)
+                _fsync_directory(self._installation_root)
 
     def _tested_bundle(self, runtime: str, bundle_id: str | None):
         choices = tuple(
@@ -1860,6 +1976,17 @@ def _prepare_runtime_root(path: Path) -> Path:
     return expanded.resolve(strict=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _validate_runtime_directory(
     path: Path, installation_root: Path, installation_id: str
 ) -> Path:
@@ -1881,3 +2008,75 @@ def _validate_runtime_directory(
             "installation identity"
         )
     return resolved
+
+
+def _runtime_marker_payload(
+    installation: RuntimeInstallation, root: Path
+) -> dict[str, object]:
+    return {
+        "bundle_id": installation.bundle_id,
+        "capabilities": sorted(installation.capabilities),
+        "installation_id": installation.installation_id,
+        "launcher": list(installation.launcher),
+        "owner": "mastic",
+        "provenance": installation.provenance,
+        "root": str(root),
+        "runtime": installation.runtime,
+        "schema_version": 2,
+        "version": installation.version,
+    }
+
+
+def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInstallation:
+    if not isinstance(value, dict) or set(value) != {
+        "bundle_id",
+        "capabilities",
+        "installation_id",
+        "launcher",
+        "owner",
+        "provenance",
+        "root",
+        "runtime",
+        "schema_version",
+        "version",
+    }:
+        raise ValueError("runtime marker schema is invalid")
+    installation_id = value["installation_id"]
+    runtime = value["runtime"]
+    version = value["version"]
+    provenance = value["provenance"]
+    launcher = value["launcher"]
+    capabilities = value["capabilities"]
+    bundle_id = value["bundle_id"]
+    if (
+        value["owner"] != "mastic"
+        or value["schema_version"] != 2
+        or value["root"] != str(root)
+        or not isinstance(installation_id, str)
+        or installation_id != root.name
+        or not isinstance(runtime, str)
+        or not runtime
+        or not isinstance(version, str)
+        or not version
+        or provenance not in {"tested", "custom"}
+        or not isinstance(launcher, list)
+        or not launcher
+        or not all(isinstance(item, str) for item in launcher)
+        or not isinstance(capabilities, list)
+        or not all(isinstance(item, str) for item in capabilities)
+        or (bundle_id is not None and not isinstance(bundle_id, str))
+    ):
+        raise ValueError("runtime marker fields are invalid")
+    launcher_path = Path(launcher[0])
+    if not launcher_path.is_absolute() or root not in launcher_path.parents:
+        raise ValueError("runtime marker launcher is outside its installation")
+    return RuntimeInstallation(
+        installation_id=installation_id,
+        runtime=runtime,
+        version=version,
+        provenance=provenance,
+        root=root,
+        launcher=tuple(launcher),
+        capabilities=frozenset(capabilities),
+        bundle_id=bundle_id,
+    )

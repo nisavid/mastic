@@ -362,6 +362,31 @@ port = 8766
 
         self.assertIn(result["installation_id"], store.load().value.runtimes)
 
+    def test_runtime_install_resumes_after_config_publication_fails(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        with (
+            patch.object(
+                RuntimeSupplyPort,
+                "persist_runtime",
+                side_effect=OSError("config unavailable"),
+            ),
+            self.assertRaisesRegex(OSError, "config unavailable"),
+        ):
+            port.execute(
+                "runtime.install",
+                {"runtime": "optiq", "version": "0.3", "channel": "custom"},
+            )
+
+        result = port.execute(
+            "runtime.install",
+            {"runtime": "optiq", "version": "0.3", "channel": "custom"},
+        )
+
+        self.assertEqual(len(manager.calls), 1)
+        self.assertIn(result["installation_id"], self.store.load().value.runtimes)
+
     def test_runtime_update_is_side_by_side_and_switches_service_references(
         self,
     ) -> None:
@@ -525,8 +550,67 @@ mtp = true
         )
 
         self.assertTrue(result["preview"]["allowed"])
-        self.assertEqual(files.removed, [installation.root])
+        self.assertEqual(
+            files.removed,
+            [installation.root.parent / ".optiq-old.removing"],
+        )
         self.assertNotIn("optiq-old", self.store.load().value.runtimes)
+
+    def test_runtime_remove_restores_environment_when_config_update_fails(
+        self,
+    ) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        files = FakeRuntimeFiles()
+        installation = manager._installation("optiq-old", "optiq", "0.2", "tested")
+        RuntimeSupplyPort.persist_runtime(self.store, installation)
+        port = RuntimeSupplyPort(
+            manager, self.store, self.root / "runtimes", filesystem=files
+        )
+        self._mark_owned(port, installation)
+
+        with (
+            patch.object(
+                port,
+                "_remove_runtime_record",
+                side_effect=OSError("config unavailable"),
+            ),
+            self.assertRaisesRegex(OSError, "config unavailable"),
+        ):
+            port.execute("runtime.remove", {"resource": "optiq-old", "confirmed": True})
+
+        self.assertTrue(installation.root.is_dir())
+        self.assertFalse((installation.root.parent / ".optiq-old.removing").exists())
+        self.assertIn("optiq-old", self.store.load().value.runtimes)
+        self.assertEqual(files.removed, [])
+
+    def test_runtime_remove_recovers_each_interrupted_boundary(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        installation = manager._installation("optiq-old", "optiq", "0.2", "tested")
+        RuntimeSupplyPort.persist_runtime(self.store, installation)
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        self._mark_owned(port, installation)
+        tombstone = installation.root.parent / ".optiq-old.removing"
+
+        installation.root.replace(tombstone)
+        RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        self.assertTrue(installation.root.is_dir())
+        self.assertFalse(tombstone.exists())
+
+        installation.root.replace(tombstone)
+        port._remove_runtime_record("optiq-old")
+        RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        self.assertFalse(installation.root.exists())
+        self.assertFalse(tombstone.exists())
+
+    def test_runtime_remove_recovery_never_deletes_an_unowned_tombstone(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        tombstone = self.root / "runtimes" / ".unowned.removing"
+        tombstone.mkdir(parents=True)
+
+        with self.assertRaisesRegex(SupplyPortError, "ownership marker"):
+            RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        self.assertTrue(tombstone.is_dir())
 
     def test_runtime_remove_refuses_a_referenced_installation(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
@@ -636,7 +720,10 @@ route = "coding"
         result = port.execute("runtime.prune", {"confirmed": True})
 
         self.assertEqual(result["removed"], ["optiq-1"])
-        self.assertEqual(files.removed, [installations[0].root])
+        self.assertEqual(
+            files.removed,
+            [installations[0].root.parent / ".optiq-1.removing"],
+        )
         self.assertEqual(set(self.store.load().value.runtimes), {"optiq-2", "optiq-3"})
 
     def test_model_install_update_and_rollback_preserve_exact_installations(
