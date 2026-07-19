@@ -20,10 +20,13 @@ class _Dispatcher:
         self.previews = []
         self.error = None
         self.result_value = {"state": "complete"}
+        self.preview_gate = None
         self.execution_gate = None
 
     def preview(self, request):
         self.previews.append(request)
+        if self.preview_gate is not None:
+            self.preview_gate.wait(timeout=2)
         if self.error is not None:
             raise self.error
         value = {
@@ -115,6 +118,16 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(title, "Inference Services")
             self.assertIn(
                 "coding", str(self.app.query_one("#view-body", Static).content)
+            )
+
+            await pilot.click("#nav-application-targets")
+            self.assertEqual(
+                self.dispatcher.requests[-1].name,
+                "application-target.list",
+            )
+            self.assertEqual(
+                str(self.app.query_one("#view-title", Static).content),
+                "Application Configuration Targets",
             )
 
             await pilot.click("#nav-topology")
@@ -241,6 +254,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(gate.is_set())
                 gate.set()
                 await pilot.pause()
+                self.assertEqual(
+                    str(self.app.query_one("#view-title", Static).content),
+                    "Resource topology",
+                )
         finally:
             gate.set()
 
@@ -296,6 +313,31 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                 "sha256:exact",
             )
 
+    async def test_navigation_discards_a_stale_mutation_preview(self) -> None:
+        gate = Event()
+        self.dispatcher.preview_gate = gate
+        async with self.app.run_test(size=(120, 45)) as pilot:
+            await self.app.open_operation("service.remove")
+            self.app.query_one("#parameter-resource", Input).value = "coding"
+            self.app.query_one("#operation-submit", Button).press()
+            while not self.dispatcher.previews:
+                await pilot.pause()
+
+            self.app.show_view("services")
+            gate.set()
+            await pilot.pause()
+
+            self.assertEqual(self.app.current_view, "services")
+            self.assertIsNone(self.app.pending_parameters)
+            self.assertEqual(
+                self.app.query_one("#operation-confirm", Button).styles.display,
+                "none",
+            )
+            self.assertIn(
+                "Inference Services",
+                str(self.app.query_one("#view-title", Static).content),
+            )
+
     async def test_every_catalogue_operation_can_be_executed_from_tui(self) -> None:
         async with self.app.run_test(size=(140, 55)) as pilot:
             for name, operation in self.catalogue.items():
@@ -348,6 +390,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
                     "inspect the runtime probe",
                     "install the tested runtime",
                 ),
+                details={"completion": "partial", "readiness": "pending"},
             )
             await self.app.open_operation("runtime.inspect")
             self.app.query_one("#parameter-resource", Input).value = "optiq@0.2.15"
@@ -356,6 +399,10 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             failure = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("runtime_probe_failed", failure)
             self.assertIn("required capability", failure)
+            self.assertIn("Completion", failure)
+            self.assertIn("partial", failure)
+            self.assertIn("Readiness", failure)
+            self.assertIn("pending", failure)
             self.assertIn("inspect the runtime probe", failure)
             self.assertIn("install the tested runtime", failure)
 

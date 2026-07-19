@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import Protocol
 
 from mastic.infrastructure.gateway import (
+    GatewayAdmission,
     GatewayRequestProfile,
     GatewayRoute,
     create_gateway,
@@ -114,8 +115,11 @@ class GatewayRuntime:
         if thread.is_alive():
             raise RuntimeError("Gateway did not stop before the shutdown deadline")
         with self._lock:
-            self._server = None
-            self._thread = None
+            # A new generation may have started after this thread exited but
+            # before this stopper reacquired the lifecycle lock.
+            if self._server is server and self._thread is thread:
+                self._server = None
+                self._thread = None
 
     def set_route(self, service: str, state: str, endpoint: str | None) -> None:
         if state not in {"ready", "stopped", "unavailable"}:
@@ -165,23 +169,57 @@ class GatewayRuntime:
             self._shedding = enabled
 
     def begin(self, service: str) -> bool:
+        """Reserve capacity without a route snapshot for internal lifecycle tests."""
+
         with self._condition:
             active = self._active.get(service, 0)
             if self._shedding or active >= self._max_in_flight_per_service:
-                self._record_activity(service, "rejected", active)
-                return False
-            self._active[service] = self._active.get(service, 0) + 1
-            self._last_used[service] = self._clock_ns()
-            self._record_activity(service, "accepted", self._active[service])
-            return True
+                admitted = False
+                recorded_active = active
+            else:
+                self._active[service] = active + 1
+                recorded_active = self._active[service]
+                admitted = True
+                self._last_used[service] = self._clock_ns()
+        self._record_activity(
+            service, "accepted" if admitted else "rejected", recorded_active
+        )
+        return admitted
+
+    def admit(self, route: GatewayRoute) -> GatewayAdmission:
+        """Atomically revalidate one resolved route and reserve its capacity."""
+
+        service = route.service
+        with self._condition:
+            current = self._routes.get(service)
+            effective = self._effective(current) if current is not None else None
+            if effective != route or route.state != "ready" or route.endpoint is None:
+                admission = GatewayAdmission.UNAVAILABLE
+                active = self._active.get(service, 0)
+            else:
+                active = self._active.get(service, 0)
+                if active >= self._max_in_flight_per_service:
+                    admission = GatewayAdmission.BUSY
+                else:
+                    active += 1
+                    self._active[service] = active
+                    self._last_used[service] = self._clock_ns()
+                    admission = GatewayAdmission.ACCEPTED
+        self._record_activity(
+            service,
+            "accepted" if admission is GatewayAdmission.ACCEPTED else "rejected",
+            active,
+        )
+        return admission
 
     def end(self, service: str) -> None:
         with self._condition:
             current = self._active.get(service, 0)
             self._active[service] = max(0, current - 1)
             self._last_used[service] = self._clock_ns()
-            self._record_activity(service, "complete", self._active[service])
+            active = self._active[service]
             self._condition.notify_all()
+        self._record_activity(service, "complete", active)
 
     def is_busy(self, service: str) -> bool:
         with self._lock:
@@ -215,8 +253,15 @@ class GatewayRuntime:
             "active_requests": active,
             "observed_at_ns": observed_at_ns,
         }
-        self._metric_sink({"kind": "gateway_activity", "scope": "gateway", **common})
-        self._metric_sink({"kind": "service_request", "scope": "service", **common})
+        for metric in (
+            {"kind": "gateway_activity", "scope": "gateway", **common},
+            {"kind": "service_request", "scope": "service", **common},
+        ):
+            try:
+                self._metric_sink(metric)
+            except Exception:
+                # Telemetry cannot change admission, capacity, or completion state.
+                continue
 
 
 def _uvicorn_server(app: object, host: str, port: int) -> GatewayServer:

@@ -215,9 +215,15 @@ class DaemonOperationRouter:
 
     def stop(self) -> Mapping[str, object]:
         self._prepare_stop()
-        value = self._supervisor.execute("supervisor.stop", {})
-        self._record_lifecycle(value)
-        return value
+        try:
+            value = self._supervisor.execute("supervisor.stop", {})
+            self._record_lifecycle(value)
+            return value
+        except BaseException:
+            with self._condition:
+                self._stopping = False
+                self._condition.notify_all()
+            raise
 
     def maintain(self) -> Mapping[str, object]:
         with self._condition:

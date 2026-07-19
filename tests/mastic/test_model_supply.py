@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from hashlib import sha1, sha256
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -91,7 +92,12 @@ class FakeHub:
         return self.snapshot
 
     def verify_revision(
-        self, repo_id: str, revision: str, snapshot_path: Path
+        self,
+        repo_id: str,
+        revision: str,
+        snapshot_path: Path,
+        *,
+        local_files_only: bool = False,
     ) -> VerificationResult:
         return self.verification
 
@@ -131,6 +137,31 @@ class ModelDiscoveryTests(unittest.TestCase):
             self.assertEqual(local[0].source, "cache")
             self.assertEqual(local[0].reported_sha, "abc123")
             self.assertEqual(local[0].evidence, "local-observed")
+
+    def test_local_search_honors_the_requested_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hub = FakeHub(root)
+            hub.inventory = CacheInventory(
+                tuple(
+                    CachedRevision(
+                        revision_id=f"owner/model-{index}@{index}",
+                        repo_id=f"owner/model-{index}",
+                        commit_sha=str(index),
+                        snapshot_path=root / str(index),
+                        size_on_disk=index,
+                        evidence="local-observed",
+                        complete=True,
+                    )
+                    for index in range(3)
+                ),
+                "local-observed",
+                (),
+            )
+
+            candidates = ModelSupply(hub).search("model", mode="local", limit=2)
+
+            self.assertEqual(len(candidates), 2)
 
 
 class ModelInstallTests(unittest.TestCase):
@@ -251,6 +282,58 @@ class ModelCacheTests(unittest.TestCase):
 
 
 class HuggingFaceHubClientTests(unittest.TestCase):
+    def test_verify_revision_checks_every_exact_hub_manifest_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / ("b" * 40)
+            snapshot.mkdir()
+            config = b'{"model_type":"qwen"}'
+            weights = b"exact weights"
+            (snapshot / "config.json").write_bytes(config)
+            (snapshot / "weights.bin").write_bytes(weights)
+            config_blob = sha1(
+                f"blob {len(config)}\0".encode() + config,
+                usedforsecurity=False,
+            ).hexdigest()
+
+            class FakeApi:
+                def model_info(self, repo_id, **kwargs):
+                    self.call = (repo_id, kwargs)
+                    return SimpleNamespace(
+                        sha="b" * 40,
+                        siblings=(
+                            SimpleNamespace(
+                                rfilename="config.json",
+                                size=len(config),
+                                blob_id=config_blob,
+                                lfs=None,
+                            ),
+                            SimpleNamespace(
+                                rfilename="weights.bin",
+                                size=len(weights),
+                                blob_id=None,
+                                lfs={"sha256": sha256(weights).hexdigest()},
+                            ),
+                        ),
+                    )
+
+            module = ModuleType("huggingface_hub")
+            module.HfApi = FakeApi
+            module.snapshot_download = lambda **_kwargs: str(snapshot)
+            with patch.dict("sys.modules", {"huggingface_hub": module}):
+                client = HuggingFaceHubClient()
+                verified = client.verify_revision(
+                    "mlx-community/Qwen", "b" * 40, snapshot
+                )
+                (snapshot / "weights.bin").write_bytes(b"other weights")
+                tampered = client.verify_revision(
+                    "mlx-community/Qwen", "b" * 40, snapshot
+                )
+
+            self.assertEqual(verified.status, "verified")
+            self.assertEqual(verified.evidence, "hub-exact-manifest")
+            self.assertEqual(tampered.status, "incomplete")
+            self.assertIn("digest-mismatch:weights.bin", tampered.issues)
+
     def test_missing_cache_is_an_empty_observed_inventory(self) -> None:
         with patch(
             "huggingface_hub.scan_cache_dir",

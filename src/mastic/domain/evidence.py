@@ -12,6 +12,7 @@ class EvidenceState(StrEnum):
     UNKNOWN = "unknown"
     REPORTED = "reported"
     DECLARED = "declared"
+    OBSERVED = "observed"
     DERIVED = "derived"
     VALIDATED = "validated"
     CONFLICTING = "conflicting"
@@ -50,9 +51,10 @@ class CompatibilityAssessment:
             EvidenceState.UNKNOWN: 0,
             EvidenceState.REPORTED: 1,
             EvidenceState.DECLARED: 2,
-            EvidenceState.DERIVED: 3,
-            EvidenceState.VALIDATED: 4,
-            EvidenceState.CONFLICTING: 5,
+            EvidenceState.OBSERVED: 3,
+            EvidenceState.DERIVED: 4,
+            EvidenceState.VALIDATED: 5,
+            EvidenceState.CONFLICTING: 6,
         }
         return max((item.state for item in self.evidence), key=order.__getitem__)
 

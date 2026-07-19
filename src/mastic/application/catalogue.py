@@ -349,8 +349,13 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 accepted=("recommended", "exact"),
             ),
             _option(
+                "intent",
+                "Setup intent: balanced is the default, deep prioritizes context depth, and responsive prioritizes interactive concurrency.",
+                accepted=("balanced", "deep", "responsive"),
+            ),
+            _option(
                 "capacity",
-                "Capacity profile: balanced allows 6 simultaneous inference requests at 128K; long-context allows 4 at 192K; native-context allows 3 at 256K. OptiQ 0.3.3 retains one simultaneous prefill at 4-7 requests; 8 permits two and is riskier on 48 GiB Macs.",
+                "Advanced capacity override retained for compatibility: balanced allows 6 simultaneous inference requests at 128K; long-context allows 4 at 192K; native-context allows 3 at 256K. OptiQ 0.3.3 retains one simultaneous prefill at 4-7 requests; 8 permits two and is riskier on 48 GiB Macs.",
                 accepted=("balanced", "long-context", "native-context"),
             ),
             _option(
@@ -407,6 +412,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             _option(
                 "application_target_options",
                 "JSON object of per-target settings; Hindsight requires a profile.",
+                value_type="json",
+            ),
+            _option(
+                "skip_canaries",
+                "JSON array of selected Application Configuration Targets whose required canaries should be skipped; each skipped target remains Unverified.",
                 value_type="json",
             ),
             _option(
@@ -654,7 +664,6 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             _option(
                 "service",
                 "Inference Service route the application target should use.",
-                required=True,
             ),
             _option("profile", "Hindsight profile name when configuring Hindsight."),
             _option(
@@ -677,6 +686,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 "takeover",
                 "Explicitly adopt already-equal application-target fields into MASTIC ownership.",
                 value_type="boolean",
+            ),
+            _option(
+                "drift_resolution",
+                "Explicit recovery for externally changed managed state.",
+                accepted=("reapply", "adopt", "relinquish"),
             ),
         )
     if name == "application-target.test":

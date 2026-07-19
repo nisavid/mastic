@@ -11,6 +11,7 @@ import stat
 import struct
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,9 +144,15 @@ class UnixControlServer:
         expected_uid: int | None = None,
         peer_uid_resolver: Callable[[socket.socket], int | None] = resolve_peer_uid,
         connection_drain_timeout: float = 10.0,
+        connection_idle_timeout: float = 30.0,
+        max_connections: int = 64,
     ) -> None:
         if connection_drain_timeout <= 0:
             raise ValueError("connection drain timeout must be positive")
+        if connection_idle_timeout <= 0:
+            raise ValueError("connection idle timeout must be positive")
+        if type(max_connections) is not int or max_connections <= 0:
+            raise ValueError("maximum control connections must be a positive integer")
         self.socket_path = Path(socket_path)
         self._handler = handler
         self._cancel_handler = cancel_handler
@@ -154,6 +161,8 @@ class UnixControlServer:
         self._expected_uid = os.getuid() if expected_uid is None else expected_uid
         self._peer_uid_resolver = peer_uid_resolver
         self._connection_drain_timeout = connection_drain_timeout
+        self._connection_idle_timeout = connection_idle_timeout
+        self._max_connections = max_connections
         self._server: asyncio.AbstractServer | None = None
         self._bound_socket_identity: tuple[int, int] | None = None
         self._connections: set[asyncio.Task[None]] = set()
@@ -251,6 +260,19 @@ class UnixControlServer:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         connection = asyncio.current_task()
+        if len(self._connections) >= self._max_connections:
+            await write_message(
+                writer,
+                self._error(
+                    "connection_limit",
+                    "The control server has reached its connection limit.",
+                ),
+                max_frame_bytes=self._max_frame_bytes,
+            )
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+            return
         if connection is not None:
             self._connections.add(connection)
         send_lock = asyncio.Lock()
@@ -283,10 +305,10 @@ class UnixControlServer:
                 return
             while True:
                 try:
-                    message = await read_message(
-                        reader, max_frame_bytes=self._max_frame_bytes
-                    )
+                    message = await self._read_message(reader)
                 except ControlProtocolError as error:
+                    if error.code == "connection_timeout" and tasks:
+                        continue
                     if error.code != "connection_closed":
                         await send(self._error(error.code, error.message))
                     break
@@ -312,15 +334,17 @@ class UnixControlServer:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
             if connection is not None:
                 self._connections.discard(connection)
 
     async def _negotiate(self, reader: asyncio.StreamReader, send) -> bool:
         try:
-            message = await read_message(reader, max_frame_bytes=self._max_frame_bytes)
+            message = await self._read_message(reader)
         except ControlProtocolError as error:
-            await send(self._error(error.code, error.message))
+            if error.code != "connection_closed":
+                await send(self._error(error.code, error.message))
             return False
         request_id = _string(message.get("request_id"))
         if (
@@ -368,6 +392,17 @@ class UnixControlServer:
             }
         )
         return True
+
+    async def _read_message(self, reader: asyncio.StreamReader) -> JsonObject:
+        try:
+            return await asyncio.wait_for(
+                read_message(reader, max_frame_bytes=self._max_frame_bytes),
+                timeout=self._connection_idle_timeout,
+            )
+        except TimeoutError as error:
+            raise ControlProtocolError(
+                "connection_timeout", "The control connection was idle for too long."
+            ) from error
 
     def _parse_request(self, message: JsonObject) -> tuple[str, ControlRequest]:
         if (

@@ -662,20 +662,9 @@ class RuntimeSupplyPort:
 
     def _rollback(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         resource = _resource(parameters)
-        target_name = _optional(parameters, "target")
+        target_name = _required(parameters, "target")
         config = self._config_store.load().value
         current = _runtime_installation(config.runtimes, resource)
-        if target_name is None:
-            candidates = sorted(
-                name
-                for name, item in config.runtimes.items()
-                if name != resource and item.definition == current.runtime
-            )
-            if not candidates:
-                raise SupplyPortError(
-                    f"no retained rollback installation for {resource!r}"
-                )
-            target_name = candidates[-1]
         target = _runtime_installation(config.runtimes, target_name)
         references = _runtime_references(config, resource)
         preview = self._resolver.preview_rollback(
@@ -955,11 +944,21 @@ class ModelSupplyPort:
         runtimes = _model_runtime_observations(config, alias)
         assessment = self._security.inspect(repository, revision, runtimes=runtimes)
         verification = verify_adopted_snapshot(observation.path, assessment)
-        security = self._security.record_verification(assessment, verification)
+        security = self._security.record_verification(
+            {**assessment, "adopted_snapshot": asdict(observation)}, verification
+        )
         self._security.require_compatible(
             security, tuple(item.installation_id for item in runtimes)
         )
         installation_name = f"{alias}-{revision[:12]}"
+        _require_available_model_installation(
+            config,
+            installation_name,
+            repository,
+            revision,
+            provenance="adopted",
+            path=observation.path,
+        )
         self._persist_adopted_model(
             installation_name,
             alias,
@@ -1009,6 +1008,13 @@ class ModelSupplyPort:
         installation_name = str(
             parameters.get("installation")
             or f"{alias}-{result.revision.commit_sha[:12]}"
+        )
+        _require_available_model_installation(
+            config,
+            installation_name,
+            repository,
+            result.revision.commit_sha,
+            provenance="cached",
         )
         self._persist_model(result, installation_name, alias)
         payload = _model_result(result, installation_name)
@@ -1060,6 +1066,13 @@ class ModelSupplyPort:
         target_name = str(
             parameters.get("installation")
             or f"{alias}-{result.revision.commit_sha[:12]}"
+        )
+        _require_available_model_installation(
+            config,
+            target_name,
+            current.revision.repository,
+            result.revision.commit_sha,
+            provenance="cached",
         )
         self._persist_model(result, target_name, alias)
         payload = _model_result(result, target_name)
@@ -1159,6 +1172,16 @@ class ModelSupplyPort:
         cleanup = bool(parameters.get("cleanup_source", False))
         if cleanup:
             _require_confirmed(parameters, "cache source cleanup")
+            referenced_by = tuple(
+                installation.installation_id
+                for installation in self._supplied_installations()
+                if installation.revision.commit_sha == revision.commit_sha
+            )
+            if referenced_by:
+                raise SupplyPortError(
+                    "Cached Revision source is referenced by Model Installations: "
+                    + ", ".join(referenced_by)
+                )
         preview = replace(preview, cleanup_source=cleanup)
         published = self._cache_mover.execute(preview)
         return {
@@ -1251,6 +1274,19 @@ class ModelSupplyPort:
             assessment = self._security.require(
                 installation.revision.repo_id, installation.revision.commit_sha
             )
+            expected = assessment.get("adopted_snapshot")
+            if not isinstance(expected, Mapping):
+                raise SupplyPortError(
+                    "adopted snapshot identity evidence is absent; adopt it again"
+                )
+            observed = self.inspect_adoption(str(installation.snapshot_path))
+            if (
+                expected.get("path") != observed.path
+                or expected.get("fingerprint") != observed.fingerprint
+            ):
+                raise SupplyPortError(
+                    "adopted snapshot identity changed after adoption; review it again"
+                )
             return verify_adopted_snapshot(installation.snapshot_path, assessment)
         return self._supply.verify(installation)
 
@@ -1379,6 +1415,33 @@ def _resolve_model(config: MasticConfig, resource: str) -> tuple[str, str]:
         if alias.installation_name == resource
     )
     return resource, aliases[0] if aliases else resource
+
+
+def _require_available_model_installation(
+    config: MasticConfig,
+    installation_name: str,
+    repository: str,
+    revision: str,
+    *,
+    provenance: str,
+    path: str | None = None,
+) -> None:
+    existing = config.models.get(installation_name)
+    if existing is None:
+        return
+    same_path = existing.path == path
+    if path is not None and existing.path is not None:
+        same_path = Path(existing.path).resolve() == Path(path).resolve()
+    if (
+        existing.revision.repository != repository
+        or existing.revision.revision.casefold() != revision.casefold()
+        or existing.provenance != provenance
+        or not same_path
+    ):
+        raise SupplyPortError(
+            f"model installation name collision: {installation_name!r} already "
+            "identifies different immutable model bytes"
+        )
 
 
 def _model_runtime_observations(

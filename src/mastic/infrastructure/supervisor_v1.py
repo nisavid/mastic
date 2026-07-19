@@ -7,6 +7,8 @@ It owns orchestration and policy; adapters own operating-system details.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -535,7 +537,7 @@ class Supervisor:
         self.drain_service(name)
         stopped = self.stop_service(name)
         with self._lock:
-            self._gateway.remove_route(name)
+            self._gateway.remove_route(self._gateway_route(service))
             self._runs.pop(name, None)
         return stopped
 
@@ -791,12 +793,14 @@ class Supervisor:
             birth_token = snapshot.get("process_identity")
             port = snapshot.get("upstream_port")
             run_id = snapshot.get("run_id")
+            persisted_launch_identity = snapshot.get("launch_identity")
             if not (
                 isinstance(service_name, str)
                 and isinstance(pid, int)
                 and isinstance(birth_token, str)
                 and isinstance(port, int)
                 and isinstance(run_id, str)
+                and isinstance(persisted_launch_identity, str)
             ):
                 continue
             service = self._desired_state.service(service_name)
@@ -810,10 +814,34 @@ class Supervisor:
                 or not self._probe.identity_matches(identity)
             ):
                 continue
+            recovered = _Run(
+                ServiceRunStatus(
+                    service_name,
+                    run_id,
+                    ServiceRunState.STARTING,
+                    port,
+                    pid,
+                ),
+                service,
+                process,
+                identity,
+            )
+            try:
+                launch = self._runtime_supply.prepare_launch(service, "127.0.0.1", port)
+                launch_matches = _launch_identity(launch) == persisted_launch_identity
+                ready = launch_matches and self._probe.is_ready(
+                    f"http://127.0.0.1:{port}", self._readiness_poll_interval
+                )
+            except Exception:
+                launch = None
+                ready = False
+            if not ready:
+                self._terminate_locked(recovered)
+                continue
             status = ServiceRunStatus(
                 service_name, run_id, ServiceRunState.READY, port, pid
             )
-            self._runs[service_name] = _Run(status, service, process, identity)
+            self._runs[service_name] = _Run(status, service, process, identity, launch)
             self._gateway.set_route(
                 self._gateway_route(service),
                 "ready",
@@ -864,12 +892,17 @@ class Supervisor:
         try:
             process.wait(self._terminate_timeout)
         except (TimeoutError, OSError):
-            if self._probe.identity_matches(identity):
-                process.kill()
-                try:
-                    process.wait(self._kill_timeout)
-                except (TimeoutError, OSError):
-                    pass
+            if not self._probe.identity_matches(identity):
+                run.process = None
+                run.identity = None
+                return
+            process.kill()
+            try:
+                process.wait(self._kill_timeout)
+            except (TimeoutError, OSError) as error:
+                raise RuntimeError(
+                    f"Inference Service {run.status.service!r} process could not be confirmed stopped"
+                ) from error
         run.process = None
         run.identity = None
 
@@ -929,6 +962,8 @@ class Supervisor:
             snapshot["upstream_port"] = run.status.upstream_port
         if run.identity is not None:
             snapshot["process_identity"] = run.identity.birth_token
+        if run.launch is not None:
+            snapshot["launch_identity"] = _launch_identity(run.launch)
         if run.status.error is not None:
             snapshot["error"] = run.status.error
         self._state_store.put_snapshot(snapshot)
@@ -995,3 +1030,17 @@ class Supervisor:
     def _new_identity_locked(self, prefix: str) -> str:
         self._sequence += 1
         return f"{prefix}-{self._clock.time_ns()}-{self._sequence}"
+
+
+def _launch_identity(launch: PreparedLaunch) -> str:
+    payload = json.dumps(
+        {
+            "argv": launch.argv,
+            "environment": dict(sorted(launch.environment.items())),
+            "required_capabilities": sorted(launch.required_capabilities),
+            "observed_capabilities": sorted(launch.observed_capabilities),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()

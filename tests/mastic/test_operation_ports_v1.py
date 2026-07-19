@@ -16,6 +16,7 @@ from mastic.infrastructure.operation_ports import (
 )
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
+    ApplicationTargetIntegrationConflict,
     ApplicationTargetOwnershipRecoveryRequired,
     ApplicationTargetRemovalResult,
     HindsightTargetOptions,
@@ -73,6 +74,8 @@ class FakeApplicationTargetAdapter:
     def __init__(self) -> None:
         self.calls = []
         self.rollback_error = None
+        self.inspection = {"state": "healthy", "next_actions": []}
+        self.observed_parameters = {}
 
     def preview(self, configuration):
         self.calls.append(("preview", configuration.service_name))
@@ -106,7 +109,19 @@ class FakeApplicationTargetAdapter:
 
     def inspect(self):
         self.calls.append(("inspect",))
-        return {"state": "healthy", "next_actions": []}
+        return self.inspection
+
+    def observe_drift(self, configuration):
+        self.calls.append(("observe_drift", configuration.service_name))
+        return self.observed_parameters
+
+    def adopt_drift(self, configuration):
+        self.calls.append(("adopt_drift", configuration.service_name))
+        return {"changed": True}
+
+    def relinquish(self):
+        self.calls.append(("relinquish",))
+        return {"changed": True}
 
     def stop_service(self, resource):
         self.calls.append(("stop_service", resource))
@@ -135,10 +150,19 @@ class ApplicationTargetOperationPort(ProductionApplicationTargetOperationPort):
         record=lambda _name, _value: None,
         transition=_unlocked_transition,
     ) -> None:
+        class RequestCanary:
+            def run(self, target, target_configuration, settings, *, profile):
+                return request(
+                    target,
+                    target_configuration.gateway_endpoint,
+                    target_configuration.service_name,
+                    target_configuration.sampling_profiles[profile].values(),
+                )
+
         super().__init__(
             adapter,
             configuration,
-            request=request,
+            canary=RequestCanary(),
             settings=settings,
             record=record,
             transition=transition,
@@ -159,6 +183,186 @@ def _target_settings(service: str) -> ApplicationTargetSettings:
 
 
 class OperationPortTests(unittest.TestCase):
+    def test_configure_fails_closed_on_drift_with_explicit_choices(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.inspection = {"state": "drifted", "detail": "changed"}
+        stored = _target_settings("coding")
+        records = []
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                settings.service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=settings.service,
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda _name: stored,
+            record=lambda name, value: records.append((name, value)),
+        )
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "application-target.configure",
+                {"application_target": "codex", "service": "replacement"},
+            )
+
+        self.assertEqual(raised.exception.code, "application_target_drifted")
+        self.assertEqual(
+            raised.exception.next_actions,
+            (
+                "mastic application-target configure codex --drift-resolution reapply",
+                "mastic application-target configure codex --drift-resolution adopt",
+                "mastic application-target configure codex --drift-resolution relinquish",
+            ),
+        )
+        self.assertEqual(adapter.calls, [("inspect",)])
+        self.assertEqual(records, [])
+
+    def test_drift_reapply_restores_existing_mastic_desired_state(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.inspection = {"state": "drifted"}
+        stored = _target_settings("coding")
+        records = []
+
+        def configuration(name, parameters, settings):
+            service = str(parameters.get("service") or settings.service)
+            return ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=service,
+            )
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            configuration,
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda _name: stored,
+            record=lambda name, value: records.append((name, value)),
+        )
+
+        result = port.execute(
+            "application-target.configure",
+            {
+                "application_target": "codex",
+                "service": "replacement",
+                "drift_resolution": "reapply",
+            },
+        )
+
+        self.assertEqual(result["drift_resolution"], "reapply")
+        self.assertTrue(result["external_configuration_changed"])
+        self.assertIn(("apply", "coding", False), adapter.calls)
+        self.assertNotIn(("apply", "replacement", False), adapter.calls)
+        self.assertEqual(records, [])
+
+    def test_drift_adopt_revalidates_observation_and_updates_desired_state(
+        self,
+    ) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.inspection = {"state": "drifted"}
+        adapter.observed_parameters = {"service": "replacement"}
+        stored = _target_settings("coding")
+        records = []
+
+        def configuration(name, parameters, settings):
+            service = str(parameters.get("service") or settings.service)
+            if service not in {"coding", "replacement"}:
+                raise ValueError("unknown service")
+            return ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=service,
+            )
+
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            configuration,
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda _name: stored,
+            record=lambda name, value: records.append((name, value)),
+        )
+
+        result = port.execute(
+            "application-target.configure",
+            {
+                "application_target": "codex",
+                "drift_resolution": "adopt",
+            },
+        )
+
+        self.assertEqual(result["drift_resolution"], "adopt")
+        self.assertFalse(result["external_configuration_changed"])
+        self.assertTrue(result["desired_state_changed"])
+        self.assertIn(("adopt_drift", "replacement"), adapter.calls)
+        self.assertFalse(any(call[0] == "apply" for call in adapter.calls))
+        self.assertEqual(records[-1][1].service, "replacement")
+
+    def test_drift_relinquish_removes_evidence_without_external_mutation(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.inspection = {"state": "drifted"}
+        stored = _target_settings("coding")
+        records = []
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                settings.service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=settings.service,
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda _name: stored,
+            record=lambda name, value: records.append((name, value)),
+        )
+
+        result = port.execute(
+            "application-target.configure",
+            {
+                "application_target": "codex",
+                "drift_resolution": "relinquish",
+            },
+        )
+
+        self.assertEqual(result["drift_resolution"], "relinquish")
+        self.assertFalse(result["external_configuration_changed"])
+        self.assertIn(("relinquish",), adapter.calls)
+        self.assertFalse(any(call[0] == "apply" for call in adapter.calls))
+        self.assertEqual(records, [("codex", None)])
+
+    def test_drift_adoption_failure_is_typed_and_redacted(self) -> None:
+        adapter = FakeApplicationTargetAdapter()
+        adapter.inspection = {"state": "drifted"}
+        adapter.adopt_drift = lambda configuration: (_ for _ in ()).throw(
+            ApplicationTargetIntegrationConflict("external-secret")
+        )
+        stored = _target_settings("coding")
+        port = ApplicationTargetOperationPort(
+            lambda operation, name, parameters, settings: adapter,
+            lambda name, parameters, settings: ApplicationTargetConfiguration(
+                "http://127.0.0.1:8766/v1",
+                settings.service,
+                sampling_profiles={"coding": SamplingProfile(temperature=0.0)},
+                service_identity=settings.service,
+            ),
+            request=lambda target, endpoint, model, sampling: {},
+            settings=lambda _name: stored,
+        )
+
+        with self.assertRaises(ApplicationError) as blocked:
+            port.execute(
+                "application-target.configure",
+                {
+                    "application_target": "codex",
+                    "drift_resolution": "adopt",
+                },
+            )
+
+        self.assertEqual(blocked.exception.code, "application_target_adoption_blocked")
+        self.assertNotIn("external-secret", repr(blocked.exception))
+
     def test_remote_port_preserves_progress_and_cancel_identity(self) -> None:
         client = FakeControlClient()
         port = RemoteOperationPort(client)
@@ -270,7 +474,7 @@ class OperationPortTests(unittest.TestCase):
                 "preview",
                 "rollback_point",
                 "apply",
-                "test",
+                "inspect",
                 "rollback_point",
                 "remove",
             ],
@@ -676,6 +880,7 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(
             adapter.calls,
             [
+                ("inspect",),
                 ("preview", "new-coding"),
                 ("rollback_point",),
                 ("apply", "new-coding", False),

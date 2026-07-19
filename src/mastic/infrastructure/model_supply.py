@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Protocol
 
@@ -152,7 +153,12 @@ class ModelHub(Protocol):
     ) -> Path: ...
 
     def verify_revision(
-        self, repo_id: str, revision: str, snapshot_path: Path
+        self,
+        repo_id: str,
+        revision: str,
+        snapshot_path: Path,
+        *,
+        local_files_only: bool = False,
     ) -> VerificationResult: ...
 
     def cache_inventory(self) -> CacheInventory: ...
@@ -193,7 +199,7 @@ class ModelSupply:
     ) -> tuple[CatalogCandidate, ...]:
         if mode == "local":
             needle = query.casefold()
-            return tuple(
+            candidates = tuple(
                 CatalogCandidate(
                     repo_id=revision.repo_id,
                     source="cache",
@@ -203,6 +209,7 @@ class ModelSupply:
                 for revision in self._hub.cache_inventory().revisions
                 if needle in revision.repo_id.casefold()
             )
+            return candidates[:limit]
         if mode not in {"curated", "broad"}:
             raise ModelSupplyError(f"unknown model search mode: {mode}")
         author = "mlx-community" if mode == "curated" else None
@@ -263,7 +270,12 @@ class ModelSupply:
             .resolve()
         )
         evidence = "offline-cached" if offline else "downloaded-exact"
-        verification = self._hub.verify_revision(repo_id, resolved.commit_sha, snapshot)
+        verification = self._hub.verify_revision(
+            repo_id,
+            resolved.commit_sha,
+            snapshot,
+            local_files_only=offline,
+        )
         if verification.status not in {"complete", "verified"}:
             details = "; ".join(verification.issues) or verification.status
             raise ModelSupplyError(
@@ -426,7 +438,12 @@ class HuggingFaceHubClient:
         )
 
     def verify_revision(
-        self, repo_id: str, revision: str, snapshot_path: Path
+        self,
+        repo_id: str,
+        revision: str,
+        snapshot_path: Path,
+        *,
+        local_files_only: bool = False,
     ) -> VerificationResult:
         try:
             resolved = self.snapshot_download(
@@ -448,9 +465,70 @@ class HuggingFaceHubClient:
                 evidence="cache-completeness",
                 issues=(f"Hub resolved snapshot to {resolved}, expected {expected}",),
             )
+        if local_files_only:
+            return VerificationResult(
+                status="complete",
+                evidence="cache-completeness",
+                issues=(),
+            )
+        try:
+            from huggingface_hub import HfApi
+
+            info = HfApi().model_info(
+                repo_id,
+                revision=revision,
+                files_metadata=True,
+                timeout=10.0,
+            )
+            manifest_revision = getattr(info, "sha", None)
+            if (
+                not isinstance(manifest_revision, str)
+                or manifest_revision.casefold() != revision.casefold()
+            ):
+                return VerificationResult(
+                    status="conflicting",
+                    evidence="hub-exact-manifest",
+                    issues=("Hub manifest identity did not match the exact revision",),
+                )
+            manifest = _hub_manifest(tuple(getattr(info, "siblings", ())))
+        except Exception as error:
+            return VerificationResult(
+                status="incomplete",
+                evidence="hub-exact-manifest",
+                issues=(str(error),),
+            )
+        actual = {
+            path.relative_to(expected).as_posix(): path
+            for path in expected.rglob("*")
+            if path.is_file()
+            and not path.relative_to(expected)
+            .as_posix()
+            .startswith(".cache/huggingface/")
+        }
+        issues = [
+            *(f"missing:{path}" for path in sorted(set(manifest) - set(actual))),
+            *(f"unexpected:{path}" for path in sorted(set(actual) - set(manifest))),
+        ]
+        for relative in sorted(set(manifest) & set(actual)):
+            size, algorithm, digest = manifest[relative]
+            path = actual[relative]
+            if size is not None and path.stat().st_size != size:
+                issues.append(f"size-mismatch:{relative}")
+                continue
+            observed = (
+                _file_sha256(path) if algorithm == "sha256" else _git_blob_sha(path)
+            )
+            if observed != digest:
+                issues.append(f"digest-mismatch:{relative}")
+        if issues:
+            return VerificationResult(
+                status="incomplete",
+                evidence="hub-exact-manifest",
+                issues=tuple(issues),
+            )
         return VerificationResult(
-            status="complete",
-            evidence="cache-completeness",
+            status="verified",
+            evidence="hub-exact-manifest",
             issues=(),
         )
 
@@ -502,6 +580,60 @@ _ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 def _validate_alias(alias: str) -> None:
     if not _ALIAS.fullmatch(alias):
         raise ModelSupplyError(f"invalid model alias: {alias!r}")
+
+
+def _hub_manifest(
+    siblings: tuple[object, ...],
+) -> dict[str, tuple[int | None, str, str]]:
+    manifest: dict[str, tuple[int | None, str, str]] = {}
+    for item in siblings:
+        relative = getattr(item, "rfilename", None)
+        if not isinstance(relative, str):
+            raise ModelSupplyError("Hub manifest file omitted its path")
+        path = Path(relative)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            raise ModelSupplyError("Hub manifest contains an unsafe path")
+        if relative in manifest:
+            raise ModelSupplyError("Hub manifest contains a duplicate path")
+        size = getattr(item, "size", None)
+        if type(size) is not int or size < 0:
+            size = None
+        lfs = getattr(item, "lfs", None)
+        lfs_digest = (
+            lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+        )
+        blob_digest = getattr(item, "blob_id", None)
+        if isinstance(lfs_digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", lfs_digest):
+            algorithm, digest = "sha256", lfs_digest.casefold()
+        elif isinstance(blob_digest, str) and re.fullmatch(
+            r"[0-9a-fA-F]{40}", blob_digest
+        ):
+            algorithm, digest = "git-blob-sha1", blob_digest.casefold()
+        else:
+            raise ModelSupplyError(
+                f"Hub manifest file lacks an exact content digest: {relative}"
+            )
+        manifest[relative] = (size, algorithm, digest)
+    if not manifest:
+        raise ModelSupplyError("Hub manifest is empty")
+    return manifest
+
+
+def _git_blob_sha(path: Path) -> str:
+    digest = sha1(usedforsecurity=False)
+    digest.update(f"blob {path.stat().st_size}\0".encode())
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _tree_size(root: Path) -> int:

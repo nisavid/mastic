@@ -135,6 +135,57 @@ class OperationalStateStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.operation("op-secret"))
 
+    def test_rejects_unapproved_raw_inference_content_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(Path(directory) / "state.sqlite3")
+
+            for key in (
+                "body",
+                "content",
+                "input",
+                "message",
+                "output",
+                "query",
+                "text",
+            ):
+                with self.subTest(key=key):
+                    with self.assertRaisesRegex(
+                        SensitiveContentError, "cannot persist inference content"
+                    ):
+                        store.put_operation(
+                            {"id": f"op-{key}", "details": {key: "raw content"}}
+                        )
+
+    def test_bounds_metric_retention_and_paginates_sequence_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = OperationalStateStore(
+                Path(directory) / "state.sqlite3", max_metrics=3
+            )
+            store.put_operation({"id": "op-1"})
+            for index in range(5):
+                store.append_event(
+                    {"operation_id": "op-1", "kind": "event", "index": index}
+                )
+                store.record_metric({"kind": "request", "index": index})
+
+            self.assertEqual(
+                [metric["sequence"] for metric in store.metrics()], [3, 4, 5]
+            )
+            self.assertEqual(
+                [
+                    event["sequence"]
+                    for event in store.events(after_sequence=1, limit=2)
+                ],
+                [2, 3],
+            )
+            self.assertEqual(
+                [
+                    metric["sequence"]
+                    for metric in store.metrics(after_sequence=3, limit=1)
+                ],
+                [4],
+            )
+
     def test_preserves_versioned_snapshots_and_returns_the_latest_by_default(
         self,
     ) -> None:

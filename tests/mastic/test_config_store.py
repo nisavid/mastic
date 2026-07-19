@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import stat
 import shutil
@@ -24,6 +25,36 @@ def _hold_private_lock(path: str, acquired, release, attempting=None) -> None:
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_journal_entries_are_versioned_and_lineage_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            store = ConfigStore(path, lambda data: int(data["generation"]))
+            first = store.import_text("generation = 1\n")
+            store.import_text("generation = 2\n")
+            journal = path.parent / ".config.toml.journal.jsonl"
+            entries = [json.loads(line) for line in journal.read_text().splitlines()]
+            self.assertEqual(entries[0]["schema_version"], 1)
+            entries[1]["previous_revision"] = "0" * 64
+            journal.write_text(
+                "".join(json.dumps(entry) + "\n" for entry in entries),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "config journal is corrupt"):
+                store.history()
+            self.assertNotEqual(first.revision, "0" * 64)
+
+    def test_saving_identical_content_does_not_create_a_self_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(
+                Path(directory) / "config.toml", lambda data: int(data["generation"])
+            )
+            first = store.import_text("generation = 1\n")
+            second = store.import_text("generation = 1\n")
+
+            self.assertEqual(first.revision, second.revision)
+            self.assertEqual(len(store.history()), 1)
+
     def test_private_file_lock_serializes_processes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lock_path = str(Path(directory) / "application-target.lock")

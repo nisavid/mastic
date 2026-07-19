@@ -196,6 +196,35 @@ class RuntimeCatalogueTests(unittest.TestCase):
                     options={name: value},
                 )
 
+    def test_launch_options_cannot_override_required_endpoint_arguments(self) -> None:
+        catalogue = RuntimeCatalogue.load_builtin()
+        installation = RuntimeInstallation(
+            installation_id="optiq-0.3.3",
+            runtime="optiq",
+            version="0.3.3",
+            provenance="tested",
+            root=Path("/runtimes/optiq-0.3.3"),
+            launcher=("/runtimes/optiq-0.3.3/bin/optiq", "serve"),
+            capabilities=frozenset({"model", "host", "port"}),
+        )
+
+        for name, value in (
+            ("model", "/models/other"),
+            ("host", "0.0.0.0"),
+            ("port", 80),
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ValueError, "reserved launch option"),
+            ):
+                RuntimeLaunchBuilder(catalogue).build(
+                    installation,
+                    model="/models/qwen",
+                    host="127.0.0.1",
+                    port=49152,
+                    options={name: value},
+                )
+
 
 class SubprocessRuntimeProbeTests(unittest.TestCase):
     def test_probes_through_a_venv_python_symlink_to_the_base_interpreter(self) -> None:
@@ -274,6 +303,30 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
             definition = RuntimeCatalogue.load_builtin().definition("optiq")
             with self.assertRaisesRegex(ValueError, "help probe failed"):
                 SubprocessRuntimeProbe(run=run).probe(definition, root)
+
+    def test_help_capture_stops_the_process_at_the_byte_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "bin/python"
+            sentinel = root / "completed"
+            python.parent.mkdir(parents=True)
+            python.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys\n"
+                "if '-c' in sys.argv:\n"
+                "    print('0.31.3')\n"
+                "else:\n"
+                "    for _ in range(1024):\n"
+                "        os.write(1, b'x' * 1024)\n"
+                f"    pathlib.Path({str(sentinel)!r}).write_text('finished')\n"
+            )
+            python.chmod(0o700)
+
+            definition = RuntimeCatalogue.load_builtin().definition("mlx_lm")
+            with self.assertRaisesRegex(ValueError, "help probe output exceeds"):
+                SubprocessRuntimeProbe(max_output_bytes=1024).probe(definition, root)
+
+            self.assertFalse(sentinel.exists())
 
     def test_rejects_an_optiq_console_symlink_outside_the_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

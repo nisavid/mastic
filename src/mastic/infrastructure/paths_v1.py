@@ -55,15 +55,29 @@ def resolve_paths(
     """Resolve paths without creating files or reading desired state."""
     env = os.environ if environment is None else environment
     user_home = Path.home() if home is None else home
-    config_home = Path(env.get("XDG_CONFIG_HOME", user_home / ".config"))
-    state_home = Path(env.get("XDG_STATE_HOME", user_home / ".local/state"))
-    data_home = Path(env.get("XDG_DATA_HOME", user_home / ".local/share"))
+    if not user_home.is_absolute():
+        raise ValueError("home must be an absolute path")
+    config_home = _environment_path(env, "XDG_CONFIG_HOME", user_home / ".config")
+    state_home = _environment_path(env, "XDG_STATE_HOME", user_home / ".local/state")
+    data_home = _environment_path(env, "XDG_DATA_HOME", user_home / ".local/share")
     return MasticPaths(
-        config_dir=Path(env.get("MASTIC_CONFIG_DIR", config_home / "mastic")),
-        state_dir=Path(env.get("MASTIC_STATE_DIR", state_home / "mastic")),
-        data_dir=Path(env.get("MASTIC_DATA_DIR", data_home / "mastic")),
-        log_dir=Path(env.get("MASTIC_LOG_DIR", user_home / "Library/Logs/mastic")),
+        config_dir=_environment_path(env, "MASTIC_CONFIG_DIR", config_home / "mastic"),
+        state_dir=_environment_path(env, "MASTIC_STATE_DIR", state_home / "mastic"),
+        data_dir=_environment_path(env, "MASTIC_DATA_DIR", data_home / "mastic"),
+        log_dir=_environment_path(
+            env, "MASTIC_LOG_DIR", user_home / "Library/Logs/mastic"
+        ),
     )
+
+
+def _environment_path(env: Mapping[str, str], key: str, default: Path) -> Path:
+    raw = env.get(key)
+    if raw is not None and not raw:
+        raise ValueError(f"{key} must be a non-empty absolute path")
+    path = default if raw is None else Path(raw)
+    if not path.is_absolute():
+        raise ValueError(f"{key} must be an absolute path")
+    return path
 
 
 def _prepare_private_directory(path: Path) -> None:

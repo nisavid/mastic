@@ -20,6 +20,10 @@ from tomlkit.toml_document import TOMLDocument
 
 ValidatedConfig = TypeVar("ValidatedConfig")
 ConfigValidator = Callable[[Mapping[str, object]], ValidatedConfig]
+_JOURNAL_SCHEMA_VERSION = 1
+_JOURNAL_KEYS = frozenset(
+    {"action", "previous_revision", "revision", "saved_at", "schema_version"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,7 @@ class ConfigChange:
 class ConfigRevision:
     """One durable desired-state journal entry."""
 
+    schema_version: int
     revision: str
     previous_revision: str | None
     saved_at: str
@@ -194,6 +199,7 @@ class ConfigStore(Generic[ValidatedConfig]):
                 "previous_revision": revision.previous_revision,
                 "revision": revision.revision,
                 "saved_at": revision.saved_at,
+                "schema_version": revision.schema_version,
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -213,16 +219,22 @@ class ConfigStore(Generic[ValidatedConfig]):
     def _save_locked(
         self, snapshot: ConfigSnapshot[ValidatedConfig], action: str
     ) -> None:
+        records = self._reconcile_journal_locked()
         payload = snapshot.document.as_string().encode()
         previous_revision = None
         if _private_file_exists(self._path):
             previous_payload = _read_private_file(self._path)
             previous_revision = _revision(previous_payload)
+            if previous_revision == snapshot.revision:
+                return
             self._archive(previous_revision, previous_payload)
+        if records and records[-1].revision != previous_revision:
+            raise RuntimeError("config journal is corrupt")
         self._atomic_replace(self._path, payload)
         self._archive(snapshot.revision, payload)
         self._append_journal(
             ConfigRevision(
+                schema_version=_JOURNAL_SCHEMA_VERSION,
                 revision=snapshot.revision,
                 previous_revision=previous_revision,
                 saved_at=datetime.now(UTC).isoformat(),
@@ -240,6 +252,7 @@ class ConfigStore(Generic[ValidatedConfig]):
             return tuple(records)
         self._archive(current_revision, payload)
         recovered = ConfigRevision(
+            schema_version=_JOURNAL_SCHEMA_VERSION,
             revision=current_revision,
             previous_revision=records[-1].revision if records else None,
             saved_at=datetime.now(UTC).isoformat(),
@@ -254,6 +267,7 @@ class ConfigStore(Generic[ValidatedConfig]):
             return ()
         payload = _read_private_file(self._journal_path)
         records = []
+        previous_revision: str | None = None
         valid_bytes = 0
         lines = payload.splitlines(keepends=True)
         for index, line in enumerate(lines):
@@ -262,8 +276,19 @@ class ConfigStore(Generic[ValidatedConfig]):
                 raw = json.loads(line) if complete else None
                 if not isinstance(raw, dict):
                     raise ValueError("journal entry must be an object")
-                records.append(ConfigRevision(**raw))
-            except (json.JSONDecodeError, TypeError, ValueError) as error:
+                record = _parse_journal_revision(raw, previous_revision)
+                archive = _read_private_file(self._archive_path(record.revision))
+                if _revision(archive) != record.revision:
+                    raise ValueError("journal archive digest does not match")
+                records.append(record)
+                previous_revision = record.revision
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
                 if index != len(lines) - 1 or complete:
                     raise RuntimeError("config journal is corrupt") from error
                 self._truncate_journal(valid_bytes)
@@ -348,6 +373,45 @@ def _read_private_file(path: Path) -> bytes:
 
 def _revision(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _parse_journal_revision(
+    raw: Mapping[str, object], previous_revision: str | None
+) -> ConfigRevision:
+    if set(raw) != _JOURNAL_KEYS:
+        raise ValueError("journal entry has an invalid schema")
+    if raw.get("schema_version") != _JOURNAL_SCHEMA_VERSION:
+        raise ValueError("journal entry has an unsupported schema version")
+    revision = raw.get("revision")
+    if not _is_revision(revision):
+        raise ValueError("journal entry revision is invalid")
+    recorded_previous = raw.get("previous_revision")
+    if recorded_previous != previous_revision:
+        raise ValueError("journal entry lineage is invalid")
+    action = raw.get("action")
+    saved_at = raw.get("saved_at")
+    if not isinstance(action, str) or not action:
+        raise ValueError("journal entry action is invalid")
+    if not isinstance(saved_at, str):
+        raise ValueError("journal entry timestamp is invalid")
+    timestamp = datetime.fromisoformat(saved_at)
+    if timestamp.tzinfo is None:
+        raise ValueError("journal entry timestamp must include a timezone")
+    return ConfigRevision(
+        schema_version=_JOURNAL_SCHEMA_VERSION,
+        revision=revision,
+        previous_revision=previous_revision,
+        saved_at=saved_at,
+        action=action,
+    )
+
+
+def _is_revision(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _semantic_diff(

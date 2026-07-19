@@ -155,6 +155,7 @@ class CodexApplicationTargetIntegration:
         manifest = {
             "schema_version": 1,
             "integration": "codex",
+            "state": "applied",
             "config_path": str(self.config_path),
             "config_existed": (
                 bool(prior_manifest.get("config_existed"))
@@ -195,6 +196,10 @@ class CodexApplicationTargetIntegration:
                 _write_private(self.backup_path, raw)
             if catalog_ownership_new:
                 _write_private(self.catalog_backup_path, catalog_before)
+            _write_private(
+                self.manifest_path,
+                _json_bytes({**manifest, "state": "pending"}),
+            )
             if catalog_changed and catalog_rendered is not None:
                 self._replace(self.catalog_path, catalog_rendered)
                 self._catalog_validator(self.catalog_path)
@@ -232,6 +237,118 @@ class CodexApplicationTargetIntegration:
             self.catalog_backup_path,
         )
         return lambda: _restore_files(snapshot)
+
+    def observe_drift(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> Mapping[str, object]:
+        """Return only nonsecret values representable in desired state."""
+
+        del configuration
+        document = _load_toml(self.config_path)
+        service = _required_toml_string(document, ("model",))
+        provider = _required_toml_string(document, ("model_provider",))
+        if _required_toml_string(document, ("oss_provider",)) != provider:
+            raise ApplicationTargetIntegrationConflict(
+                "Codex providers are inconsistent"
+            )
+        observed: dict[str, object] = {
+            "service": service,
+            "provider": provider,
+        }
+        present, context_window = _toml_lookup(document, ("model_context_window",))
+        if present:
+            if (
+                not isinstance(context_window, int)
+                or isinstance(context_window, bool)
+                or context_window <= 0
+            ):
+                raise ApplicationTargetIntegrationConflict(
+                    "Codex context window is invalid"
+                )
+            observed["context_window"] = context_window
+        return observed
+
+    def adopt_drift(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> ApplicationTargetApplyResult:
+        """Adopt an exact Phase-1 Codex shape without rewriting external bytes."""
+
+        manifest = self._manifest()
+        raw, exists = _read(self.config_path)
+        if not exists:
+            raise ApplicationTargetIntegrationConflict("Codex config is missing")
+        document = _parse_toml(raw)
+        desired = self._desired(configuration)
+        prior = {tuple(item["path"]): item for item in manifest["fields"]}
+        owned: list[dict[str, object]] = []
+        for path, after in desired.items():
+            present, current = _toml_lookup(document, path)
+            if not present or _plain(current) != after:
+                raise ApplicationTargetIntegrationConflict(
+                    f"Codex setting {'.'.join(path)} is not losslessly adoptable"
+                )
+            previous = prior.get(path)
+            owned.append(
+                {
+                    "path": list(path),
+                    "before_present": bool(previous and previous.get("before_present")),
+                    "before": previous.get("before") if previous else None,
+                    "after": _plain(after),
+                }
+            )
+        updated = {
+            **manifest,
+            "applied_digest": _digest(raw),
+            "fields": owned,
+        }
+        catalog_rendered = self._render_catalog(configuration)
+        if catalog_rendered is not None:
+            catalog_raw, catalog_exists = _read(self.catalog_path)
+            if not catalog_exists or catalog_raw != catalog_rendered:
+                raise ApplicationTargetIntegrationConflict(
+                    "Codex model catalog is not losslessly adoptable"
+                )
+            self._catalog_validator(self.catalog_path)
+            prior_catalog = manifest.get("catalog")
+            if not isinstance(prior_catalog, dict):
+                raise ApplicationTargetIntegrationConflict(
+                    "Codex model catalog ownership is incomplete"
+                )
+            metadata = _codex_target(configuration).model
+            assert metadata is not None
+            updated["catalog"] = {
+                **prior_catalog,
+                "applied_digest": _digest(catalog_raw),
+                "slug": metadata.slug,
+                "context_window": configuration.context_window,
+            }
+        snapshot = _snapshot_files(self.manifest_path)
+        try:
+            _write_private(self.manifest_path, _json_bytes(updated))
+        except Exception:
+            _restore_files(snapshot)
+            raise
+        return ApplicationTargetApplyResult(
+            True, (), self.backup_path, self.manifest_path
+        )
+
+    def relinquish(self) -> ApplicationTargetRemovalResult:
+        """Drop MASTIC evidence without changing Codex configuration."""
+
+        support = (
+            self.manifest_path,
+            self.backup_path,
+            self.catalog_backup_path,
+        )
+        changed = any(path.exists() for path in support)
+        snapshot = _snapshot_files(*support)
+        try:
+            for path in support:
+                path.unlink(missing_ok=True)
+        except Exception:
+            _restore_files(snapshot)
+            raise
+        return ApplicationTargetRemovalResult(changed, ())
 
     def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
@@ -354,7 +471,15 @@ class CodexApplicationTargetIntegration:
                 "detail": "Codex ownership predates the required custom model catalog.",
                 "next_actions": ["mastic application-target configure codex"],
             }
-        config_document = _load_toml(self.config_path)
+        try:
+            config_document = _load_toml(self.config_path)
+        except (OSError, UnicodeError, ValueError):
+            return {
+                "state": "malformed",
+                "detail": "Codex config TOML is malformed.",
+                "catalog_path": str(self.catalog_path),
+                "next_actions": ["repair the Codex config TOML and inspect again"],
+            }
         for item in manifest.get("fields", []):
             path = tuple(item["path"])
             present, current = _toml_lookup(config_document, path)
@@ -418,6 +543,10 @@ class CodexApplicationTargetIntegration:
     def _manifest(self, *, optional: bool = False) -> dict[str, object]:
         manifest = _load_manifest(self.manifest_path, "codex", optional)
         _validate_manifest_paths(manifest, self.config_path, self.backup_path)
+        if manifest and manifest.get("state", "applied") != "applied":
+            raise ApplicationTargetIntegrationConflict(
+                "Codex ownership transition is incomplete"
+            )
         return manifest
 
     def _finish_removal(
@@ -639,6 +768,15 @@ def _toml_lookup(document: object, path: tuple[str, ...]) -> tuple[bool, object]
             return False, None
         current = current[key]
     return True, current
+
+
+def _required_toml_string(document: object, path: tuple[str, ...]) -> str:
+    present, value = _toml_lookup(document, path)
+    if not present or not isinstance(value, str) or not value:
+        raise ApplicationTargetIntegrationConflict(
+            f"Codex setting {'.'.join(path)} is missing"
+        )
+    return value
 
 
 def _toml_set(document: TOMLDocument, path: tuple[str, ...], value: object) -> None:

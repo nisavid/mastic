@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Callable, Mapping, Protocol
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -718,39 +718,48 @@ class _HuggingFaceMetadataFetcher:
             f"{quote(path, safe='/')}"
         )
         timeout = httpx.Timeout(10.0, connect=5.0)
-        with httpx.Client(
-            follow_redirects=True, timeout=timeout, max_redirects=5
-        ) as client:
-            with client.stream(
-                "GET", url, headers=build_hf_headers(token=None)
-            ) as response:
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                _validate_hugging_face_url(str(response.url))
-                declared_size = response.headers.get("content-length")
-                if declared_size is not None:
-                    try:
-                        if int(declared_size) > max_bytes:
+        headers = build_hf_headers(token=None)
+        with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+            current_url = url
+            for _redirect in range(6):
+                _validate_hugging_face_url(current_url)
+                with client.stream("GET", current_url, headers=headers) as response:
+                    if response.status_code == 404:
+                        return None
+                    if 300 <= response.status_code < 400:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ModelIntelligenceError(
+                                "Hub metadata redirect omitted its target"
+                            )
+                        current_url = urljoin(current_url, location)
+                        _validate_hugging_face_url(current_url)
+                        continue
+                    response.raise_for_status()
+                    declared_size = response.headers.get("content-length")
+                    if declared_size is not None:
+                        try:
+                            if int(declared_size) > max_bytes:
+                                raise ModelIntelligenceError(
+                                    "metadata response exceeded the byte limit"
+                                )
+                        except ValueError as error:
+                            raise ModelIntelligenceError(
+                                "metadata response had an invalid content length"
+                            ) from error
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        body.extend(chunk)
+                        if len(body) > max_bytes:
                             raise ModelIntelligenceError(
                                 "metadata response exceeded the byte limit"
                             )
-                    except ValueError as error:
-                        raise ModelIntelligenceError(
-                            "metadata response had an invalid content length"
-                        ) from error
-                body = bytearray()
-                for chunk in response.iter_bytes():
-                    body.extend(chunk)
-                    if len(body) > max_bytes:
-                        raise ModelIntelligenceError(
-                            "metadata response exceeded the byte limit"
-                        )
-                return MetadataPayload(
-                    path=path,
-                    content_type=response.headers.get("content-type", ""),
-                    body=bytes(body),
-                )
+                    return MetadataPayload(
+                        path=path,
+                        content_type=response.headers.get("content-type", ""),
+                        body=bytes(body),
+                    )
+        raise ModelIntelligenceError("Hub metadata exceeded the redirect limit")
 
 
 class _HuggingFaceCacheInventory:
@@ -1252,7 +1261,8 @@ def optiq_kv_bytes(
                 return None
             # One float16 scale and bias per quantization group for K and V.
             metadata_bytes_per_token += values_per_token // group_size * 4
-    quantized_bytes_per_token = 2 * bit_sum * kv_heads * head_dimension // 8
+    quantized_bits_per_token = 2 * bit_sum * kv_heads * head_dimension
+    quantized_bytes_per_token = (quantized_bits_per_token + 7) // 8
     return (
         (quantized_bytes_per_token + metadata_bytes_per_token)
         * context_tokens

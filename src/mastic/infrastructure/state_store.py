@@ -15,6 +15,7 @@ from typing import Iterator, Mapping
 
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_VERSION = 1
+_DEFAULT_MAX_METRICS = 10_000
 _SENSITIVE_KEYS = frozenset(
     {
         "messages",
@@ -47,6 +48,12 @@ _CREDENTIAL_KEYS = frozenset(
         "token",
     }
 )
+_RAW_INFERENCE_KEYS = frozenset(
+    {"body", "content", "input", "message", "output", "query", "text"}
+)
+# Raw inference-shaped values are denied unless a future operational schema
+# names an exact, reviewed path here. An empty allowlist is intentional.
+_ALLOWED_RAW_INFERENCE_PATHS: frozenset[tuple[str, ...]] = frozenset()
 
 
 class SensitiveContentError(ValueError):
@@ -56,8 +63,13 @@ class SensitiveContentError(ValueError):
 class OperationalStateStore:
     """Persist deterministic operational DTOs in a private SQLite database."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self, path: str | Path, *, max_metrics: int = _DEFAULT_MAX_METRICS
+    ) -> None:
+        if type(max_metrics) is not int or max_metrics <= 0:
+            raise ValueError("maximum retained metrics must be a positive integer")
         self._path = Path(path)
+        self._max_metrics = max_metrics
         self._prepare_path()
         with _SCHEMA_LOCK, self._connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -167,14 +179,27 @@ class OperationalStateStore:
             sequence = int(cursor.lastrowid)
         return _record({**dto, "sequence": sequence})
 
-    def events(self, operation_id: str | None = None) -> tuple[dict[str, object], ...]:
+    def events(
+        self,
+        operation_id: str | None = None,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> tuple[dict[str, object], ...]:
         """Return immutable events in sequence order."""
+        _validate_page(after_sequence, limit)
         if operation_id is None:
-            sql = "SELECT sequence, dto_json FROM events ORDER BY sequence"
-            parameters: tuple[object, ...] = ()
+            sql = (
+                "SELECT sequence, dto_json FROM events "
+                "WHERE sequence > ? ORDER BY sequence LIMIT ?"
+            )
+            parameters: tuple[object, ...] = (after_sequence, limit)
         else:
-            sql = "SELECT sequence, dto_json FROM events WHERE operation_id = ? ORDER BY sequence"
-            parameters = (operation_id,)
+            sql = (
+                "SELECT sequence, dto_json FROM events "
+                "WHERE operation_id = ? AND sequence > ? ORDER BY sequence LIMIT ?"
+            )
+            parameters = (operation_id, after_sequence, limit)
         with self._connection() as connection:
             rows = connection.execute(sql, parameters).fetchall()
         return tuple(_record({**_decode(row[1]), "sequence": row[0]}) for row in rows)
@@ -265,16 +290,33 @@ class OperationalStateStore:
                 (kind, _encode(dto)),
             )
             sequence = int(cursor.lastrowid)
+            connection.execute(
+                "DELETE FROM metrics WHERE sequence <= ?",
+                (sequence - self._max_metrics,),
+            )
         return _record({**dto, "sequence": sequence})
 
-    def metrics(self, kind: str | None = None) -> tuple[dict[str, object], ...]:
+    def metrics(
+        self,
+        kind: str | None = None,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> tuple[dict[str, object], ...]:
         """Return metrics in sequence order, optionally filtered by kind."""
+        _validate_page(after_sequence, limit)
         if kind is None:
-            sql = "SELECT sequence, dto_json FROM metrics ORDER BY sequence"
-            parameters: tuple[object, ...] = ()
+            sql = (
+                "SELECT sequence, dto_json FROM metrics "
+                "WHERE sequence > ? ORDER BY sequence LIMIT ?"
+            )
+            parameters: tuple[object, ...] = (after_sequence, limit)
         else:
-            sql = "SELECT sequence, dto_json FROM metrics WHERE kind = ? ORDER BY sequence"
-            parameters = (kind,)
+            sql = (
+                "SELECT sequence, dto_json FROM metrics "
+                "WHERE kind = ? AND sequence > ? ORDER BY sequence LIMIT ?"
+            )
+            parameters = (kind, after_sequence, limit)
         with self._connection() as connection:
             rows = connection.execute(sql, parameters).fetchall()
         return tuple(_record({**_decode(row[1]), "sequence": row[0]}) for row in rows)
@@ -379,6 +421,15 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
                     f"operational state cannot persist inference content at {location}"
                 )
             normalized_key = raw_key.casefold()
+            normalized_path = tuple(part.casefold() for part in (*path, raw_key))
+            if (
+                normalized_key in _RAW_INFERENCE_KEYS
+                and normalized_path not in _ALLOWED_RAW_INFERENCE_PATHS
+            ):
+                location = ".".join((*path, raw_key))
+                raise SensitiveContentError(
+                    f"operational state cannot persist inference content at {location}"
+                )
             if normalized_key in _CREDENTIAL_KEYS or (
                 normalized_key.endswith("_token") and normalized_key != "birth_token"
             ):
@@ -396,6 +447,13 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
     if isinstance(value, float) and math.isfinite(value):
         return value
     raise TypeError(f"operational DTO contains unsupported value {value!r}")
+
+
+def _validate_page(after_sequence: int, limit: int) -> None:
+    if type(after_sequence) is not int or after_sequence < 0:
+        raise ValueError("after_sequence must be a nonnegative integer")
+    if type(limit) is not int or limit <= 0:
+        raise ValueError("limit must be a positive integer")
 
 
 def _prepare_private_directory(path: Path) -> None:

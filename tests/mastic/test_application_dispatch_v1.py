@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Mapping
 
 from mastic.application.catalogue import build_operation_catalogue
 from mastic.application.dispatch import (
@@ -58,6 +59,24 @@ class OperationDispatchTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "confirmation_required")
 
+    def test_application_error_details_are_recursively_immutable(self) -> None:
+        error = ApplicationError(
+            "setup_interrupted",
+            "setup stopped",
+            details={
+                "completion": "partial",
+                "targets": {"codex": "unverified"},
+            },
+        )
+
+        with self.assertRaises(TypeError):
+            error.details["completion"] = "complete"  # type: ignore[index]
+        targets = error.details["targets"]
+        self.assertIsInstance(targets, Mapping)
+        assert isinstance(targets, Mapping)
+        with self.assertRaises(TypeError):
+            targets["codex"] = "ready"  # type: ignore[index]
+
     def test_preview_resolves_backend_without_execution_or_activation(self) -> None:
         self.backend.require.add("model.cache.evict")
 
@@ -87,6 +106,27 @@ class OperationDispatchTests(unittest.TestCase):
         result = self.dispatcher.preview(OperationRequest("setup"))
 
         self.assertEqual(result.value["preview_fingerprint"], "sha256:exact")
+
+    def test_no_validated_fit_preview_is_returned_as_terminal_observation(self) -> None:
+        self.backend.prepare = lambda _request: PreparedOperation(
+            False,
+            lambda: self.fail("No Validated Fit must not execute"),
+            (
+                {
+                    "phase": "preview",
+                    "state": "no_validated_fit",
+                    "completion": "complete",
+                    "readiness": "unverified",
+                    "mutation_count": 0,
+                },
+            ),
+        )
+
+        result = self.dispatcher.preview(OperationRequest("setup"))
+
+        self.assertEqual(result.value["state"], "no_validated_fit")
+        self.assertEqual(result.value["completion"], "complete")
+        self.assertNotIn("preview", result.value)
 
     def test_service_start_visibly_activates_supervisor(self) -> None:
         self.backend.require.add("service.start")
@@ -130,6 +170,38 @@ class OperationDispatchTests(unittest.TestCase):
         with self.assertRaises(ApplicationError) as unknown:
             self.dispatcher.execute(OperationRequest("banana"))
         self.assertEqual(unknown.exception.code, "unknown_operation")
+
+    def test_prepare_and_preview_failures_are_stable_application_errors(self) -> None:
+        def fail(_request):
+            raise OSError("backend unavailable")
+
+        self.backend.prepare = fail
+
+        with self.assertRaises(ApplicationError) as execution:
+            self.dispatcher.execute(OperationRequest("status"))
+        with self.assertRaises(ApplicationError) as preview:
+            self.dispatcher.preview(OperationRequest("status"))
+
+        self.assertEqual(execution.exception.code, "operation_failed")
+        self.assertEqual(preview.exception.code, "operation_failed")
+        self.assertIn("prepare", execution.exception.message)
+        self.assertIn("preview", preview.exception.message)
+
+    def test_activation_failure_is_a_stable_application_error(self) -> None:
+        self.backend.require.add("service.start")
+
+        def fail():
+            raise OSError("control socket unavailable")
+
+        self.activator.activate = fail
+
+        with self.assertRaises(ApplicationError) as raised:
+            self.dispatcher.execute(
+                OperationRequest("service.start", {"resource": "coding"})
+            )
+
+        self.assertEqual(raised.exception.code, "operation_failed")
+        self.assertIn("activate", raised.exception.message)
 
     def test_backend_result_is_versioned_with_progress_events(self) -> None:
         result = self.dispatcher.execute(OperationRequest("runtime.available"))

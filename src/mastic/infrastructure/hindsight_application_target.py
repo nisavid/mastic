@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from types import MappingProxyType
@@ -191,6 +192,132 @@ class HindsightApplicationTargetIntegration:
             self.backup_path,
         )
         return lambda: _restore_files(snapshot)
+
+    def observe_drift(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> Mapping[str, object]:
+        """Return only validated, nonsecret desired-state candidates."""
+
+        raw, exists = _read(self.config_path)
+        if not exists:
+            raise ApplicationTargetIntegrationConflict("Hindsight profile is missing")
+        env = _EnvDocument(raw.decode())
+        provider = _required_env(env, "HINDSIGHT_API_LLM_PROVIDER")
+        service = _required_env(env, "HINDSIGHT_API_LLM_MODEL")
+        try:
+            max_concurrent = int(_required_env(env, "HINDSIGHT_API_LLM_MAX_CONCURRENT"))
+        except ValueError as error:
+            raise ApplicationTargetIntegrationConflict(
+                "Hindsight max concurrency is invalid"
+            ) from error
+        if max_concurrent <= 0:
+            raise ApplicationTargetIntegrationConflict(
+                "Hindsight max concurrency is invalid"
+            )
+        profiles: dict[str, Mapping[str, object]] = {}
+        for name, sampling in configuration.sampling_profiles.items():
+            values = dict(sampling.definition())
+            suffix = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
+            present, raw_temperature, _line = env.lookup(
+                f"HINDSIGHT_API_LLM_TEMPERATURE_{suffix}"
+            )
+            if present:
+                try:
+                    temperature = float(raw_temperature or "")
+                except ValueError as error:
+                    raise ApplicationTargetIntegrationConflict(
+                        "Hindsight sampling temperature is invalid"
+                    ) from error
+                if not math.isfinite(temperature) or temperature < 0:
+                    raise ApplicationTargetIntegrationConflict(
+                        "Hindsight sampling temperature is invalid"
+                    )
+                values["temperature"] = temperature
+            else:
+                values.pop("temperature", None)
+            profiles[name] = values
+        return {
+            "service": service,
+            "provider": provider,
+            "max_concurrent": max_concurrent,
+            "sampling_profiles": profiles,
+        }
+
+    def adopt_drift(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> ApplicationTargetApplyResult:
+        """Adopt an exact Phase-1 profile without rewriting external bytes."""
+
+        manifest = self._manifest()
+        raw, exists = _read(self.config_path)
+        if not exists:
+            raise ApplicationTargetIntegrationConflict("Hindsight profile is missing")
+        env = _EnvDocument(raw.decode())
+        desired = self._desired(configuration)
+        prior = {tuple(item["path"]): item for item in manifest["fields"]}
+        owned: list[dict[str, object]] = []
+        for key, after in desired.items():
+            present, current, _line = env.lookup(key)
+            if not present or current != after:
+                detail = (
+                    "Hindsight credential cannot be adopted"
+                    if key == _HINDSIGHT_API_KEY
+                    else f"Hindsight setting {key} is not losslessly adoptable"
+                )
+                raise ApplicationTargetIntegrationConflict(detail)
+            previous = prior.get((key,))
+            before_present = bool(previous and previous.get("before_present"))
+            if key == _HINDSIGHT_API_KEY:
+                owned.append(
+                    {
+                        "path": [key],
+                        "before_present": before_present,
+                        "after_digest": _digest(after.encode()),
+                    }
+                )
+            else:
+                owned.append(
+                    {
+                        "path": [key],
+                        "before_present": before_present,
+                        "before": previous.get("before") if previous else None,
+                        "before_line": (
+                            previous.get("before_line") if previous else None
+                        ),
+                        "after": after,
+                    }
+                )
+        snapshot = _snapshot_files(self.manifest_path)
+        try:
+            _write_private(
+                self.manifest_path,
+                _json_bytes(
+                    {
+                        **manifest,
+                        "applied_digest": _digest(raw),
+                        "fields": owned,
+                    }
+                ),
+            )
+        except Exception:
+            _restore_files(snapshot)
+            raise
+        return ApplicationTargetApplyResult(
+            True, (), self.backup_path, self.manifest_path
+        )
+
+    def relinquish(self) -> ApplicationTargetRemovalResult:
+        """Drop MASTIC evidence without changing the external profile."""
+
+        changed = self.manifest_path.exists() or self.backup_path.exists()
+        snapshot = _snapshot_files(self.manifest_path, self.backup_path)
+        try:
+            self.manifest_path.unlink(missing_ok=True)
+            self.backup_path.unlink(missing_ok=True)
+        except Exception:
+            _restore_files(snapshot)
+            raise
+        return ApplicationTargetRemovalResult(changed, ())
 
     def remove(self) -> ApplicationTargetRemovalResult:
         manifest = self._manifest(optional=True)
@@ -418,6 +545,15 @@ def _hindsight_fields(
                 sampling.temperature
             )
     return MappingProxyType(fields)
+
+
+def _required_env(env: _EnvDocument, key: str) -> str:
+    present, value, _line = env.lookup(key)
+    if not present or value is None or not value:
+        raise ApplicationTargetIntegrationConflict(
+            f"Hindsight setting {key} is missing"
+        )
+    return value
 
 
 def _secret_matches(current: str | None, item: Mapping[str, object]) -> bool:

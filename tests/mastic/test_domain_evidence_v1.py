@@ -29,6 +29,33 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(assessment.state, EvidenceState.CONFLICTING)
         self.assertEqual(assessment.evidence[1].source, "runtime-probe")
 
+    def test_observed_evidence_precedes_declarations_but_not_derived_results(
+        self,
+    ) -> None:
+        observed = CompatibilityAssessment(
+            model_revision=self.revision,
+            runtime_installation="optiq@0.2.15",
+            option_fingerprint="mtp=true",
+            machine_fingerprint="m3-max-128gb",
+            evidence=(
+                Evidence("model-card", EvidenceState.DECLARED, "MTP supported"),
+                Evidence("config", EvidenceState.OBSERVED, "MTP configured"),
+            ),
+        )
+        derived = CompatibilityAssessment(
+            model_revision=self.revision,
+            runtime_installation="optiq@0.2.15",
+            option_fingerprint="mtp=true",
+            machine_fingerprint="m3-max-128gb",
+            evidence=(
+                *observed.evidence,
+                Evidence("fit-policy", EvidenceState.DERIVED, "likely fits"),
+            ),
+        )
+
+        self.assertEqual(observed.state, EvidenceState.OBSERVED)
+        self.assertEqual(derived.state, EvidenceState.DERIVED)
+
     def test_trust_grant_is_exact_revision_and_runtime_scoped(self) -> None:
         grant = TrustGrant(
             model_revision=self.revision,

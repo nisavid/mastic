@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Protocol
 
 from mastic.application.application_targets import (
+    ApplicationTargetDriftOutcome,
+    ApplicationTargetDriftIntent,
     validate_application_target_sampling_profiles,
 )
 from mastic.application.config_schema import (
@@ -19,6 +21,7 @@ from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.control_client import ControlClientError, UnixControlClient
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
+    ApplicationTargetIntegrationConflict,
     ApplicationTargetOwnershipRecoveryRequired,
     CodexTargetOptions,
     HindsightTargetOptions,
@@ -50,9 +53,24 @@ class ApplicationTargetAdapter(Protocol):
 
     def rollback_point(self) -> Callable[[], None]: ...
 
-    def test(
-        self, configuration: ApplicationTargetConfiguration, request, *, profile: str
-    ): ...
+    def observe_drift(
+        self, configuration: ApplicationTargetConfiguration
+    ) -> Mapping[str, object]: ...
+
+    def adopt_drift(self, configuration: ApplicationTargetConfiguration): ...
+
+    def relinquish(self): ...
+
+
+class ApplicationTargetCanary(Protocol):
+    def run(
+        self,
+        target: str,
+        configuration: ApplicationTargetConfiguration,
+        settings: ApplicationTargetSettings,
+        *,
+        profile: str,
+    ) -> Mapping[str, object]: ...
 
 
 class RemoteOperationPort:
@@ -143,14 +161,14 @@ class ApplicationTargetOperationPort:
             ApplicationTargetConfiguration,
         ],
         *,
-        request: Callable[[str, str, str, Mapping[str, object]], object],
+        canary: ApplicationTargetCanary,
         settings: Callable[[str], ApplicationTargetSettings | None],
         record: Callable[[str, ApplicationTargetSettings | None], object],
         transition: Callable[[str], AbstractContextManager[None]],
     ) -> None:
         self._adapter = adapter
         self._configuration = configuration
-        self._request = request
+        self._canary = canary
         self._settings = settings
         self._record = record
         self._transition = transition
@@ -196,7 +214,10 @@ class ApplicationTargetOperationPort:
             )
         try:
             if operation == "application-target.configure" and name == "hindsight":
-                profile = validate_hindsight_profile_name(parameters.get("profile"))
+                profile = validate_hindsight_profile_name(
+                    parameters.get("profile")
+                    or (stored.profile if stored is not None else None)
+                )
                 if stored is not None and stored.profile != profile:
                     raise ApplicationError(
                         "integration_conflict",
@@ -204,15 +225,6 @@ class ApplicationTargetOperationPort:
                         next_actions=("mastic application-target remove hindsight",),
                     )
             adapter = self._adapter(operation, name, parameters, stored)
-            configuration = (
-                self._configuration(name, parameters, stored)
-                if operation
-                not in {
-                    "application-target.inspect",
-                    "application-target.remove",
-                }
-                else None
-            )
         except ApplicationError:
             raise
         except ApplicationTargetOwnershipRecoveryRequired as error:
@@ -240,6 +252,31 @@ class ApplicationTargetOperationPort:
             return plain_result
         if operation == "application-target.inspect":
             return _plain(adapter.inspect())
+        if operation == "application-target.configure" and stored is not None:
+            inspection = adapter.inspect()
+            if not isinstance(inspection, Mapping):
+                raise ApplicationError(
+                    "application_target_recovery_required",
+                    f"Application Configuration Target {name!r} returned an invalid inspection",
+                    next_actions=(f"mastic application-target inspect {name}",),
+                )
+            if inspection.get("state") != "healthy":
+                return self._resolve_drift(name, parameters, stored, adapter)
+            if parameters.get("drift_resolution") is not None:
+                raise ApplicationError(
+                    "invalid_parameter",
+                    f"Application Configuration Target {name!r} has no drift to resolve",
+                )
+        try:
+            configuration = self._configuration(name, parameters, stored)
+        except ApplicationError:
+            raise
+        except (KeyError, ValueError) as error:
+            raise ApplicationError(
+                "invalid_parameter",
+                str(error),
+                next_actions=(f"mastic {operation.replace('.', ' ')} --help",),
+            ) from error
         assert configuration is not None
         if operation == "application-target.configure":
             try:
@@ -270,16 +307,26 @@ class ApplicationTargetOperationPort:
                 raise
             return {"preview": _plain(preview), "result": _plain(result)}
         if operation == "application-target.test":
+            assert stored is not None
             profile = str(
                 parameters.get("profile")
                 or ("reflect" if name == "hindsight" else "coding")
             )
             try:
-                response = adapter.test(
+                inspection = adapter.inspect()
+                if (
+                    not isinstance(inspection, Mapping)
+                    or inspection.get("state") != "healthy"
+                ):
+                    raise ApplicationError(
+                        "application_target_drifted",
+                        f"Application Configuration Target {name!r} is not healthy",
+                        next_actions=(f"mastic application-target inspect {name}",),
+                    )
+                response = self._canary.run(
+                    name,
                     configuration,
-                    lambda endpoint, model, payload: self._request(
-                        name, endpoint, model, payload
-                    ),
+                    stored,
                     profile=profile,
                 )
             except KeyError as error:
@@ -293,6 +340,114 @@ class ApplicationTargetOperationPort:
             "operation_unavailable",
             f"{operation} is not an Application Configuration Target operation",
         )
+
+    def _resolve_drift(
+        self,
+        name: str,
+        parameters: Mapping[str, object],
+        stored: ApplicationTargetSettings,
+        adapter: ApplicationTargetAdapter,
+    ) -> Mapping[str, object]:
+        raw_resolution = parameters.get("drift_resolution")
+        if raw_resolution is None:
+            raise _application_target_drifted(name)
+        try:
+            resolution = ApplicationTargetDriftIntent(str(raw_resolution))
+        except ValueError as error:
+            raise ApplicationError(
+                "invalid_parameter",
+                "drift_resolution must be reapply, adopt, or relinquish",
+                next_actions=(f"mastic application-target inspect {name}",),
+            ) from error
+        desired_parameters: dict[str, object] = {"service": stored.service}
+        if stored.profile is not None:
+            desired_parameters["profile"] = stored.profile
+        desired = self._configuration(name, desired_parameters, stored)
+        if resolution is ApplicationTargetDriftIntent.REAPPLY:
+            preview = adapter.preview(desired)
+            result = adapter.apply(desired)
+            return {
+                **_plain(
+                    ApplicationTargetDriftOutcome(
+                        name,
+                        resolution,
+                        external_configuration_changed=_changed(result),
+                        desired_state_changed=False,
+                        ownership_changed=_changed(result),
+                    )
+                ),
+                "preview": _plain(preview),
+            }
+        if resolution is ApplicationTargetDriftIntent.RELINQUISH:
+            rollback = adapter.rollback_point()
+            result = adapter.relinquish()
+            try:
+                self._record(name, None)
+            except Exception:
+                if self._settle_record_error(name, stored, None, rollback):
+                    pass
+                else:
+                    raise
+            return {
+                **_plain(
+                    ApplicationTargetDriftOutcome(
+                        name,
+                        resolution,
+                        external_configuration_changed=False,
+                        desired_state_changed=True,
+                        ownership_changed=_changed(result),
+                    )
+                )
+            }
+        try:
+            observed_parameters = adapter.observe_drift(desired)
+            observed_parameters = {
+                **desired_parameters,
+                **observed_parameters,
+            }
+            observed = self._configuration(name, observed_parameters, stored)
+            validate_application_target_sampling_profiles(
+                name, observed.sampling_profiles
+            )
+            adopted_settings = _application_target_settings(
+                name, observed_parameters, observed, stored
+            )
+        except (
+            ApplicationTargetIntegrationConflict,
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ) as error:
+            raise _application_target_adoption_blocked(name) from error
+        rollback = adapter.rollback_point()
+        try:
+            result = adapter.adopt_drift(observed)
+        except (
+            ApplicationTargetIntegrationConflict,
+            UnicodeError,
+            ValueError,
+        ) as error:
+            raise _application_target_adoption_blocked(name) from error
+        try:
+            self._record(name, adopted_settings)
+        except Exception:
+            if self._settle_record_error(name, stored, adopted_settings, rollback):
+                pass
+            else:
+                raise
+        return {
+            **_plain(
+                ApplicationTargetDriftOutcome(
+                    name,
+                    resolution,
+                    external_configuration_changed=False,
+                    desired_state_changed=adopted_settings != stored,
+                    ownership_changed=_changed(result),
+                )
+            )
+        }
 
     def _settle_record_error(
         self,
@@ -325,6 +480,35 @@ def _application_target_recovery_required(name: str) -> ApplicationError:
             f"mastic application-target remove {name}",
         ),
     )
+
+
+def _application_target_drifted(name: str) -> ApplicationError:
+    command = f"mastic application-target configure {name} --drift-resolution"
+    return ApplicationError(
+        "application_target_drifted",
+        f"Application Configuration Target {name!r} changed outside MASTIC",
+        next_actions=(
+            f"{command} reapply",
+            f"{command} adopt",
+            f"{command} relinquish",
+        ),
+    )
+
+
+def _application_target_adoption_blocked(name: str) -> ApplicationError:
+    return ApplicationError(
+        "application_target_adoption_blocked",
+        f"Application Configuration Target {name!r} cannot be adopted losslessly",
+        next_actions=(
+            f"mastic application-target configure {name} --drift-resolution reapply",
+            f"mastic application-target configure {name} --drift-resolution relinquish",
+        ),
+    )
+
+
+def _changed(result: object) -> bool:
+    plain = _plain(result)
+    return bool(plain.get("changed")) if isinstance(plain, Mapping) else False
 
 
 def _application_target_ownership_recovery_required(name: str) -> ApplicationError:
