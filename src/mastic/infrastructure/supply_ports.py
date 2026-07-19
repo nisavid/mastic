@@ -594,6 +594,8 @@ class RuntimeSupplyPort:
                 bundle.bundle_id,
                 self._installation_root,
                 before_publish=self._record_staged_installation,
+                stage_started=self._record_runtime_stage,
+                stage_finished=self._clear_runtime_stage,
             )
             requested_version = bundle.version
             requested_bundle_id: str | None = bundle.bundle_id
@@ -619,6 +621,8 @@ class RuntimeSupplyPort:
                 python=python,
                 installation_root=self._installation_root,
                 before_publish=self._record_staged_installation,
+                stage_started=self._record_runtime_stage,
+                stage_finished=self._clear_runtime_stage,
             )
             requested_version = version
             requested_bundle_id = None
@@ -959,6 +963,103 @@ class RuntimeSupplyPort:
             raise SupplyPortError("runtime ownership marker is invalid") from error
         return installation
 
+    def _record_runtime_stage(self, stage: Path, installation_id: str) -> None:
+        stage = _validate_runtime_staging_path(
+            stage, self._installation_root, installation_id
+        )
+        transition = self._runtime_stage_transition(stage)
+        payload = json.dumps(
+            {
+                "installation_id": installation_id,
+                "owner": "mastic",
+                "schema_version": 1,
+                "stage": stage.name,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        descriptor = os.open(
+            transition,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+            os.fsync(descriptor)
+            _fsync_directory(self._installation_root)
+        except Exception:
+            os.close(descriptor)
+            transition.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(descriptor)
+
+    def _clear_runtime_stage(self, stage: Path, installation_id: str) -> None:
+        transition = self._runtime_stage_transition(stage)
+        observed_stage, observed_id = self._read_runtime_stage_transition(transition)
+        if observed_stage != stage or observed_id != installation_id:
+            raise SupplyPortError(
+                f"runtime staging transition identity is invalid: {transition}"
+            )
+        transition.unlink()
+        _fsync_directory(self._installation_root)
+
+    def _read_runtime_stage_transition(self, transition: Path) -> tuple[Path, str]:
+        try:
+            descriptor = os.open(
+                transition,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as error:
+            raise SupplyPortError(
+                f"runtime staging transition is missing or unsafe: {transition}"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SupplyPortError(
+                    f"runtime staging transition is not a private file: {transition}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                raw = stream.read(4097)
+        finally:
+            os.close(descriptor)
+        try:
+            observed = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SupplyPortError("runtime staging transition is invalid") from error
+        if (
+            len(raw) > 4096
+            or not isinstance(observed, dict)
+            or set(observed) != {"installation_id", "owner", "schema_version", "stage"}
+            or observed["owner"] != "mastic"
+            or observed["schema_version"] != 1
+            or not isinstance(observed["installation_id"], str)
+            or not isinstance(observed["stage"], str)
+        ):
+            raise SupplyPortError("runtime staging transition is invalid")
+        installation_id = observed["installation_id"]
+        stage = _validate_runtime_staging_path(
+            self._installation_root / observed["stage"],
+            self._installation_root,
+            installation_id,
+        )
+        if transition != self._runtime_stage_transition(stage):
+            raise SupplyPortError(
+                f"runtime staging transition identity is invalid: {transition}"
+            )
+        return stage, installation_id
+
+    def _runtime_stage_transition(self, stage: Path) -> Path:
+        return self._installation_root / f"{stage.name}.json"
+
     def _runtime_tombstone(self, installation_id: str) -> Path:
         return self._installation_root / f".{installation_id}.removing"
 
@@ -969,6 +1070,39 @@ class RuntimeSupplyPort:
         config = self._config_store.load().value if self._config_store.exists else None
         configured = config.runtimes if config is not None else {}
         candidates = tuple(self._installation_root.iterdir())
+        reconciled_stages: set[str] = set()
+        for transition in candidates:
+            if (
+                re.fullmatch(
+                    r"\.[A-Za-z0-9][A-Za-z0-9._@+-]*\.staging-[A-Za-z0-9][A-Za-z0-9._+-]*\.json",
+                    transition.name,
+                )
+                is None
+            ):
+                continue
+            stage, installation_id = self._read_runtime_stage_transition(transition)
+            destination = self._installation_root / installation_id
+            if stage.exists():
+                _validate_runtime_staging_directory(
+                    stage, self._installation_root, installation_id
+                )
+                self._filesystem.remove(stage)
+                _fsync_directory(self._installation_root)
+            if installation_id in configured:
+                if not destination.exists():
+                    raise SupplyPortError(
+                        f"runtime staging recovery is missing {destination}"
+                    )
+                installation = self._read_managed_installation(installation_id)
+                if _runtime_installation(configured, installation_id) != installation:
+                    raise SupplyPortError(
+                        f"runtime staging transition does not match desired state: {transition}"
+                    )
+            elif destination.exists():
+                self._read_managed_installation(installation_id)
+            transition.unlink()
+            _fsync_directory(self._installation_root)
+            reconciled_stages.add(stage.name)
         reconciled: set[str] = set()
         for transition in candidates:
             match = re.fullmatch(
@@ -1023,6 +1157,17 @@ class RuntimeSupplyPort:
                 _fsync_directory(self._installation_root)
             reconciled.add(installation_id)
         for candidate in self._installation_root.iterdir():
+            if (
+                re.fullmatch(
+                    r"\.[A-Za-z0-9][A-Za-z0-9._@+-]*\.staging-[A-Za-z0-9][A-Za-z0-9._+-]*",
+                    candidate.name,
+                )
+                is not None
+                and candidate.name not in reconciled_stages
+            ):
+                raise SupplyPortError(
+                    f"runtime staging transition is missing ownership evidence: {candidate}"
+                )
             match = re.fullmatch(
                 r"\.([A-Za-z0-9][A-Za-z0-9._@+-]*)\.removing", candidate.name
             )
@@ -2074,7 +2219,7 @@ def _validate_runtime_directory(
 def _validate_runtime_staging_directory(
     path: Path, installation_root: Path, installation_id: str
 ) -> Path:
-    candidate = path.expanduser()
+    candidate = _validate_runtime_staging_path(path, installation_root, installation_id)
     try:
         metadata = candidate.lstat()
         resolved = candidate.resolve(strict=True)
@@ -2082,16 +2227,32 @@ def _validate_runtime_staging_directory(
         raise SupplyPortError(
             f"runtime staging directory is missing: {path}"
         ) from error
-    expected_prefix = f".{installation_id}.staging-"
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != os.getuid()
-        or resolved.parent != installation_root
-        or not resolved.name.startswith(expected_prefix)
     ):
         raise SupplyPortError(f"runtime staging directory is unsafe: {path}")
     return resolved
+
+
+def _validate_runtime_staging_path(
+    path: Path, installation_root: Path, installation_id: str
+) -> Path:
+    candidate = path.expanduser()
+    expected_prefix = f".{installation_id}.staging-"
+    try:
+        parent = candidate.parent.resolve(strict=True)
+    except OSError as error:
+        raise SupplyPortError(f"runtime staging path is unsafe: {path}") from error
+    token = candidate.name.removeprefix(expected_prefix)
+    if (
+        parent != installation_root
+        or not candidate.name.startswith(expected_prefix)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", token) is None
+    ):
+        raise SupplyPortError(f"runtime staging path is unsafe: {path}")
+    return candidate
 
 
 def _runtime_marker_payload(

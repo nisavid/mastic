@@ -334,6 +334,8 @@ class UnixControlServer:
                     task = asyncio.create_task(self._handle_request(request, send))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         finally:
             if connection is not None and connection.cancelling():
                 for task in tasks:
