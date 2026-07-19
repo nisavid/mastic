@@ -1142,6 +1142,37 @@ def _resumable_material_valid(resolved: ResolvedSetup, evidence: SetupEvidence) 
     return True
 
 
+def _durable_resumable_material_valid(step_id: str, evidence: SetupEvidence) -> bool:
+    if step_id not in {"runtime.install", "model.install"}:
+        return True
+    result = _evidence_result(evidence)
+    if result is None:
+        return False
+    installation_id = result.get("installation_id")
+    if not isinstance(installation_id, str) or not installation_id:
+        return False
+    revision = result.get("revision")
+    if step_id == "model.install":
+        return bool(
+            isinstance(revision, str)
+            and len(revision) in {40, 64}
+            and all(character in "0123456789abcdef" for character in revision)
+        )
+    lock_sha256 = result.get("lock_sha256")
+    return bool(
+        isinstance(result.get("runtime"), str)
+        and bool(result.get("runtime"))
+        and isinstance(result.get("version"), str)
+        and bool(result.get("version"))
+        and result.get("provenance") == "tested"
+        and isinstance(result.get("bundle_id"), str)
+        and bool(result.get("bundle_id"))
+        and isinstance(lock_sha256, str)
+        and len(lock_sha256) == 64
+        and all(character in "0123456789abcdef" for character in lock_sha256)
+    )
+
+
 def _content_free_result(
     resolved: ResolvedSetup,
     step_id: str,
@@ -1543,6 +1574,8 @@ def _durable_terminal_setup_evidence_valid(
 ) -> bool:
     if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
         return False
+    if not _durable_resumable_material_valid(step_id, evidence):
+        return False
     if step_id.startswith("application.canary."):
         if not performance_binding_valid:
             return False
@@ -1927,6 +1960,8 @@ def _terminal_setup_evidence_valid(
         return True
     if evidence.state is not StepState.COMPLETE:
         return False
+    if not _resumable_material_valid(resolved, evidence):
+        return False
     if evidence.step_id == "verify.request":
         return _verification_ready(evidence)
     if evidence.step_id.startswith("application.canary."):
@@ -1947,10 +1982,7 @@ def _reusable_setup_evidence(
         item
         for item in evidence
         if item.state is not StepState.COMPLETE
-        or (
-            _terminal_setup_evidence_valid(resolved, item, performance_profile)
-            and _resumable_material_valid(resolved, item)
-        )
+        or _terminal_setup_evidence_valid(resolved, item, performance_profile)
     )
 
 
