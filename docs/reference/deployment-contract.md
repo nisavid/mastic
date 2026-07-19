@@ -92,6 +92,12 @@ from a supported 48 GiB-or-larger host promote that exact policy to `validated`.
 A correct canary remains `Unverified` while the policy is provisional. Skipping a
 required canary also remains `Unverified`.
 
+`status`, `check`, `doctor`, and the TUI reconstruct these outcomes after a
+restart from the content-free setup plan and evidence. They re-inspect every
+selected Application Configuration Target before reporting it. Unhealthy or
+unobservable target state forces that target and the combined readiness to
+`Unverified`; `check` also fails its health policy.
+
 ## Ownership boundary
 
 The deployment owner may:
@@ -151,14 +157,19 @@ service in response to traffic. Runtime processes are launched from exact
 owned installations with validated argv, capabilities, cached model identity,
 and revision/runtime-scoped trust grants.
 
-## Deployment prerequisite validation
+## Deployment validation
 
 The installed control surface, explicit lifecycle, Application Configuration
-Targets, managed Gateway checks, and clean shutdown can be verified on the
-target Mac by following
-[Validate deployment prerequisites](../how-to/validate-deployment.md).
+Targets, bounded native canaries, durable setup outcome, and clean shutdown can
+be verified on the target Mac by following
+[Validate a target-Mac deployment](../how-to/validate-deployment.md).
 
-These prerequisite checks do not establish Deployment Readiness. Full
-readiness remains blocked until a separate procedure can safely exercise
-application-native requests from both Codex and a disposable Hindsight
-instance.
+The native request procedures are implemented: Codex runs ephemerally through
+its owned configuration, and Hindsight runs against a disposable local API and
+database. The current performance profile is still `provisional`, so successful
+canaries remain `Unverified` until matching clean-host measurements validate
+the profile. Operators must not promote that result by hand.
+
+A standalone `mastic application-target test` returns the same bounded native
+result on demand but does not rewrite setup evidence. Confirmed setup owns
+durable `Completion` and `Readiness`.

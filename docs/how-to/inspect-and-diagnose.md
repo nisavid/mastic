@@ -9,9 +9,10 @@ stack is stopped, degraded, or not serving requests.
 mastic status
 ```
 
-The overview reports the Supervisor, Gateway, inference services, active or
-recent operations, memory pressure, and valid next actions. A stopped resource
-does not make `status` fail when the observation itself succeeds.
+The overview reports setup `Completion`, overall and per-target `Readiness`,
+the Supervisor, Gateway, inference services, active or recent operations,
+memory pressure, and valid next actions. A stopped resource does not make
+`status` fail when the observation itself succeeds.
 
 For automation, request deterministic output:
 
@@ -29,6 +30,12 @@ Unlike `status`, `check` exits nonzero when the current system does not satisfy
 its health policy. Use it in scripts and CI when stopped or degraded service
 should fail the caller.
 
+`check` also re-observes configured Application Configuration Targets. Missing,
+drifted, or invalid owned settings make the affected target `Unverified` and
+fail the check. A correctly recorded canary that remains `Unverified` only
+because its performance policy is provisional does not fail the check by
+itself.
+
 To narrow the check to one inference service:
 
 ```sh
@@ -41,10 +48,10 @@ mastic service check SERVICE_NAME
 mastic doctor
 ```
 
-`doctor` correlates configuration, lifecycle, routing, runtime, and service
-evidence and returns stable next actions. Follow the narrowest suggested
-operation instead of editing MASTIC state or application configuration
-directly.
+`doctor` correlates the same current application-target observation with
+configuration, lifecycle, routing, runtime, and service evidence, then returns
+stable next actions. Follow the narrowest suggested operation instead of
+editing MASTIC state or application configuration directly.
 
 ## Inspect logs and durable work
 

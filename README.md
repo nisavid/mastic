@@ -36,9 +36,12 @@ Configuration Targets. The current recommended profile targets Macs with at
 least 48 GiB of unified memory and 24 GiB of free disk. Other exact selections
 use the exact-selection path and carry only the evidence collected for them.
 
-The repository validates the control plane and each managed Gateway contract.
-A clean-host, application-native Codex and Hindsight canary on the recommended
-target remains pending, so this development target is not yet a support claim.
+Setup runs a bounded application-native canary for each selected Codex or
+Hindsight target and records content-free exact-contract, phase, digest, and
+duration evidence. The recommended performance policy remains provisional
+until clean-host measurements from a matching 48 GiB-or-larger Mac validate
+its thresholds, so a successful canary currently remains `Unverified`. This
+development target is not yet a support claim.
 
 The current milestone is deliberately narrow. MASTIC is not yet a general
 adapter platform, remote inference host, multi-user service, or cross-platform
@@ -66,6 +69,8 @@ MASTIC inspects the host, builds an exact setup preview, and asks for
 confirmation before applying it. Model and runtime downloads can be
 substantial; review the selected revisions, projected resources, Application
 Configuration Targets, preflight, and ordered operations before continuing.
+After confirmation, setup reports installation `Completion` separately from
+application `Readiness`, including one result for each selected target.
 
 To learn the workflow without applying the previewed operations, follow
 [Preview your first local inference service](docs/tutorials/first-preview.md).
@@ -80,8 +85,11 @@ mastic tui
 ```
 
 Read-only commands do not start the Supervisor or inference services. `status`
-reports observed state; `check` returns a failing exit status when its health
-policy is not satisfied; `doctor` adds diagnosis and next actions.
+combines observed runtime state with durable setup `Completion`, overall
+`Readiness`, and current per-target health. `check` applies the same view and
+exits nonzero for operational failures or current target issues; provisional
+or explicitly skipped `Unverified` canary evidence alone is not a check
+failure. `doctor` adds bounded issues and next actions.
 
 See [How to inspect and diagnose a local stack](docs/how-to/inspect-and-diagnose.md)
 for a focused recovery workflow.
@@ -100,11 +108,12 @@ The [documentation index](docs/README.md) routes by what you need now:
 Run the project checks from a source checkout:
 
 ```sh
-uv run --frozen python -m unittest discover -s tests -t . -v
-uv run --frozen pyrefly check --output-format min-text
+uv sync --locked --dev
+uv run --frozen python -m unittest discover -s tests -t .
+uv run --frozen pyrefly check --output-format=min-text
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
-uv build
+uv build --build-constraints packaging/build-backend.lock --require-hashes
 ```
 
 Issues and implementation work are tracked in
