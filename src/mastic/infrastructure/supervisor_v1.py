@@ -910,6 +910,11 @@ class Supervisor:
                 continue
             identity = ProcessIdentity(pid, birth_token)
             if not self._probe.identity_matches(identity):
+                self._persist_recovery_result_locked(
+                    snapshot,
+                    "stopped",
+                    error="persisted process identity is no longer live",
+                )
                 continue
             process = self._processes.attach(pid)
             if (
@@ -917,6 +922,11 @@ class Supervisor:
                 or process.poll() is not None
                 or not self._probe.identity_matches(identity)
             ):
+                self._persist_recovery_result_locked(
+                    snapshot,
+                    "failed",
+                    error="persisted process could not be safely re-owned",
+                )
                 continue
             service = self._desired_state.service(service_name)
             if service is None:

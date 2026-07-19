@@ -97,12 +97,16 @@ class DaemonOperationRouter:
                     self._supervisor, operation, parameters, operation_id
                 )
             )
-            self._record_lifecycle(value)
             if operation == "supervisor.stop":
-                with self._condition:
-                    self._physically_stopped = True
-                    self._condition.notify_all()
-                self._request_stop()
+                try:
+                    self._record_lifecycle(value)
+                finally:
+                    with self._condition:
+                        self._physically_stopped = True
+                        self._condition.notify_all()
+                    self._request_stop()
+            else:
+                self._record_lifecycle(value)
             return value
         raise ApplicationError(
             "operation_unavailable", f"{operation} is not owned by masticd"
@@ -396,10 +400,12 @@ class DaemonOperationRouter:
 
     def stop(self) -> Mapping[str, object]:
         value = self._execute_supervisor_stop({}, None)
-        self._record_lifecycle(value)
-        with self._condition:
-            self._physically_stopped = True
-            self._condition.notify_all()
+        try:
+            self._record_lifecycle(value)
+        finally:
+            with self._condition:
+                self._physically_stopped = True
+                self._condition.notify_all()
         return value
 
     def _reconcile_pending_operations(self) -> None:

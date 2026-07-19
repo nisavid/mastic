@@ -681,6 +681,8 @@ class SupervisorTests(unittest.TestCase):
         other.start()
         self.assertEqual(self.processes.attached, [])
         self.assertTrue(process.running)
+        self.assertEqual(self.store.snapshot_items[-1]["state"], "stopped")
+        self.assertIn("no longer live", self.store.snapshot_items[-1]["error"])
 
     def test_recovery_requires_current_launch_identity_and_live_readiness(self) -> None:
         identity = ProcessIdentity(1234, "birth-1234")
