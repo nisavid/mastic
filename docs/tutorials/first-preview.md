@@ -47,8 +47,10 @@ mastic status --plain
 ```
 
 On an unconfigured system, the Supervisor and Gateway should report `stopped`
-and the service list should be empty. The observation itself succeeds without
-starting either process.
+and the service list should be empty. The `completion` field should be
+`partial`, `readiness` should be `pending`, and
+`application_target_readiness` should be empty. The observation itself
+succeeds without starting either process.
 
 ## Discover the runtime definitions
 
@@ -83,6 +85,11 @@ You have now completed the preview path. When you are ready to create the
 stack, rerun `mastic setup`, review the current preview again, and confirm it.
 Material host evidence can change, so an earlier preview is not permission to
 apply later operations unseen.
+
+A confirmed setup finishes with a bounded application-native canary for each
+selected Codex or Hindsight target. Its result reports `Completion`
+independently from overall and per-target `Readiness`; a complete installation
+may remain `Unverified` while its performance policy is provisional.
 
 For day-to-day inspection after setup, continue with
 [How to inspect and diagnose a local stack](../how-to/inspect-and-diagnose.md).
