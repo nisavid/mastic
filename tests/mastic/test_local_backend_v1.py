@@ -381,6 +381,31 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(check["state"], "failed")
             self.assertFalse(doctor["healthy"])
 
+    def test_doctor_reuses_the_durable_codex_observation(self) -> None:
+        outcomes = _SetupOutcomes(
+            {
+                "completion": "complete",
+                "readiness": "ready",
+                "application_target_readiness": {"codex": "ready"},
+                "application_target_issues": (),
+            }
+        )
+        application_targets = _Port({"state": "healthy"})
+        with TemporaryDirectory() as directory:
+            backend, _state = self._backend(
+                Path(directory),
+                setup_outcomes=outcomes,
+                application_targets=application_targets,
+            )
+
+            result = backend.prepare(OperationRequest("doctor")).execute()
+
+            self.assertEqual(application_targets.calls, [])
+            self.assertNotIn(
+                "codex_catalog_unknown",
+                {issue["code"] for issue in result["issues"]},
+            )
+
     def test_status_reports_failed_for_unhealthy_top_level_components(self) -> None:
         for component, component_state in (
             ("supervisor", "failed"),

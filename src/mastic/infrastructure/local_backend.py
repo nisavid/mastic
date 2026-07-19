@@ -418,9 +418,9 @@ class LocalOperationBackend:
         )
         raw_target_readiness = setup_outcome.get("application_target_readiness")
         target_readiness = (
-            raw_target_readiness.items()
+            dict(raw_target_readiness)
             if isinstance(raw_target_readiness, Mapping)
-            else ()
+            else {}
         )
         supervisor = self._latest("supervisor", "supervisor") or {"state": "stopped"}
         gateway = self._latest("gateway", "gateway") or {
@@ -494,7 +494,7 @@ class LocalOperationBackend:
                         "name": f"application-target:{target}",
                         "state": str(target_state),
                     }
-                    for target, target_state in target_readiness
+                    for target, target_state in target_readiness.items()
                 ),
             ]
         elif name == "doctor":
@@ -531,32 +531,36 @@ class LocalOperationBackend:
                                 ],
                             }
                         )
-                    integration = self._application_targets.execute(
-                        "application-target.inspect", {"application_target": "codex"}
-                    )
-                    if integration.get("state") in {
-                        "missing",
-                        "drifted",
-                        "incompatible",
-                        "malformed",
-                    }:
-                        issues.append(
-                            {
-                                "code": "codex_catalog_unhealthy",
-                                "message": str(
-                                    integration.get(
-                                        "detail",
-                                        "Codex Application Configuration Target is unhealthy.",
-                                    )
-                                ),
-                                "next_actions": list(
-                                    integration.get(
-                                        "next_actions",
-                                        ["mastic application-target configure codex"],
-                                    )
-                                ),
-                            }
+                    if "codex" not in target_readiness:
+                        integration = self._application_targets.execute(
+                            "application-target.inspect",
+                            {"application_target": "codex"},
                         )
+                        if integration.get("state") in {
+                            "missing",
+                            "drifted",
+                            "incompatible",
+                            "malformed",
+                        }:
+                            issues.append(
+                                {
+                                    "code": "codex_catalog_unhealthy",
+                                    "message": str(
+                                        integration.get(
+                                            "detail",
+                                            "Codex Application Configuration Target is unhealthy.",
+                                        )
+                                    ),
+                                    "next_actions": list(
+                                        integration.get(
+                                            "next_actions",
+                                            [
+                                                "mastic application-target configure codex"
+                                            ],
+                                        )
+                                    ),
+                                }
+                            )
                 except Exception as error:
                     issues.append(
                         {
