@@ -80,7 +80,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
     async def test_operations_console_has_stable_nav_workspace_and_inspector(
         self,
     ) -> None:
-        async with self.app.run_test(size=(140, 45)):
+        async with self.app.run_test(size=(140, 45)) as pilot:
             self.assertIsNotNone(self.app.query_one("#resource-nav"))
             self.assertIsNotNone(self.app.query_one("#workspace"))
             self.assertIsNotNone(self.app.query_one("#inspector"))
@@ -90,12 +90,13 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("blocked", body.lower())
 
     async def test_machine_state_formats_structured_gateway_status(self) -> None:
-        async with self.app.run_test(size=(140, 45)):
+        async with self.app.run_test(size=(140, 45)) as pilot:
             state = str(self.app.query_one("#machine-state", Static).content)
             self.assertIn("Gateway ready · 127.0.0.1:8766", state)
 
             self.app.snapshots = _Snapshots(GatewaySnapshot("stopped"))
             self.app.show_view("home")
+            await pilot.pause()
 
             state = str(self.app.query_one("#machine-state", Static).content)
             self.assertIn("Gateway stopped", state)
@@ -114,6 +115,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             )
 
             await pilot.click("#nav-services")
+            await pilot.pause()
             title = str(self.app.query_one("#view-title", Static).content)
             self.assertEqual(title, "Inference Services")
             self.assertIn(
@@ -121,6 +123,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             )
 
             await pilot.click("#nav-application-targets")
+            await pilot.pause()
             self.assertEqual(
                 self.dispatcher.requests[-1].name,
                 "application-target.list",
@@ -131,22 +134,53 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             )
 
             await pilot.click("#nav-topology")
+            await pilot.pause()
             topology = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Model → Runtime → Service → Gateway", topology)
             self.assertIn("qwen-optiq → optiq@0.2.15", topology)
 
             self.app.show_view("first-run")
+            await pilot.pause()
             first_run = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Preview Application Configuration Targets", first_run)
 
     async def test_resource_views_query_live_read_only_operations(self) -> None:
         async with self.app.run_test(size=(120, 40)) as pilot:
             await pilot.click("#nav-models")
+            await pilot.pause()
 
             self.assertEqual(self.dispatcher.requests[-1].name, "model.list")
             body = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("State", body)
             self.assertIn("complete", body)
+
+    async def test_slow_query_view_cannot_block_or_overwrite_navigation(self) -> None:
+        gate = Event()
+        self.dispatcher.execution_gate = gate
+        try:
+            async with self.app.run_test(size=(120, 40)) as pilot:
+                await pilot.click("#nav-models")
+                for _ in range(100):
+                    if any(
+                        request.name == "model.list"
+                        for request in self.dispatcher.requests
+                    ):
+                        break
+                    await pilot.pause()
+                else:
+                    self.fail("model query was not dispatched")
+
+                await pilot.click("#nav-topology")
+                gate.set()
+                await pilot.pause()
+
+                self.assertEqual(self.app.current_view, "topology")
+                self.assertEqual(
+                    str(self.app.query_one("#view-title", Static).content),
+                    "Resource topology",
+                )
+        finally:
+            gate.set()
 
     async def test_context_actions_and_command_catalogue_are_discoverable(self) -> None:
         async with self.app.run_test(size=(140, 45)) as pilot:
@@ -154,6 +188,7 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.app.selected_operation, "model.search")
 
             self.app.show_view("commands")
+            await pilot.pause()
             body = str(self.app.query_one("#view-body", Static).content)
             self.assertIn("Every CLI operation is available here", body)
             self.assertIn("model.search", body)

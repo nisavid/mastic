@@ -53,11 +53,13 @@ class LocalApplicationTargetIntegrationFactory:
         hindsight_profiles_dir: str | Path,
         ownership_dir: str | Path,
         credential_reader: Callable[[Path], str] = read_gateway_token,
+        resolve_executable: Callable[[str], Path] | None = None,
     ) -> None:
         self.codex_config_path = Path(codex_config_path).expanduser()
         self.hindsight_profiles_dir = Path(hindsight_profiles_dir).expanduser()
         self.ownership_dir = Path(ownership_dir).expanduser()
         self._credential_reader = credential_reader
+        self._resolve_executable = resolve_executable
         self._ownership = ApplicationTargetOwnershipDiscovery(
             codex_config_path=self.codex_config_path,
             hindsight_profiles_dir=self.hindsight_profiles_dir,
@@ -86,6 +88,7 @@ class LocalApplicationTargetIntegrationFactory:
                 self.ownership_dir / "codex.config.backup",
                 catalog_path=self.ownership_dir / "codex-model-catalog.json",
                 catalog_backup_path=self.ownership_dir / "codex-model-catalog.backup",
+                resolve_executable=self._resolve_executable,
             )
         if name != "hindsight":
             raise ValueError(f"unsupported Application Configuration Target: {name}")

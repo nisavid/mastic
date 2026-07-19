@@ -61,6 +61,13 @@ class AdmissionPolicyTests(unittest.TestCase):
         self.assertIn(PressureAction.PRESENT_STOP_SEQUENCE, result.actions)
         self.assertEqual(result.operator_stop_sequence, ("vision", "coding"))
 
+    def test_critical_pressure_without_services_only_sheds_new_work(self) -> None:
+        result = PressurePolicy().evaluate(PressureLevel.CRITICAL, ())
+
+        self.assertEqual(result.actions, (PressureAction.SHED_NEW_WORK,))
+        self.assertEqual(result.stop_services, ())
+        self.assertEqual(result.operator_stop_sequence, ())
+
 
 if __name__ == "__main__":
     unittest.main()

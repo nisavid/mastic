@@ -25,6 +25,19 @@ from mastic.application.status import (
 )
 
 
+_QUERY_VIEWS = {
+    "runtimes": ("Runtime Installations", "runtime.list"),
+    "models": ("Models", "model.list"),
+    "operations": ("Durable operations", "operation.list"),
+    "application-targets": (
+        "Application Configuration Targets",
+        "application-target.list",
+    ),
+    "configuration": ("Configuration", "config.show"),
+    "doctor": ("Doctor", "doctor"),
+}
+
+
 class OperationCommands(Provider):
     """Expose every shared operation through Textual's command palette."""
 
@@ -426,19 +439,40 @@ class MasticApp(App[None]):
 
     def show_view(self, name: str) -> None:
         self._workspace_generation += 1
+        workspace_generation = self._workspace_generation
         self.selected_operation = None
         self.pending_parameters = None
         self.query_one("#operation-form", Vertical).styles.display = "none"
         self.query_one("#workspace-actions", Horizontal).styles.display = "block"
-        snapshot = self.snapshots.snapshot()
-        gateway = self._gateway_label(snapshot)
         self.current_view = name
+        self.query_one("#view-title", Static).update(name.replace("-", " ").title())
+        self.query_one("#view-body", Static).update("Loading current state…")
+        self._load_view(name, workspace_generation)
+
+    @work(exclusive=False, group="view-loading")
+    async def _load_view(self, name: str, workspace_generation: int) -> None:
+        snapshot = await asyncio.to_thread(self.snapshots.snapshot)
+        if workspace_generation != self._workspace_generation:
+            return
+        if name in _QUERY_VIEWS:
+            title, operation = _QUERY_VIEWS[name]
+            try:
+                result = await asyncio.to_thread(
+                    self.dispatcher.execute, OperationRequest(operation)
+                )
+                body = self._render_result(result.value)
+            except ApplicationError as error:
+                body = self._render_application_error(error)
+        else:
+            title, body = self._content(name, snapshot)
+        if workspace_generation != self._workspace_generation:
+            return
+        gateway = self._gateway_label(snapshot)
         self.query_one("#machine-state", Static).update(
             f"{self._state_mark(snapshot.supervisor)} Supervisor {snapshot.supervisor}   "
             f"{self._state_mark(snapshot.gateway.state)} Gateway {gateway}   "
             f"◆ Pressure {snapshot.pressure}   ↻ {snapshot.active_operations} active"
         )
-        title, body = self._content(name, snapshot)
         self.query_one("#view-title", Static).update(title)
         self.query_one("#view-body", Static).update(body)
         self.query_one("#inspector", Static).update(self._inspector(snapshot))
@@ -678,25 +712,6 @@ class MasticApp(App[None]):
                 "command or intent to open its complete workbench.\n\n"
                 + "\n".join(body).rstrip(),
             )
-        query_views = {
-            "runtimes": ("Runtime Installations", "runtime.list"),
-            "models": ("Models", "model.list"),
-            "operations": ("Durable operations", "operation.list"),
-            "application-targets": (
-                "Application Configuration Targets",
-                "application-target.list",
-            ),
-            "configuration": ("Configuration", "config.show"),
-            "doctor": ("Doctor", "doctor"),
-        }
-        if name in query_views:
-            title, operation = query_views[name]
-            try:
-                result = self.dispatcher.execute(OperationRequest(operation))
-                body = self._render_result(result.value)
-            except ApplicationError as error:
-                body = self._render_application_error(error)
-            return title, body
         return name.replace("-", " ").title(), "No data."
 
     @staticmethod

@@ -100,7 +100,57 @@ class FakeUpstreamClient:
         return response
 
 
+class FailOnceBuildClient(FakeUpstreamClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_build = True
+
+    def build_request(self, method: str, url: str, **kwargs) -> httpx.Request:
+        if self.fail_build:
+            self.fail_build = False
+            raise UnicodeEncodeError("ascii", "é", 0, 1, "non-ASCII header")
+        return super().build_request(method, url, **kwargs)
+
+
 class GatewayTests(unittest.TestCase):
+    def test_request_construction_failure_releases_admission_slot(self) -> None:
+        resolver = FakeResolver(
+            [GatewayRoute("coding", "ready", "http://127.0.0.1:49152")]
+        )
+        upstream = FailOnceBuildClient()
+        upstream.responses.append(
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={"id": "chatcmpl-1", "choices": []},
+            )
+        )
+        activity = FakeActivity()
+        app = create_gateway(
+            resolver, client_factory=lambda: upstream, activity=activity
+        )
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            failed = client.post(
+                "/v1/chat/completions", json={"model": "coding", "messages": []}
+            )
+            succeeded = client.post(
+                "/v1/chat/completions", json={"model": "coding", "messages": []}
+            )
+
+        self.assertEqual(failed.status_code, 500)
+        self.assertEqual(succeeded.status_code, 200)
+        self.assertEqual(
+            activity.events,
+            [
+                ("begin", "coding"),
+                ("end", "coding"),
+                ("begin", "coding"),
+                ("end", "coding"),
+            ],
+        )
+        self.assertEqual(activity.active["coding"], 0)
+
     def test_default_client_uses_the_response_timeout_as_read_idle_timeout(
         self,
     ) -> None:

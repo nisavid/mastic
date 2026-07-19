@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import replace
 
 from click.utils import strip_ansi
 from typer.testing import CliRunner
@@ -75,6 +76,37 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("service", result.output)
         self.assertIn("application-target", result.output)
         self.assertNotIn("client", result.output)
+
+    def test_required_integer_parameters_are_enforced_before_dispatch(self) -> None:
+        catalogue = dict(build_operation_catalogue())
+        search = catalogue["model.search"]
+        limit = next(
+            parameter for parameter in search.parameters if parameter.name == "limit"
+        )
+        catalogue["model.search"] = replace(
+            search,
+            parameters=(replace(limit, required=True),),
+        )
+        app = build_cli(self.dispatcher, catalogue, tui_launcher=lambda: 0)
+
+        missing = self.runner.invoke(app, ["model", "search"])
+        present = self.runner.invoke(app, ["model", "search", "--limit", "8"])
+
+        self.assertEqual(missing.exit_code, 2)
+        self.assertIn("--limit", missing.output)
+        self.assertEqual(present.exit_code, 0, present.output)
+        self.assertEqual(self.dispatcher.requests[-1].parameters["limit"], 8)
+
+    def test_catalogue_operations_require_a_registered_cli_group(self) -> None:
+        catalogue = dict(build_operation_catalogue())
+        catalogue["missing.inspect"] = replace(
+            catalogue["status"], name="missing.inspect"
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "missing.inspect.*registered CLI group.*missing"
+        ):
+            build_cli(self.dispatcher, catalogue, tui_launcher=lambda: 0)
 
     def test_application_target_is_the_only_configuration_target_command(self) -> None:
         canonical = self.runner.invoke(

@@ -84,6 +84,8 @@ class PressurePolicy:
                 (PressureAction.SHED_NEW_WORK, PressureAction.STOP_LRU_IDLE),
                 tuple(item.name for item in idle_unpinned),
             )
+        if not services:
+            return PressureResult((PressureAction.SHED_NEW_WORK,))
         sequence = tuple(
             item.name
             for item in sorted(

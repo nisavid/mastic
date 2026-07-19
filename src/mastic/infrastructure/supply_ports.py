@@ -1162,6 +1162,10 @@ class ModelSupplyPort:
         resource = _resource(parameters)
         target = _required(parameters, "target")
         config = self._config_store.load().value
+        if resource not in config.aliases:
+            raise SupplyPortError(
+                f"model rollback requires a Model Alias: {resource!r}"
+            )
         current, alias = _resolve_model(config, resource)
         if target not in config.models:
             raise SupplyPortError(f"unknown Model Installation: {target!r}")

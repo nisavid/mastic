@@ -370,7 +370,9 @@ main() {
     cp "$source" "$closure"
   else
     command -v curl >/dev/null || fail 'curl is required to fetch verified artifacts.'
-    curl --fail --silent --show-error --location "$closure_url" --output "$closure"
+    curl --fail --silent --show-error --location \
+      --connect-timeout 30 --max-time 1800 --retry 3 --retry-delay 2 \
+      "$closure_url" --output "$closure"
   fi
   verify_sha256 "$closure" $MASTIC_CLOSURE_SHA256
   validate_archive_members "$closure"

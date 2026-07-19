@@ -91,7 +91,7 @@ is environment variables plus direct Python execution
 
 The `mastic` operation catalogue is the explicit CLI/TUI parity contract. It
 contains setup, diagnostics, Supervisor, Gateway, runtime, model, service, the
-historical `client` target operation, operation, and configuration surfaces, and classifies whether each
+historical `client` target, operation, and configuration surfaces, and classifies whether each
 operation may start the Supervisor (`tools/mastic/src/mastic/application/catalogue.py:52-216`).
 The CLI and TUI call the same dispatcher; the TUI exposes every catalogue
 operation in its command palette (`tools/mastic/src/mastic/interfaces/tui.py:48-78`).

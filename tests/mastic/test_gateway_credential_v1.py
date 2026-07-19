@@ -29,6 +29,10 @@ class GatewayCredentialTests(unittest.TestCase):
             self.assertFalse(credential.authenticate("Bearer wrong"))
             self.assertTrue(credential.authenticate(f"Bearer {first}"))
 
+            path.unlink()
+            self.assertEqual(credential.authorization_header(), f"Bearer {first}")
+            self.assertTrue(credential.authenticate(f"Bearer {first}"))
+
     def test_rejects_symlink_non_private_and_non_regular_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

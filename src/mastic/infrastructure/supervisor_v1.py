@@ -1108,10 +1108,10 @@ class Supervisor:
         if identity is not None:
             snapshot["pid"] = identity.pid
             snapshot["process_identity"] = identity.birth_token
-            for field in ("upstream_port", "launch_identity"):
-                value = source.get(field)
+            for key in ("upstream_port", "launch_identity"):
+                value = source.get(key)
                 if isinstance(value, int | str):
-                    snapshot[field] = value
+                    snapshot[key] = value
         if error is not None:
             snapshot["error"] = error
         self._state_store.put_snapshot(snapshot)
@@ -1213,7 +1213,7 @@ class Supervisor:
     def _finish_operation_locked(
         self, operation_id: str, outcome: str, *, error: str | None = None
     ) -> None:
-        kind, resource = self._operation_metadata.get(
+        kind, resource = self._operation_metadata.pop(
             operation_id, ("lifecycle", "unknown")
         )
         current: dict[str, object] = {

@@ -6,6 +6,7 @@ import hmac
 import os
 import secrets
 import stat
+import threading
 from pathlib import Path
 
 
@@ -19,8 +20,18 @@ class GatewayCredential:
         self.path = Path(path)
         if not self.path.is_absolute():
             raise ValueError("Gateway credential path must be absolute")
+        self._token: str | None = None
+        self._token_lock = threading.Lock()
 
     def load_or_create(self) -> str:
+        if self._token is not None:
+            return self._token
+        with self._token_lock:
+            if self._token is None:
+                self._token = self._load_or_create_uncached()
+            return self._token
+
+    def _load_or_create_uncached(self) -> str:
         parent = _open_parent(self.path.parent)
         temporary_name = f".{self.path.name}.{secrets.token_hex(8)}.tmp"
         try:

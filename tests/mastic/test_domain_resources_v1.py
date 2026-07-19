@@ -57,7 +57,45 @@ class ResourceIdentityTests(unittest.TestCase):
         )
 
         self.assertEqual(runtime.family, RuntimeFamily.MLX_LM)
+        self.assertEqual(runtime.version, "0.31.3")
+        self.assertEqual(runtime.provenance, "mastic-tested")
         self.assertIn("max_context", runtime.capabilities)
+
+    def test_resource_name_fields_are_canonicalized_and_validated(self) -> None:
+        alias = ModelAlias("coding-model", "qwen-exact")  # type: ignore[arg-type]
+        service = InferenceService(
+            name="coding",  # type: ignore[arg-type]
+            model_alias="coding-model",  # type: ignore[arg-type]
+            runtime_installation="mlx-lm@0.31.3",
+            route="coding",  # type: ignore[arg-type]
+        )
+        run = ServiceRun(
+            run_id="run-1",
+            service_name="coding",  # type: ignore[arg-type]
+            state=ServiceRunState.READY,
+        )
+
+        self.assertIsInstance(alias.name, ResourceName)
+        self.assertIsInstance(service.name, ResourceName)
+        self.assertIsInstance(service.model_alias, ResourceName)
+        self.assertIsInstance(service.route, ResourceName)
+        self.assertIsInstance(run.service_name, ResourceName)
+
+        with self.assertRaisesRegex(ValueError, "resource name"):
+            ModelAlias("../escape", "qwen-exact")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "resource name"):
+            InferenceService(
+                name=ResourceName("coding"),
+                model_alias="has space",  # type: ignore[arg-type]
+                runtime_installation="mlx-lm@0.31.3",
+                route=ResourceName("coding"),
+            )
+        with self.assertRaisesRegex(ValueError, "resource name"):
+            ServiceRun(
+                run_id="run-1",
+                service_name="/absolute",  # type: ignore[arg-type]
+                state=ServiceRunState.READY,
+            )
 
     def test_invalid_resource_names_and_mutable_revisions_are_rejected(self) -> None:
         for invalid in ("", "has space", "../escape", "/absolute", "ümlaut"):

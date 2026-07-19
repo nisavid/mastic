@@ -252,10 +252,17 @@ def application_target_port(
     credential: GatewayCredential | None = None,
 ) -> ApplicationTargetOperationPort:
     gateway_credential = credential or GatewayCredential(paths.gateway_credential)
+
+    def resolve_application_executable(name: str) -> Path:
+        return _application_canary_executable(
+            name, home, paths.data_dir / "application-bin"
+        )
+
     factory = LocalApplicationTargetIntegrationFactory(
         codex_config_path=home / ".codex/config.toml",
         hindsight_profiles_dir=home / ".hindsight/profiles",
         ownership_dir=paths.state_dir / "application-targets",
+        resolve_executable=resolve_application_executable,
     )
 
     def settings(name: str) -> ApplicationTargetSettings | None:
@@ -405,9 +412,7 @@ def application_target_port(
         canary=NativeApplicationTargetCanary(
             home,
             uv_executable=paths.data_dir / "bootstrap-uv" / "uv",
-            resolve_executable=lambda name: _application_canary_executable(
-                name, home, paths.data_dir / "application-bin"
-            ),
+            resolve_executable=resolve_application_executable,
         ),
         settings=settings,
         record=record,
@@ -605,7 +610,10 @@ def configured_model_installations(
             "desired-state",
         )
         if item.provenance == "adopted":
-            assert item.path is not None
+            if item.path is None:
+                raise ValueError(
+                    f"adopted model installation {name!r} is missing its path"
+                )
             result[name] = ModelInstallation(
                 revision.revision_id,
                 revision,

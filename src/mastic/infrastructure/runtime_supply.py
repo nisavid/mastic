@@ -678,4 +678,9 @@ def _append_option(argv: list[str], option: OptionDefinition, value: object) -> 
         for item in value:
             argv.extend((option.flag, str(item)))
         return
-    argv.extend((option.flag, str(value)))
+    rendered = (
+        json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if isinstance(value, Mapping)
+        else str(value)
+    )
+    argv.extend((option.flag, rendered))
