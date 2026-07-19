@@ -420,6 +420,8 @@ class RuntimeManager:
         installation_root: Path,
         *,
         before_publish: Callable[[Path, RuntimeInstallation], None] | None = None,
+        stage_started: Callable[[Path, str], None] | None = None,
+        stage_finished: Callable[[Path, str], None] | None = None,
     ) -> RuntimeInstallation:
         bundle = self._bundle(bundle_id)
         lock_path = Path(bundle.lock_path)
@@ -437,6 +439,8 @@ class RuntimeManager:
             provenance="tested",
             bundle_id=bundle.bundle_id,
             before_publish=before_publish,
+            stage_started=stage_started,
+            stage_finished=stage_finished,
             install_argv=lambda stage: (
                 "uv",
                 "pip",
@@ -455,6 +459,8 @@ class RuntimeManager:
         python: str,
         installation_root: Path,
         before_publish: Callable[[Path, RuntimeInstallation], None] | None = None,
+        stage_started: Callable[[Path, str], None] | None = None,
+        stage_finished: Callable[[Path, str], None] | None = None,
     ) -> RuntimeInstallation:
         definition = self._catalogue.definition(runtime)
         _validate_component(version, "runtime version")
@@ -468,6 +474,8 @@ class RuntimeManager:
             provenance="custom",
             bundle_id=None,
             before_publish=before_publish,
+            stage_started=stage_started,
+            stage_finished=stage_finished,
             install_argv=lambda stage: (
                 "uv",
                 "pip",
@@ -506,9 +514,13 @@ class RuntimeManager:
         provenance: str,
         bundle_id: str | None,
         before_publish: Callable[[Path, RuntimeInstallation], None] | None,
+        stage_started: Callable[[Path, str], None] | None,
+        stage_finished: Callable[[Path, str], None] | None,
         install_argv: Callable[[Path], tuple[str, ...]],
     ) -> RuntimeInstallation:
         _validate_component(installation_id, "installation ID")
+        if (stage_started is None) != (stage_finished is None):
+            raise ValueError("runtime stage transition callbacks must be paired")
         definition = self._catalogue.definition(runtime)
         root = installation_root.expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -520,6 +532,9 @@ class RuntimeManager:
         stage = root / f".{installation_id}.staging-{staging_token}"
         if stage.exists():
             raise FileExistsError(f"runtime staging path already exists: {stage}")
+        if stage_started is not None:
+            stage_started(stage, installation_id)
+        published = False
         try:
             self._runner.run(("uv", "venv", "--python", python, str(stage)))
             self._runner.run(install_argv(stage))
@@ -536,10 +551,18 @@ class RuntimeManager:
             if before_publish is not None:
                 before_publish(stage, installation)
             stage.replace(final)
+            _fsync_directory(root)
+            published = True
+            if stage_finished is not None:
+                stage_finished(stage, installation_id)
             return installation
-        except Exception:
+        except BaseException:
+            if published:
+                raise
             if stage.exists():
                 shutil.rmtree(stage)
+            if not stage.exists() and stage_finished is not None:
+                stage_finished(stage, installation_id)
             raise
 
     def _installation(
@@ -681,6 +704,17 @@ _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 def _validate_component(value: str, label: str) -> None:
     if not _SAFE_COMPONENT.fullmatch(value):
         raise RuntimeSupplyError(f"invalid {label}: {value!r}")
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _append_option(argv: list[str], option: OptionDefinition, value: object) -> None:

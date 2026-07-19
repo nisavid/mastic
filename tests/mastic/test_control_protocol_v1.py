@@ -21,6 +21,41 @@ from mastic.infrastructure.control_protocol import (
 
 
 class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_peer_reset_while_sending_an_error_is_a_routine_disconnect(
+        self,
+    ) -> None:
+        class Reader:
+            async def readexactly(self, _size):
+                await asyncio.Event().wait()
+
+        class Writer:
+            def get_extra_info(self, _name):
+                return None
+
+            def write(self, _payload):
+                pass
+
+            async def drain(self):
+                raise ConnectionResetError("peer closed")
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                raise ConnectionResetError("peer closed")
+
+        async def handle(request, emit_progress):
+            return {}
+
+        server = UnixControlServer(
+            Path("/unused/masticd.sock"),
+            handle,
+            connection_idle_timeout=0.001,
+        )
+
+        await server._accept(Reader(), Writer())  # type: ignore[arg-type]
+        self.assertEqual(server._connections, set())
+
     async def test_server_rejects_unimplemented_protocol_versions(self) -> None:
         async def handle(request, emit_progress):
             return {}

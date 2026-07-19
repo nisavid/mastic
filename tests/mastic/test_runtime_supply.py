@@ -459,6 +459,41 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
 
 
 class RuntimeManagerTests(unittest.TestCase):
+    def test_interrupted_install_removes_its_journaled_stage(self) -> None:
+        class InterruptingRunner:
+            def run(self, argv):
+                if argv[:2] == ("uv", "venv"):
+                    Path(argv[-1], "bin").mkdir(parents=True)
+                raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            started = []
+            finished = []
+            manager = RuntimeManager(
+                RuntimeCatalogue.load_builtin(),
+                runner=InterruptingRunner(),
+                probe=FakeProbe("0.3.3", {"--model", "--host", "--port"}),
+                staging_token=lambda: "interrupted",
+            )
+
+            with self.assertRaises(KeyboardInterrupt):
+                manager.install_custom(
+                    "optiq",
+                    "0.3.3",
+                    python="3.13",
+                    installation_root=root,
+                    stage_started=lambda stage, installation_id: started.append(
+                        (stage, installation_id)
+                    ),
+                    stage_finished=lambda stage, installation_id: finished.append(
+                        (stage, installation_id)
+                    ),
+                )
+
+            self.assertEqual(finished, started)
+            self.assertFalse(started[0][0].exists())
+
     def test_tested_bundle_is_installed_immutably_from_an_exact_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

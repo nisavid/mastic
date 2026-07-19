@@ -63,6 +63,8 @@ class FakeRuntimeManager:
         installation_root: Path,
         *,
         before_publish=None,
+        stage_started=None,
+        stage_finished=None,
     ) -> RuntimeInstallation:
         self.calls.append(("install_tested", bundle_id, installation_root))
         runtime = bundle_id.split("-", 1)[0]
@@ -81,10 +83,14 @@ class FakeRuntimeManager:
         stage = (
             installation.root.parent / f".{installation.installation_id}.staging-fake"
         )
+        if stage_started is not None:
+            stage_started(stage, installation.installation_id)
         stage.mkdir(parents=True)
         if before_publish is not None:
             before_publish(stage, installation)
         stage.replace(installation.root)
+        if stage_finished is not None:
+            stage_finished(stage, installation.installation_id)
         return installation
 
     def install_custom(
@@ -95,6 +101,8 @@ class FakeRuntimeManager:
         python: str,
         installation_root: Path,
         before_publish=None,
+        stage_started=None,
+        stage_finished=None,
     ) -> RuntimeInstallation:
         self.calls.append(
             ("install_custom", runtime, version, python, installation_root)
@@ -105,10 +113,14 @@ class FakeRuntimeManager:
         stage = (
             installation.root.parent / f".{installation.installation_id}.staging-fake"
         )
+        if stage_started is not None:
+            stage_started(stage, installation.installation_id)
         stage.mkdir(parents=True)
         if before_publish is not None:
             before_publish(stage, installation)
         stage.replace(installation.root)
+        if stage_finished is not None:
+            stage_finished(stage, installation.installation_id)
         return installation
 
     def adopt_custom(self, runtime: str, root: Path) -> RuntimeInstallation:
@@ -404,6 +416,29 @@ port = 8766
             ),
         ):
             RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+    def test_runtime_startup_removes_a_journaled_stale_stage(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+        stage = port._installation_root / ".optiq-0.3-custom.staging-crashed"
+        port._record_runtime_stage(stage, "optiq-0.3-custom")
+        stage.mkdir()
+        (stage / "partial").write_text("partial", encoding="utf-8")
+
+        RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        self.assertFalse(stage.exists())
+        self.assertFalse((stage.parent / f"{stage.name}.json").exists())
+
+    def test_runtime_startup_never_deletes_an_unjournaled_stage(self) -> None:
+        manager = FakeRuntimeManager(self.root / "runtimes")
+        stage = self.root / "runtimes" / ".optiq-0.3-custom.staging-unknown"
+        stage.mkdir(parents=True)
+
+        with self.assertRaisesRegex(SupplyPortError, "ownership evidence"):
+            RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
+
+        self.assertTrue(stage.is_dir())
 
     def test_runtime_install_initializes_supported_v1_desired_state(self) -> None:
         store = ConfigStore(self.root / "fresh.toml", validate_config)
