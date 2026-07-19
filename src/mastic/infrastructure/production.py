@@ -456,7 +456,26 @@ def compose_local(
     """Build the CLI/TUI graph without inspecting or activating launchd."""
 
     resolved_home = (home or Path.home()).expanduser().resolve()
-    paths = paths or resolve_paths(home=resolved_home)
+    resolved_paths = paths or resolve_paths(home=resolved_home)
+    setup_transition = _setup_transition(resolved_paths)
+    with setup_transition():
+        return _compose_local_locked(
+            paths=resolved_paths,
+            resolved_home=resolved_home,
+            executable=executable,
+            setup_transition=setup_transition,
+        )
+
+
+def _compose_local_locked(
+    *,
+    paths: MasticPaths,
+    resolved_home: Path,
+    executable: Path | None,
+    setup_transition: _ReentrantPrivateFileLock,
+) -> ProductionApplication:
+    """Build the local graph while state removal cannot cross composition."""
+
     paths.prepare()
     credential = GatewayCredential(paths.gateway_credential)
     executable = (executable or Path(sys.executable)).expanduser().absolute()
@@ -491,11 +510,14 @@ def compose_local(
         ),
     )
     application_targets = application_target_port(
-        resolved_home, paths, config_store, credential=credential
+        resolved_home,
+        paths,
+        config_store,
+        credential=credential,
+        transition=setup_transition,
     )
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
-    setup_transition = _setup_transition(paths)
     applications = ApplicationSupply(
         resolved_home,
         paths.data_dir / "bootstrap-artifacts" / "application-targets-v1",

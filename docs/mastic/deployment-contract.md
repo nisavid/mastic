@@ -48,6 +48,7 @@ restart it.
 | --- | --- | --- |
 | Desired state | `~/.config/mastic/config.toml` | `MASTIC_CONFIG_DIR` |
 | SQLite state and socket | `~/.local/state/mastic/` | `MASTIC_STATE_DIR` |
+| Setup and removal coordination | `~/.local/state/.mastic-locks/setup-removal.lock` | Derived from `MASTIC_STATE_DIR` and the configured product roots |
 | Application Configuration Target ownership | `~/.local/state/mastic/application-targets/` | `MASTIC_STATE_DIR` |
 | Runtime Installations | `~/.local/share/mastic/runtimes/` | `MASTIC_DATA_DIR` |
 | Verified bootstrap `uv` | `~/.local/share/mastic/bootstrap-uv/uv` | `MASTIC_DATA_DIR` |
@@ -60,6 +61,13 @@ restart it.
 
 Directories are user-owned, non-symlink directories with mode `0700`.
 Supervisor and service logs are user-owned regular files with mode `0600`.
+
+The setup and removal coordination directory is placed under the nearest ancestor
+of `MASTIC_STATE_DIR` where its lock is outside the configured config, state,
+data, and log roots. The lock is a user-owned regular file with mode `0600`. The
+directory and `setup-removal.lock` intentionally remain after those product
+roots are removed, so concurrent confirmed setup and removal transactions
+continue to share one stable exclusion boundary.
 
 The Hugging Face cache remains shared and is not product-owned. mastic manages
 its bytes through model-cache operations and reference checks.

@@ -1243,7 +1243,7 @@ class SetupOperationPortTests(unittest.TestCase):
 
             def blocking_uninstall(command, **_kwargs):
                 uninstall_started.set()
-                if not finish_uninstall.wait(2):
+                if not finish_uninstall.wait(5):
                     raise TimeoutError("concurrent state removal did not complete")
                 shutil.rmtree(api_root)
                 for path in launchers.values():
