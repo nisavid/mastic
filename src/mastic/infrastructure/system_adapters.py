@@ -117,16 +117,24 @@ class PsutilManagedProcess:
             return 0
 
     def terminate(self) -> None:
-        self._process.terminate()
+        try:
+            self._process.terminate()
+        except psutil.NoSuchProcess:
+            pass
 
     def kill(self) -> None:
-        self._process.kill()
+        try:
+            self._process.kill()
+        except psutil.NoSuchProcess:
+            pass
 
     def wait(self, timeout: float) -> int:
         try:
             return self._process.wait(timeout=timeout)
         except psutil.TimeoutExpired as error:
             raise TimeoutError from error
+        except psutil.NoSuchProcess:
+            return 0
 
 
 class MacOSProcessLauncher:

@@ -1604,7 +1604,7 @@ class _FakeServer:
 
 
 class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_start_failure_is_not_masked_by_router_stop_failure(self) -> None:
+    async def test_start_failure_is_not_masked_by_cleanup_failures(self) -> None:
         class FailingRouter(_FakeRouter):
             def start(self):
                 raise ValueError("primary start failure")
@@ -1620,6 +1620,7 @@ class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
 
             async def close(self):
                 self.closed = True
+                raise OSError("secondary close failure")
 
         server = IdleServer()
         service = DaemonService(
@@ -1635,6 +1636,61 @@ class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("secondary stop failure" in note for note in raised.exception.__notes__)
         )
+        self.assertTrue(
+            any(
+                "secondary close failure" in note for note in raised.exception.__notes__
+            )
+        )
+
+    async def test_failed_maintenance_still_runs_all_cleanup_stages(self) -> None:
+        routers = []
+
+        class FailingMaintenanceRouter(_FakeRouter):
+            def __init__(self, request_stop) -> None:
+                super().__init__(request_stop)
+                self.failure_recorded = threading.Event()
+
+            def maintain(self):
+                raise ValueError("maintenance failure")
+
+            def record_maintenance_failure(self, error):
+                self.failure_recorded.set()
+                raise RuntimeError("maintenance record failure")
+
+        class IdleServer:
+            closed = False
+
+            async def start(self):
+                return None
+
+            async def close(self):
+                self.closed = True
+
+        server = IdleServer()
+
+        def router_factory(request_stop):
+            router = FailingMaintenanceRouter(request_stop)
+            routers.append(router)
+            return router
+
+        service = DaemonService(
+            Path("/tmp/masticd-maintenance-failure-test.sock"),
+            router_factory,
+            server_factory=lambda *args, **kwargs: server,
+            maintenance_interval=0.01,
+        )
+        task = asyncio.create_task(service.serve())
+        await asyncio.sleep(0)
+        await asyncio.wait_for(
+            asyncio.to_thread(routers[0].failure_recorded.wait), timeout=1
+        )
+        routers[0].request_stop()
+
+        with self.assertRaisesRegex(RuntimeError, "maintenance record failure"):
+            await asyncio.wait_for(task, timeout=1)
+
+        self.assertEqual(routers[0].stop_calls, 1)
+        self.assertTrue(server.closed)
 
     async def test_explicit_supervisor_stop_closes_control_service(self) -> None:
         routers = []
