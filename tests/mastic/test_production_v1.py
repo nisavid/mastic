@@ -1642,7 +1642,9 @@ class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_failed_maintenance_still_runs_all_cleanup_stages(self) -> None:
+    async def test_failed_maintenance_record_stops_and_runs_all_cleanup_stages(
+        self,
+    ) -> None:
         routers = []
 
         class FailingMaintenanceRouter(_FakeRouter):
@@ -1684,7 +1686,6 @@ class DaemonServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(
             asyncio.to_thread(routers[0].failure_recorded.wait), timeout=1
         )
-        routers[0].request_stop()
 
         with self.assertRaisesRegex(RuntimeError, "maintenance record failure"):
             await asyncio.wait_for(task, timeout=1)

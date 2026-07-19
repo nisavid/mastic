@@ -579,9 +579,13 @@ class DaemonService:
                         await asyncio.to_thread(router.maintain)
                     except Exception as error:
                         # A later pass may recover after a transient process/probe error.
-                        await asyncio.to_thread(
-                            router.record_maintenance_failure, error
-                        )
+                        try:
+                            await asyncio.to_thread(
+                                router.record_maintenance_failure, error
+                            )
+                        except Exception:
+                            request_stop()
+                            raise
                         continue
 
         try:
