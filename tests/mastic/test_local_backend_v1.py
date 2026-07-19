@@ -739,6 +739,59 @@ class LocalOperationBackendTests(unittest.TestCase):
                     f"{missing} is required for {request.name}",
                 )
 
+    def test_backend_rejects_blank_required_string_parameters(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+            invalid = (
+                (
+                    OperationRequest(
+                        "service.create",
+                        {
+                            "service": " \t",
+                            "model_alias": "coding",
+                            "runtime": "optiq-0.2.18",
+                        },
+                    ),
+                    "service",
+                ),
+                (
+                    OperationRequest(
+                        "runtime.adopt",
+                        {"runtime": "optiq", "path": "\n"},
+                    ),
+                    "path",
+                ),
+            )
+
+            for request, blank in invalid:
+                with (
+                    self.subTest(request=request),
+                    self.assertRaises(ApplicationError) as raised,
+                ):
+                    backend.prepare(request)
+                self.assertEqual(raised.exception.code, "invalid_parameter")
+                self.assertEqual(
+                    raised.exception.message,
+                    f"{blank} is required for {request.name}",
+                )
+
+    def test_required_json_parameter_can_be_empty(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+
+            prepared = backend.prepare(
+                OperationRequest(
+                    "model.trust",
+                    {
+                        "resource": "coding",
+                        "runtime": "optiq-0.2.18",
+                        "accepted_risks": [],
+                    },
+                )
+            )
+
+            self.assertEqual(prepared.events[-1]["parameters"]["accepted_risks"], [])
+
     def test_model_adopt_binds_execution_to_previewed_snapshot_fingerprint(
         self,
     ) -> None:
