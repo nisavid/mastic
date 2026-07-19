@@ -175,7 +175,7 @@ def _external_transition(
             for path in owned
         ):
             raise ValueError("transition lock must be outside removable paths")
-        return _ReentrantPrivateFileLock(candidate)
+        return _ReentrantPrivateFileLock(physical_candidate)
     parent = _canonical_transition_path(paths.state_dir).parent
     while True:
         candidate = parent / ".mastic-locks" / filename
@@ -184,7 +184,7 @@ def _external_transition(
             physical_candidate == path or physical_candidate.is_relative_to(path)
             for path in owned
         ):
-            return _ReentrantPrivateFileLock(candidate)
+            return _ReentrantPrivateFileLock(physical_candidate)
         if parent == parent.parent:
             raise ValueError("transition lock must be outside removable paths")
         parent = parent.parent
