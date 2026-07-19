@@ -744,10 +744,12 @@ class SetupResolver:
                 ordered.append(prior)
                 if record is not None:
                     record(prior)
-            if prior is not None and prior.state in {
-                StepState.COMPLETE,
-                StepState.SKIPPED,
-            }:
+            if prior is not None and (
+                prior.state is StepState.COMPLETE
+                or (
+                    prior.state is StepState.SKIPPED and step.state is StepState.SKIPPED
+                )
+            ):
                 continue
             if step.state is StepState.BLOCKED:
                 record_failure(step, step.reason)

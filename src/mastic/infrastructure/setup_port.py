@@ -1592,7 +1592,7 @@ def _durable_terminal_setup_evidence_valid(
             is not None
         )
     if evidence.state is StepState.SKIPPED:
-        return True
+        return False
     if step_id == "verify.request":
         return _verification_ready(evidence)
     return True
@@ -1956,20 +1956,22 @@ def _terminal_setup_evidence_valid(
     evidence: SetupEvidence,
     performance_profile: Mapping[str, object],
 ) -> bool:
-    if evidence.state is StepState.SKIPPED:
-        return True
-    if evidence.state is not StepState.COMPLETE:
+    if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
         return False
-    if not _resumable_material_valid(resolved, evidence):
-        return False
-    if evidence.step_id == "verify.request":
-        return _verification_ready(evidence)
     if evidence.step_id.startswith("application.canary."):
+        if evidence.state is StepState.SKIPPED:
+            return True
         target = evidence.step_id.removeprefix("application.canary.")
         return (
             _evidenced_canary_band(resolved, target, evidence, performance_profile)
             is not None
         )
+    if evidence.state is StepState.SKIPPED:
+        return False
+    if not _resumable_material_valid(resolved, evidence):
+        return False
+    if evidence.step_id == "verify.request":
+        return _verification_ready(evidence)
     return True
 
 
@@ -1981,8 +1983,14 @@ def _reusable_setup_evidence(
     return tuple(
         item
         for item in evidence
-        if item.state is not StepState.COMPLETE
-        or _terminal_setup_evidence_valid(resolved, item, performance_profile)
+        if (
+            item.state is not StepState.SKIPPED
+            or item.step_id.startswith("application.canary.")
+        )
+        and (
+            item.state is not StepState.COMPLETE
+            or _terminal_setup_evidence_valid(resolved, item, performance_profile)
+        )
     )
 
 
