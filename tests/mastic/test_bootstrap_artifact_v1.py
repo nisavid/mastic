@@ -391,6 +391,9 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 / "bootstrap-artifacts/application-targets-v1/manifest.json": b"previous manifest",
                 data
                 / "bootstrap-artifacts/bootstrap-receipt.json": b"previous receipt",
+                data / "tools/mastic/release.txt": b"previous tool",
+                home / ".local/bin/mastic": b"previous mastic launcher",
+                home / ".local/bin/masticd": b"previous masticd launcher",
             }
             for path, content in previous.items():
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,7 +403,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "BOOTSTRAP_UV_FAIL": "1",
+                    "BOOTSTRAP_UV_FAIL_AFTER_MUTATION": "1",
                     "BOOTSTRAP_UV_LOG": str(uv_log),
                 },
             ):
@@ -409,6 +412,41 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 )
 
             self.assertNotEqual(completed.returncode, 0)
+            for path, content in previous.items():
+                self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(list(data.rglob(".*.mastic-backup.*")), [])
+            self.assertEqual(list(data.rglob(".*.mastic-bootstrap.*")), [])
+
+    def test_termination_after_tool_mutation_restores_the_previous_tool_release(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            data = home / ".local/share/mastic"
+            previous = {
+                data / "tools/mastic/release.txt": b"previous tool",
+                home / ".local/bin/mastic": b"previous mastic launcher",
+                home / ".local/bin/masticd": b"previous masticd launcher",
+            }
+            for path, content in previous.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_UV_LOG": str(root / "uv.log"),
+                    "BOOTSTRAP_UV_TERM_AFTER_MUTATION": "1",
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 143, completed.stderr)
             for path, content in previous.items():
                 self.assertEqual(path.read_bytes(), content)
             self.assertEqual(list(data.rglob(".*.mastic-backup.*")), [])
@@ -528,7 +566,16 @@ class _ArtifactFixture:
             "#!/bin/zsh\n"
             "[[ -n ${BOOTSTRAP_UV_FAIL:-} ]] && exit 97\n"
             'print -r -- "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR" '
-            '"$*" >"$BOOTSTRAP_UV_LOG"\n',
+            '"$*" >"${BOOTSTRAP_UV_LOG:-/dev/null}"\n'
+            'mkdir -p -- "$UV_TOOL_DIR/mastic" "$UV_TOOL_BIN_DIR"\n'
+            'print -rn -- "new tool" >"$UV_TOOL_DIR/mastic/release.txt"\n'
+            'print -rn -- "new mastic" >"$UV_TOOL_BIN_DIR/mastic"\n'
+            'print -rn -- "new masticd" >"$UV_TOOL_BIN_DIR/masticd"\n'
+            "[[ -n ${BOOTSTRAP_UV_FAIL_AFTER_MUTATION:-} ]] && exit 97\n"
+            "if [[ -n ${BOOTSTRAP_UV_TERM_AFTER_MUTATION:-} ]]; then\n"
+            "  kill -TERM $PPID\n"
+            "  sleep 1\n"
+            "fi\n",
             encoding="utf-8",
         )
         uv.chmod(0o755)
