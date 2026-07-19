@@ -1,6 +1,11 @@
 import json
+import hashlib
+import shutil
+import subprocess
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +22,10 @@ from mastic.application.setup import (
     StepState,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
+from mastic.infrastructure.application_supply import ApplicationSupply
+from mastic.infrastructure.paths_v1 import MasticPaths
+from mastic.infrastructure.production import _setup_transition
+from mastic.infrastructure.production_host import OwnedStateRemover
 from mastic.infrastructure.setup_port import (
     OperationalSetupEvidenceStore,
     SetupOperationPort,
@@ -219,7 +228,18 @@ class SetupOperationPortTests(unittest.TestCase):
             unrelated_settings=("Codex theme", "Hindsight bank ID"),
         )
 
-    def port(self, *, model=None, facts=None, performance_profile=None):
+    def port(
+        self,
+        *,
+        model=None,
+        facts=None,
+        performance_profile=None,
+        applications=None,
+        config=None,
+        evidence=None,
+        inventory=None,
+        transition=None,
+    ):
         return SetupOperationPort(
             self.resolver,
             preflight=lambda offline: (
@@ -235,14 +255,15 @@ class SetupOperationPortTests(unittest.TestCase):
             ),
             runtime=self.runtime,
             model=model or self.model,
-            config=self.config,
-            applications=self.applications,
+            config=config or self.config,
+            applications=applications or self.applications,
             application_targets=self.application_targets,
             supervisor=self.supervisor,
             verifier=self.verifier,
-            evidence=self.evidence,
-            removal_inventory=lambda: self.inventory,
+            evidence=evidence or self.evidence,
+            removal_inventory=lambda: inventory or self.inventory,
             performance_profile=performance_profile,
+            transition=transition,
         )
 
     def test_preview_is_exact_machine_aware_editable_and_side_effect_free(self):
@@ -1156,6 +1177,144 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(state_remove[1]["paths"], self.inventory.product_owned_paths)
         self.assertNotIn(self.inventory.shared_cache_paths[0], state_remove[1]["paths"])
+
+    def test_supported_removal_workflows_serialize_application_and_state_removal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            state = root / "state"
+            state.mkdir()
+            tool_dir = root / "data/application-tools"
+            api_root = tool_dir / "hindsight-api"
+            api_root.mkdir(parents=True)
+            bin_dir = root / "data/application-bin"
+            bin_dir.mkdir(parents=True)
+            launcher_names = (
+                "hindsight-admin",
+                "hindsight-api",
+                "hindsight-local-mcp",
+                "hindsight-worker",
+            )
+            launchers = {name: bin_dir / name for name in launcher_names}
+            for name, path in launchers.items():
+                path.write_bytes(f"owned {name}".encode())
+            (state / "application-installations.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "complete",
+                        "applications": {
+                            "hindsight": {
+                                "version": "0.8.4",
+                                "provenance": "installed",
+                                "ownership": "mastic",
+                                "cli_path": str(home / ".local/bin/hindsight"),
+                                "cli_ownership": "third-party",
+                                "api_ownership": "mastic",
+                                "api_tool_root": str(api_root),
+                                "api_bin_paths": {
+                                    name: str(path) for name, path in launchers.items()
+                                },
+                                "api_bin_sha256": {
+                                    name: hashlib.sha256(
+                                        f"owned {name}".encode()
+                                    ).hexdigest()
+                                    for name in launchers
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = MasticPaths(root / "config", state, root / "data", root / "logs")
+            transition = _setup_transition(paths)
+            for owned_path in (
+                paths.config_dir,
+                paths.state_dir,
+                paths.data_dir,
+                paths.log_dir,
+            ):
+                self.assertFalse(transition.path.is_relative_to(owned_path))
+            uninstall_started = threading.Event()
+            finish_uninstall = threading.Event()
+
+            def blocking_uninstall(command, **_kwargs):
+                uninstall_started.set()
+                if not finish_uninstall.wait(2):
+                    raise TimeoutError("concurrent state removal did not complete")
+                shutil.rmtree(api_root)
+                for path in launchers.values():
+                    path.unlink()
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            applications = ApplicationSupply(
+                home,
+                root / "data/bootstrap-artifacts/application-targets-v1",
+                state,
+                uv_executable=root / "data/bootstrap-uv/uv",
+                application_tool_dir=tool_dir,
+                application_bin_dir=bin_dir,
+                run_command=blocking_uninstall,
+                transition=transition,
+            )
+            app_inventory = replace(
+                self.inventory,
+                running_services=(),
+                registered=False,
+                application_target_integrations=(),
+                product_owned_paths=(),
+                owned_applications=("hindsight",),
+            )
+            state_inventory = replace(
+                app_inventory,
+                product_owned_paths=(str(state),),
+                owned_applications=(),
+            )
+            app_port = self.port(
+                applications=applications,
+                evidence=FakeEvidenceStore(),
+                inventory=app_inventory,
+                transition=transition,
+            )
+            state_port = self.port(
+                config=OwnedStateRemover((state,)),
+                evidence=FakeEvidenceStore(),
+                inventory=state_inventory,
+                transition=transition,
+            )
+            app_preview = app_port.preview_removal()
+            state_preview = state_port.preview_removal()
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                app_removal = pool.submit(
+                    app_port.remove,
+                    {
+                        "confirmed": True,
+                        "preview_fingerprint": app_preview["preview_fingerprint"],
+                    },
+                )
+                self.assertTrue(uninstall_started.wait(1))
+                unconfirmed = pool.submit(state_port.remove, {}).result(timeout=1)
+                self.assertEqual(unconfirmed["state"], "review_required")
+                state_removal = pool.submit(
+                    state_port.remove,
+                    {
+                        "confirmed": True,
+                        "preview_fingerprint": state_preview["preview_fingerprint"],
+                    },
+                )
+                try:
+                    self.assertFalse(state_removal.done())
+                    self.assertTrue(state.exists())
+                finally:
+                    finish_uninstall.set()
+                app_removal.result(timeout=2)
+                state_removal.result(timeout=2)
+
+            self.assertFalse(state.exists())
 
     def test_operational_evidence_adapter_round_trips_content_free_evidence(self):
         state = FakeOperationalState()

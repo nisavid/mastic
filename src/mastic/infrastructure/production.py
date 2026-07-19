@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -26,7 +28,7 @@ from mastic.infrastructure.composition import (
     compose_application,
 )
 from mastic.infrastructure.application_supply import ApplicationSupply
-from mastic.infrastructure.config_store import ConfigStore
+from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.control_client import UnixControlClient
 from mastic.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
 from mastic.infrastructure.gateway_runtime import GatewayRuntime
@@ -96,6 +98,52 @@ from mastic.infrastructure.system_adapters import (
     MacOSProcessProbe,
     SystemClock,
 )
+
+
+class _ReentrantPrivateFileLock:
+    """Share one cross-process transition lock across nested operation owners."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._threads = threading.RLock()
+        self._local = threading.local()
+
+    @contextmanager
+    def __call__(self) -> Iterator[None]:
+        with self._threads:
+            depth = getattr(self._local, "depth", 0)
+            if depth:
+                self._local.depth = depth + 1
+                try:
+                    yield
+                finally:
+                    self._local.depth -= 1
+                return
+            with private_file_lock(self.path):
+                self._local.depth = 1
+                try:
+                    yield
+                finally:
+                    self._local.depth = 0
+
+
+def _setup_transition(paths: MasticPaths) -> _ReentrantPrivateFileLock:
+    """Place the setup/removal lock outside every path removed by that workflow."""
+
+    owned = tuple(
+        path.expanduser().absolute()
+        for path in (paths.config_dir, paths.state_dir, paths.data_dir, paths.log_dir)
+    )
+    parent = paths.state_dir.expanduser().absolute().parent
+    while True:
+        candidate = parent / ".mastic-locks" / "setup-removal.lock"
+        if not any(
+            candidate == path or candidate.is_relative_to(path) for path in owned
+        ):
+            return _ReentrantPrivateFileLock(candidate)
+        if parent == parent.parent:
+            raise ValueError("setup transition lock must be outside removable paths")
+        parent = parent.parent
 
 
 LAUNCHD_LABEL = "io.nisavid.masticd"
@@ -447,6 +495,7 @@ def compose_local(
     )
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
+    setup_transition = _setup_transition(paths)
     applications = ApplicationSupply(
         resolved_home,
         paths.data_dir / "bootstrap-artifacts" / "application-targets-v1",
@@ -455,6 +504,7 @@ def compose_local(
         python_executable=(paths.data_dir / "bootstrap-python" / "bin" / "python3.11"),
         application_tool_dir=paths.data_dir / "application-tools",
         application_bin_dir=paths.data_dir / "application-bin",
+        transition=setup_transition,
     )
     setup = SetupOperationPort(
         _setup_resolver(),
@@ -475,6 +525,7 @@ def compose_local(
             resolved_home,
             application_inventory=applications.inventory(),
         ),
+        transition=setup_transition,
     )
     application = compose_application(
         paths=paths,

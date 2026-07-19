@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -159,6 +160,7 @@ class SetupOperationPort:
         evidence: EvidenceStore,
         removal_inventory: RemovalInventoryProvider,
         performance_profile: Mapping[str, object] | None = None,
+        transition: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
         self._resolver = resolver
         self._preflight = preflight
@@ -171,6 +173,7 @@ class SetupOperationPort:
         self._verifier = verifier
         self._evidence = evidence
         self._removal_inventory = removal_inventory
+        self._transition = transition or nullcontext
         selected_profile = (
             PHASE1_HOST_PERFORMANCE_PROFILE
             if performance_profile is None
@@ -190,6 +193,16 @@ class SetupOperationPort:
         return self._setup_preview(resolved)
 
     def execute(
+        self, operation: str, parameters: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        if parameters.get("confirmed") is True and parameters.get(
+            "preview_fingerprint"
+        ):
+            with self._transition():
+                return self._execute(operation, parameters)
+        return self._execute(operation, parameters)
+
+    def _execute(
         self, operation: str, parameters: Mapping[str, object]
     ) -> Mapping[str, object]:
         if operation != "setup":
@@ -315,6 +328,14 @@ class SetupOperationPort:
         )
 
     def remove(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
+        if parameters.get("confirmed") is True and parameters.get(
+            "preview_fingerprint"
+        ):
+            with self._transition():
+                return self._remove(parameters)
+        return self._remove(parameters)
+
+    def _remove(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         resolved = self._resolver.resolve_removal(self._removal_inventory())
         preview = self._removal_preview(resolved)
         if parameters.get("confirmed") is not True or not parameters.get(
