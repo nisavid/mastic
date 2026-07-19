@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from types import MappingProxyType
+from typing import Mapping, Protocol
 
 from mastic.application.catalogue import Operation, build_operation_catalogue
 from mastic.application.config_schema import MasticConfig, validate_config
@@ -34,7 +35,7 @@ class ApplicationComposition:
     """The one dispatcher and local state shared by CLI and TUI surfaces."""
 
     dispatcher: OperationDispatch
-    catalogue: dict[str, Operation]
+    catalogue: Mapping[str, Operation]
     config_store: ConfigStore[MasticConfig]
     state_store: OperationalStateStore
     snapshots: SnapshotProvider
@@ -93,7 +94,7 @@ def compose_application(
     dispatcher = OperationDispatcher(catalogue, activator, backend)
     return ApplicationComposition(
         dispatcher=dispatcher,
-        catalogue=catalogue,
+        catalogue=MappingProxyType(catalogue),
         config_store=config,
         state_store=state,
         snapshots=LocalSnapshotProvider(dispatcher),

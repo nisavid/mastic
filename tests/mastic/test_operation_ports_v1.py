@@ -580,11 +580,13 @@ class OperationPortTests(unittest.TestCase):
 
         tested = port.execute(
             "application-target.test",
-            {"application_target": "hindsight", "profile": "retain"},
+            {"application_target": "hindsight"},
         )
         port.execute("application-target.remove", {"application_target": "hindsight"})
 
+        self.assertEqual(tested["profile"], "retain")
         self.assertEqual(tested["response"]["target"], "hindsight")
+        self.assertEqual(tested["response"]["temperature"], 0.1)
         self.assertEqual(factory_calls[1][3].profile, "agent-memory")
         self.assertEqual(factory_calls[2][3].profile, "agent-memory")
         self.assertEqual(factory_calls[3][3].profile, "agent-memory")

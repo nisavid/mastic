@@ -179,7 +179,17 @@ def _add_command(
 def _command_signature(
     parameters: tuple[Parameter, ...], *, confirmation: bool
 ) -> Signature:
-    result = [_signature_parameter(parameter) for parameter in parameters]
+    rendered = [_signature_parameter(parameter) for parameter in parameters]
+    result = [
+        parameter
+        for parameter in rendered
+        if parameter.default is SignatureParameter.empty
+    ]
+    result.extend(
+        parameter
+        for parameter in rendered
+        if parameter.default is not SignatureParameter.empty
+    )
     if confirmation and not any(parameter.name == "yes" for parameter in parameters):
         result.append(
             SignatureParameter(

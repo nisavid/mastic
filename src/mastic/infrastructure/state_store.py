@@ -22,6 +22,11 @@ def _canonical_key(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
 
 
+def _is_credential_key(value: str, identity: str) -> bool:
+    segmented = value.casefold().replace("-", "_")
+    return identity in _CREDENTIAL_KEY_IDENTITIES or segmented.endswith("_token")
+
+
 _SENSITIVE_KEYS = frozenset(
     {
         "messages",
@@ -501,9 +506,7 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
                 raise SensitiveContentError(
                     f"operational state cannot persist inference content at {location}"
                 )
-            if normalized_key in _CREDENTIAL_KEY_IDENTITIES or (
-                normalized_key.endswith("token") and normalized_key != "birthtoken"
-            ):
+            if _is_credential_key(raw_key, normalized_key):
                 location = ".".join((*path, raw_key))
                 raise SensitiveContentError(
                     "operational state cannot persist credential material at "

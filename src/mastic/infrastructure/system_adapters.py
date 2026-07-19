@@ -108,10 +108,12 @@ class PsutilManagedProcess:
 
     def poll(self) -> int | None:
         try:
-            return self._process.wait(timeout=0)
-        except psutil.TimeoutExpired:
+            if not self._process.is_running():
+                return 0
+            if self._process.status() in {psutil.STATUS_DEAD, psutil.STATUS_ZOMBIE}:
+                return 0
             return None
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             return 0
 
     def terminate(self) -> None:

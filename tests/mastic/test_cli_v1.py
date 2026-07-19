@@ -85,7 +85,7 @@ class CliV1Tests(unittest.TestCase):
         )
         catalogue["model.search"] = replace(
             search,
-            parameters=(replace(limit, required=True),),
+            parameters=(search.parameters[0], replace(limit, required=True)),
         )
         app = build_cli(self.dispatcher, catalogue, tui_launcher=lambda: 0)
 

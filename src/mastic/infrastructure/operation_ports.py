@@ -319,7 +319,7 @@ class ApplicationTargetOperationPort:
             assert stored is not None
             profile = str(
                 parameters.get("profile")
-                or ("reflect" if name == "hindsight" else "coding")
+                or ("retain" if name == "hindsight" else "coding")
             )
             try:
                 inspection = adapter.inspect()

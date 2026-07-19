@@ -566,6 +566,7 @@ class DaemonService:
         installed_signals = []
         start_attempted = False
         maintenance_task: asyncio.Task[None] | None = None
+        primary_error: BaseException | None = None
 
         async def maintain() -> None:
             while not stopped.is_set():
@@ -601,18 +602,31 @@ class DaemonService:
                     pass
             maintenance_task = asyncio.create_task(maintain())
             await stopped.wait()
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
             initialized.set()
             stopped.set()
             if maintenance_task is not None:
                 await maintenance_task
+            stop_error: BaseException | None = None
             try:
                 if start_attempted:
                     await asyncio.to_thread(router.stop)
+            except BaseException as error:
+                stop_error = error
             finally:
                 await server.close()
                 for signum in installed_signals:
                     loop.remove_signal_handler(signum)
+            if stop_error is not None:
+                if primary_error is None:
+                    raise stop_error
+                primary_error.add_note(
+                    "Daemon router shutdown also failed: "
+                    f"{type(stop_error).__name__}: {stop_error}"
+                )
 
 
 def _operation_fingerprint(operation: str, parameters: Mapping[str, object]) -> str:
