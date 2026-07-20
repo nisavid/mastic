@@ -153,11 +153,14 @@ retain, and consolidation to non-thinking; and Hindsight reflect to general
 thinking. This is an mastic workload policy, not a claim that Qwen publishes
 Hindsight-specific recommendations.
 
-Client-specific Gateway profile endpoints enforce the selected values. The
-Codex Responses projection sends `temperature`, `top_p`, `top_k`, and the
-thinking template control; its omitted numeric values are neutral in the
-precise-coding profile. Hindsight uses Chat Completions, which carries the full
-six-value profile and thinking control. The adjacent
+Client-specific Gateway profile endpoints override client input with the
+selected wire values. This projects the configured profile; it does not by
+itself prove that the runtime honors it. Effective sampling enforcement
+requires a non-MTP generation path or acceptance evidence for both the sampler
+values and active MTP path. The Codex Responses projection sends `temperature`,
+`top_p`, `top_k`, and the thinking template control; its omitted numeric values
+are neutral in the precise-coding profile. Hindsight uses Chat Completions,
+which carries the full six-value profile and thinking control. The adjacent
 [`optiq-0.3.3-sampling-compatibility.md`](optiq-0.3.3-sampling-compatibility.md)
 records the exact transport evidence and remaining MTP acceptance risk.
 
