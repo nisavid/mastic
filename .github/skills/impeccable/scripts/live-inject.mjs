@@ -312,7 +312,9 @@ export default defineNuxtPlugin(() => {
 
 export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project = detectNuxtProject(cwd) }) {
   if (!project) return { error: 'nuxt_not_detected' };
-  const absFile = path.join(cwd, project.pluginFile);
+  const destination = resolveNuxtPluginDestination(cwd, project.pluginFile);
+  if (destination.error) return { file: project.pluginFile, error: destination.error };
+  const absFile = destination.file;
   const existing = fs.existsSync(absFile) ? fs.readFileSync(absFile, 'utf-8') : null;
   if (existing !== null && !existing.includes(NUXT_PLUGIN_MARKER)) {
     return {
@@ -323,7 +325,14 @@ export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project
   }
 
   const content = buildNuxtPlugin(port, token);
-  fs.mkdirSync(path.dirname(absFile), { recursive: true });
+  fs.mkdirSync(destination.dir, { recursive: true });
+  const resolvedDir = fs.realpathSync(destination.dir);
+  if (!pathIsWithin(destination.root, resolvedDir)) {
+    return { file: project.pluginFile, error: 'nuxt_plugin_path_outside_project' };
+  }
+  if (fs.existsSync(absFile) && fs.lstatSync(absFile).isSymbolicLink()) {
+    return { file: project.pluginFile, error: 'nuxt_plugin_symlink' };
+  }
   if (content !== existing) fs.writeFileSync(absFile, content, 'utf-8');
   return {
     file: project.pluginFile,
@@ -333,11 +342,38 @@ export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project
   };
 }
 
+function resolveNuxtPluginDestination(cwd, pluginFile) {
+  const root = fs.realpathSync(cwd);
+  const file = path.resolve(root, pluginFile);
+  const dir = path.dirname(file);
+  if (!pathIsWithin(root, file) || !pathIsWithin(root, dir)) {
+    return { error: 'nuxt_plugin_path_outside_project' };
+  }
+  let current = root;
+  for (const segment of path.relative(root, dir).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      return { error: 'nuxt_plugin_symlink' };
+    }
+  }
+  return { root, dir, file };
+}
+
+function pathIsWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
 export function removeNuxtLiveAdapter({ cwd = process.cwd(), project = detectNuxtProject(cwd) }) {
   if (!project) return { error: 'nuxt_not_detected' };
-  const absFile = path.join(cwd, project.pluginFile);
+  const destination = resolveNuxtPluginDestination(cwd, project.pluginFile);
+  if (destination.error) return { file: project.pluginFile, removed: false, error: destination.error };
+  const absFile = destination.file;
   if (!fs.existsSync(absFile)) {
     return { file: project.pluginFile, removed: false, note: 'no adapter present' };
+  }
+  if (fs.lstatSync(absFile).isSymbolicLink()) {
+    return { file: project.pluginFile, removed: false, error: 'nuxt_plugin_symlink' };
   }
   const content = fs.readFileSync(absFile, 'utf-8');
   if (!content.includes(NUXT_PLUGIN_MARKER)) {
@@ -349,7 +385,7 @@ export function removeNuxtLiveAdapter({ cwd = process.cwd(), project = detectNux
     };
   }
   fs.unlinkSync(absFile);
-  const pluginDir = path.dirname(absFile);
+  const pluginDir = destination.dir;
   if (fs.readdirSync(pluginDir).length === 0) fs.rmdirSync(pluginDir);
   return { file: project.pluginFile, removed: true };
 }

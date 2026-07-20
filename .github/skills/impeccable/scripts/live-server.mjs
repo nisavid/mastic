@@ -292,7 +292,13 @@ function missedCompletionFromSnapshot(snapshot) {
 
 function recordGenerationCheckpoint(event) {
   if (!event?.id || event.type !== 'checkpoint') return;
-  if (generationIsFenced(event.id)) return;
+  let snapshot = null;
+  try {
+    snapshot = state.sessionStore?.getSnapshot(event.id, { includeCompleted: true }) ?? null;
+  } catch {
+    // Checkpoint instrumentation is best-effort.
+  }
+  if (snapshot?.generationCanceled === true) return;
   // Only checkpoints that report a change in variant availability are
   // generation progress. The browser also checkpoints for durability on Tune
   // slider drags, resumes, and anchor recovery; treating those as progress
@@ -325,34 +331,15 @@ function recordGenerationCheckpoint(event) {
     checkpointReason: event.reason || null,
   };
   const at = Date.now();
-  if (!generationPhaseAlreadyRecorded(event.id, 'first_reviewable')) {
+  const timings = snapshot?.generationTimings || {};
+  if (!timings.first_reviewable) {
     recordAgentPhase(event.id, 'first_reviewable', { ...details, at });
   }
-  if (arrived >= 2 && expected >= 3 && !generationPhaseAlreadyRecorded(event.id, 'second_reviewable')) {
+  if (arrived >= 2 && expected >= 3 && !timings.second_reviewable) {
     recordAgentPhase(event.id, 'second_reviewable', { ...details, at });
   }
-  if (arrived >= expected && !generationPhaseAlreadyRecorded(event.id, 'all_variants_ready')) {
+  if (arrived >= expected && !timings.all_variants_ready) {
     recordAgentPhase(event.id, 'all_variants_ready', { ...details, at });
-  }
-}
-
-function generationIsFenced(id) {
-  if (!state.sessionStore || !id) return false;
-  try {
-    const snapshot = state.sessionStore.getSnapshot(id, { includeCompleted: true });
-    return snapshot?.generationCanceled === true;
-  } catch {
-    return false;
-  }
-}
-
-function generationPhaseAlreadyRecorded(id, phase) {
-  if (!state.sessionStore) return false;
-  try {
-    const snapshot = state.sessionStore.getSnapshot(id, { includeCompleted: true });
-    return !!snapshot?.generationTimings?.[phase];
-  } catch {
-    return false;
   }
 }
 

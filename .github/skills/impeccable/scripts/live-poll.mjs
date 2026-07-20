@@ -27,7 +27,7 @@ const scriptCmd = (name) => `node "${path.join(SELF_DIR, name)}"`;
 export const PER_REQUEST_TIMEOUT_MS = 270_000;
 export const DEFAULT_EVENT_LEASE_MS = 600_000;
 
-const EVENT_TYPES_NEEDING_AGENT_REPLY = new Set(['generate', 'steer', 'manual_edit_apply', 'carbonize_cleanup']);
+const EVENT_TYPES_NEEDING_AGENT_REPLY = new Set(['generate', 'steer', 'manual_edit_apply']);
 
 function readServerInfo() {
   const record = readLiveServerInfo(process.cwd());
