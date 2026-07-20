@@ -204,4 +204,5 @@ This contract deliberately leaves these choices to their owning tickets:
   secret storage, injection, forwarding, trust roots, and privacy;
 - supervisor strategy and engine-specific lifecycle behavior;
 - controller reconciliation cadence and process placement;
-- upgrade policy, currency enforcement, and legacy-sidecar retirement.
+- owner-specific upgrade mechanisms, signed offline Current support, and
+  legacy-sidecar retirement.

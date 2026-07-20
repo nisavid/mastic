@@ -804,14 +804,6 @@ class SetupResolver:
                     {"application_targets": inventory.application_target_integrations},
                 )
             )
-        if inventory.owned_applications:
-            specs.append(
-                (
-                    "application.remove",
-                    "Remove only MASTIC-owned application installations",
-                    {"applications": inventory.owned_applications},
-                )
-            )
         if inventory.product_owned_paths:
             specs.append(
                 (
@@ -834,7 +826,12 @@ class SetupResolver:
             retained_bytes_estimate=inventory.shared_cache_bytes,
             retained_settings=(
                 *inventory.unrelated_settings,
-                *inventory.retained_applications,
+                *tuple(
+                    sorted(
+                        set(inventory.owned_applications)
+                        | set(inventory.retained_applications)
+                    )
+                ),
             ),
         )
 

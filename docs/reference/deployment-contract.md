@@ -82,9 +82,10 @@ Bootstrap leaves an existing external `uv`, Codex, or Hindsight installation
 untouched. Guided setup adopts an exact matching application nonmutatively. A
 different application at the conventional path is a visible conflict; MASTIC
 does not replace it implicitly. Removal previews the product-owned roots and
-retains shared or external resources. It refuses to remove application-target
-fields or managed application artifacts when their current content no longer
-matches MASTIC's ownership evidence.
+retains shared resources and every external application. External-application
+removal requires a separate exact Removal Plan. Ordinary removal refuses to
+remove application-target fields when their current content no longer matches
+MASTIC's ownership evidence.
 
 ## Setup outcomes and performance evidence
 
