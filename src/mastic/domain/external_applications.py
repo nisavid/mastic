@@ -2,47 +2,19 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from .canonical import canonical_fingerprint, canonical_timestamp
-
-
-_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_ARTIFACT_DIGEST = re.compile(r"(?:sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})\Z")
-
-
-def _required_identity(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise ValueError(f"{field_name} is required")
-    if any(character.isspace() for character in value):
-        raise ValueError(f"{field_name} cannot contain whitespace")
-    return value
-
-
-def _sha256(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return value
-
-
-def _artifact_digest(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or _ARTIFACT_DIGEST.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 or SHA-512 digest")
-    return value
-
-
-def _aware(value: object, field_name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ValueError(f"{field_name} must be timezone-aware")
-    return value
+from .canonical import (
+    canonical_fingerprint,
+    canonical_timestamp,
+    require_artifact_digest as _artifact_digest,
+    require_aware as _aware,
+    require_identity as _required_identity,
+    require_sha256 as _sha256,
+)
 
 
 class ReleaseIntentKind(StrEnum):
@@ -110,6 +82,7 @@ class InstallationObservation:
     installation_identity: str
     owner_identity: str
     owner_installation_identity: str
+    owner_runtime_identity: str
     release_channel: str
     platform: str
     architecture: str
@@ -125,6 +98,7 @@ class InstallationObservation:
             "installation_identity",
             "owner_identity",
             "owner_installation_identity",
+            "owner_runtime_identity",
             "release_channel",
             "platform",
             "architecture",
@@ -155,10 +129,19 @@ class InstallationObservation:
 
     def payload(self) -> dict[str, object]:
         return {
+            **self.state_payload(),
+            "observed_at": canonical_timestamp(self.observed_at),
+        }
+
+    def state_payload(self) -> dict[str, object]:
+        """Return owner-controlled state without its observation timestamp."""
+
+        return {
             "application_identity": self.application_identity,
             "installation_identity": self.installation_identity,
             "owner_identity": self.owner_identity,
             "owner_installation_identity": self.owner_installation_identity,
+            "owner_runtime_identity": self.owner_runtime_identity,
             "release_channel": self.release_channel,
             "platform": self.platform,
             "architecture": self.architecture,
@@ -166,12 +149,15 @@ class InstallationObservation:
             "installed_artifact_digest": self.installed_artifact_digest,
             "active_invocation": self.active_invocation,
             "reachable_invocations": list(self.reachable_invocations),
-            "observed_at": canonical_timestamp(self.observed_at),
         }
 
     @property
     def fingerprint(self) -> str:
         return canonical_fingerprint(self.payload())
+
+    @property
+    def state_fingerprint(self) -> str:
+        return canonical_fingerprint(self.state_payload())
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,3 +276,20 @@ class CurrentReleaseResolution:
     @property
     def fingerprint(self) -> str:
         return canonical_fingerprint(self.canonical_payload())
+
+    @property
+    def resolved_target_fingerprint(self) -> str:
+        """Identify the resolved target independently of evidence freshness."""
+
+        freshness_fields = {
+            "installation_observation_fingerprint",
+            "observed_at",
+            "expires_at",
+        }
+        return canonical_fingerprint(
+            {
+                key: value
+                for key, value in self.canonical_payload().items()
+                if key not in freshness_fields
+            }
+        )

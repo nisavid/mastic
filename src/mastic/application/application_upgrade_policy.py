@@ -131,6 +131,7 @@ def build_upgrade_candidate(
         installation_observation_fingerprint=observation.fingerprint,
         owner_identity=installation.owner_identity,
         owner_installation_identity=observation.owner_installation_identity,
+        owner_runtime_identity=observation.owner_runtime_identity,
         release_channel=installation.release_intent.channel,
         platform=installation.platform,
         architecture=installation.architecture,

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Callable, Protocol
 
+from mastic.domain.canonical import require_identity as _validate_identity
 from mastic.domain.external_applications import (
     AuthorityReleaseObservation,
     CurrentReleaseResolution,
@@ -272,14 +273,3 @@ def _validate_observation_binding(
                 installation.installation_identity,
                 "selected installation does not match its exact observation",
             )
-
-
-def _validate_identity(value: object, field_name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or any(character.isspace() for character in value)
-    ):
-        raise ValueError(f"{field_name} must be a nonempty identity")
-    return value

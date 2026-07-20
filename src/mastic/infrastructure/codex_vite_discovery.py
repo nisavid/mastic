@@ -14,6 +14,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Protocol, Sequence
 
+from mastic.application.external_application_lifecycle import (
+    InstallationDiscoveryError,
+)
 from mastic.domain.canonical import canonical_fingerprint
 from mastic.domain.external_applications import InstallationObservation
 
@@ -49,7 +52,7 @@ class CodexViteDiscoveryFailure(StrEnum):
     DOCTOR_CONTRACT_UNAVAILABLE = "doctor_contract_unavailable"
 
 
-class CodexViteDiscoveryError(RuntimeError):
+class CodexViteDiscoveryError(InstallationDiscoveryError):
     def __init__(self, reason_code: str | CodexViteDiscoveryFailure) -> None:
         super().__init__(str(reason_code))
         self.reason_code = str(reason_code)
@@ -84,6 +87,8 @@ class CodexViteDiscovery:
         platform: str,
         architecture: str,
     ) -> None:
+        if platform != "darwin" or architecture != "arm64":
+            raise ValueError("Codex Vite discovery supports darwin/arm64")
         self._vp_home = Path(vp_home)
         self._path = tuple(Path(item) for item in path)
         self._runner = runner
@@ -194,26 +199,18 @@ class CodexViteDiscovery:
         ):
             raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
 
-        owner_installation_identity = canonical_fingerprint(
-            {
-                "bin_config_digest": _bytes_digest(initial_owner.bin_config_bytes),
-                "node_version": initial_owner.node_version,
-                "owner_identity": owner_identity,
-                "package_metadata_digest": _bytes_digest(package_bytes),
-                "package_root": str(package_root),
-                "vite_metadata_digest": (
-                    _bytes_digest(initial_owner.vite_metadata_bytes)
-                    if initial_owner.vite_metadata_bytes is not None
-                    else None
-                ),
-                "vp_home": str(self._vp_home),
-            }
+        owner_installation_identity = self._owner_installation_identity(
+            initial_owner,
+            owner_identity=owner_identity,
+            package_bytes=package_bytes,
+            package_root=package_root,
         )
         return InstallationObservation(
             application_identity="external-application:codex",
             installation_identity=selected_installation_identity,
             owner_identity=owner_identity,
             owner_installation_identity=owner_installation_identity,
+            owner_runtime_identity=f"node:{initial_owner.node_version}",
             release_channel=selected_release_channel,
             platform=self._platform,
             architecture=self._architecture,
@@ -225,6 +222,62 @@ class CodexViteDiscovery:
             ),
             observed_at=self._observed_at(),
         )
+
+    def payload_roots(self, observation: InstallationObservation) -> Mapping[str, Path]:
+        """Locate the exact wrapper and platform payload roots for byte proof."""
+
+        if observation.application_identity != "external-application:codex":
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            )
+        state = self._load_owner_state()
+        if observation.owner_runtime_identity != f"node:{state.node_version}":
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            )
+        if observation.owner_identity == "vite-plus/npm-global":
+            if state.source != "npm":
+                raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
+            primary = self._npm_package_root()
+            identity_root = primary
+            trusted_base = None
+        elif observation.owner_identity == "vite-plus/global-package":
+            if state.source != "vp" or state.package_root is None:
+                raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
+            trusted_base = self._vp_home / "packages"
+            identity_root = state.package_root
+        else:
+            raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
+        with _open_package_root(identity_root, trusted_base) as package_fd:
+            if trusted_base is not None:
+                relative = identity_root.relative_to(trusted_base)
+                primary = trusted_base.resolve(strict=True) / relative
+            package_bytes, package_version, _package_bin = self._package_metadata(
+                identity_root, directory_fd=package_fd
+            )
+        if package_version != observation.installed_release:
+            raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
+        current_identity = self._owner_installation_identity(
+            state,
+            owner_identity=observation.owner_identity,
+            package_bytes=package_bytes,
+            package_root=identity_root,
+        )
+        if current_identity != observation.owner_installation_identity:
+            raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
+        return {
+            "primary": primary,
+            "platform": (primary / "node_modules" / "@openai" / "codex-darwin-arm64"),
+        }
+
+    def locate(self, observation: object) -> Mapping[str, Path]:
+        """Satisfy the installed-payload root port after typed validation."""
+
+        if not isinstance(observation, InstallationObservation):
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            )
+        return self.payload_roots(observation)
 
     def _invocations(self) -> tuple[tuple[Path, Path], ...]:
         found: list[tuple[Path, Path]] = []
@@ -239,6 +292,30 @@ class CodexViteDiscovery:
                 continue
             found.append((candidate.absolute(), target))
         return tuple(found)
+
+    def _owner_installation_identity(
+        self,
+        state: _OwnerState,
+        *,
+        owner_identity: str,
+        package_bytes: bytes,
+        package_root: Path,
+    ) -> str:
+        return canonical_fingerprint(
+            {
+                "bin_config_digest": _bytes_digest(state.bin_config_bytes),
+                "node_version": state.node_version,
+                "owner_identity": owner_identity,
+                "package_metadata_digest": _bytes_digest(package_bytes),
+                "package_root": str(package_root),
+                "vite_metadata_digest": (
+                    _bytes_digest(state.vite_metadata_bytes)
+                    if state.vite_metadata_bytes is not None
+                    else None
+                ),
+                "vp_home": str(self._vp_home),
+            }
+        )
 
     def _load_owner_state(self) -> _OwnerState:
         bin_path = self._vp_home / "bins" / "codex.json"

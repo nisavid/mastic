@@ -188,6 +188,22 @@ class CodexNpmReleaseAuthorityTests(unittest.TestCase):
                     authority.resolve_current(query(**changed))
         self.assertEqual(fetcher.requests, [])
 
+    def test_non_semver_latest_cannot_become_an_owner_command_target(self) -> None:
+        malformed = json.loads(packument())
+        package = malformed["versions"].pop("0.150.0")
+        malformed["dist-tags"]["latest"] = "latest"
+        package["version"] = "latest"
+        malformed["versions"]["latest"] = package
+        authority = NpmCodexReleaseAuthority(
+            fetcher=FakeFetcher(
+                {PACKUMENT_URL: response(PACKUMENT_URL, json.dumps(malformed).encode())}
+            ),
+            clock=lambda: NOW,
+        )
+
+        with self.assertRaises(ReleaseAuthorityInvalidResponseError):
+            authority.resolve_current(query())
+
     def test_vite_native_owner_uses_the_same_selected_npm_release_authority(
         self,
     ) -> None:
@@ -380,6 +396,7 @@ class CodexNpmIntegrationTests(unittest.TestCase):
             installation_identity=selected.installation_identity,
             owner_identity=selected.owner_identity,
             owner_installation_identity="sha256:" + "b" * 64,
+            owner_runtime_identity="node:24.18.0",
             release_channel="npm:latest",
             platform="darwin",
             architecture="arm64",
