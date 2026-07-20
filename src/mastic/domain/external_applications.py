@@ -12,6 +12,7 @@ from .canonical import canonical_fingerprint, canonical_timestamp
 
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ARTIFACT_DIGEST = re.compile(r"(?:sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})\Z")
 
 
 def _required_identity(value: object, field_name: str) -> str:
@@ -25,6 +26,12 @@ def _required_identity(value: object, field_name: str) -> str:
 def _sha256(value: object, field_name: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _artifact_digest(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or _ARTIFACT_DIGEST.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 or SHA-512 digest")
     return value
 
 
@@ -182,7 +189,7 @@ class AuthorityReleaseObservation:
     def __post_init__(self) -> None:
         _required_identity(self.exact_release, "exact release")
         _required_identity(self.artifact_coordinate, "artifact coordinate")
-        _sha256(self.artifact_digest, "artifact digest")
+        _artifact_digest(self.artifact_digest, "artifact digest")
         _required_identity(self.authority_identity, "release authority identity")
         _sha256(self.response_digest, "authority response digest")
         _aware(self.observed_at, "authority observation time")
@@ -245,7 +252,7 @@ class CurrentReleaseResolution:
             "evidence_provenance",
         ):
             _required_identity(getattr(self, field_name), field_name.replace("_", " "))
-        _sha256(self.artifact_digest, "artifact digest")
+        _artifact_digest(self.artifact_digest, "artifact digest")
         _sha256(self.authority_response_digest, "authority response digest")
         _sha256(
             self.installation_observation_fingerprint,
