@@ -611,7 +611,8 @@ class DaemonService:
                     loop.add_signal_handler(signum, request_stop)
                     installed_signals.append(signum)
                 except (NotImplementedError, RuntimeError):
-                    pass
+                    # Some event loops and non-main threads cannot own signals.
+                    continue
             maintenance_task = asyncio.create_task(maintain())
             await stopped.wait()
         except BaseException as error:

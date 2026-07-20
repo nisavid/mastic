@@ -163,9 +163,7 @@ class PrivateLogReader:
                 start = max(0, metadata.st_size - self._max_bytes)
                 if start:
                     os.lseek(descriptor, start - 1, os.SEEK_SET)
-                    preceding = os.read(descriptor, 1)
-                else:
-                    preceding = b"\n"
+                preceding = os.read(descriptor, 1) if start else b"\n"
                 payload = os.read(descriptor, self._max_bytes)
             except OSError:
                 continue
