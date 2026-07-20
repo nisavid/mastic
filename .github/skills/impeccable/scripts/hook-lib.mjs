@@ -1576,6 +1576,7 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
 
     let pendingWinner = null;
     let cleanWinner = null;
+    let cleanFallback = null;
     const freshGroups = [];
     let suppressionWinner = null;
     let cleanAckDeduped = false;
@@ -1680,7 +1681,7 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
       if (filtered.length > 0 && !pendingWinner) {
         // Count the live scan, not the session's history.
         pendingWinner = { filePath, known: filtered.map(f => findingCacheKey(f)) };
-      } else if (filtered.length === 0 && !cleanWinner) {
+      } else if (filtered.length === 0) {
         // The clean ack carries no finding, only the standing steer that a
         // silent hook is not a verdict on the design. Repeating it on every
         // clean edit spends context to say nothing, so it fires once per file
@@ -1690,13 +1691,13 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
         // Quiet mode emits nothing, so it must not consume the ack and leave a
         // later non-quiet run in this session silent.
         if (quietMode || !shouldEmitAckForFile(filePath, config)) {
-          cleanWinner = { filePath };
-        } else if (ensureFile(cache, sessionId, filePath).cleanAcked) {
+          if (!cleanFallback) cleanFallback = { filePath };
+        } else if (!cleanWinner && ensureFile(cache, sessionId, filePath).cleanAcked) {
           // Spent for this file. Remember it for the audit trail, but keep
           // scanning: another target in this same event may still be owed an
           // ack, and dropping out here would lose it.
           cleanAckDeduped = true;
-        } else {
+        } else if (!cleanWinner) {
           ensureFile(cache, sessionId, filePath).cleanAcked = true;
           cleanWinner = { filePath };
           cleanAckDeduped = false;
@@ -1781,7 +1782,7 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
       };
     }
 
-    if (cleanWinner && !cleanAckDeduped && shouldEmitAckForFile(cleanWinner.filePath, config)) {
+    if (cleanWinner && shouldEmitAckForFile(cleanWinner.filePath, config)) {
       const text = appendDesignSystemNote(renderCleanAck(cleanWinner.filePath, { cwd: projectCwd }), scanOptions);
       return {
         exitCode: 0,
@@ -1804,7 +1805,7 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
 
     // Distinct from non-ui-ack so the audit log shows noise being suppressed on
     // purpose rather than a file the hook could not classify.
-    if (cleanWinner) {
+    if (cleanFallback) {
       return result({ emitted: false, skipped: cleanWinnerSkipReason(), durationMs: Date.now() - started });
     }
 

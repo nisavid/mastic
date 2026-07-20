@@ -353,16 +353,20 @@ function lstatIfPresent(file) {
 }
 
 function writeFileNoFollow(file, content) {
-  const flags = fs.constants.O_WRONLY
-    | fs.constants.O_CREAT
-    | fs.constants.O_TRUNC
-    | fs.constants.O_NOFOLLOW;
+  const flags = buildNoFollowFlags();
   const fd = fs.openSync(file, flags, 0o600);
   try {
     fs.writeFileSync(fd, content, 'utf-8');
   } finally {
     fs.closeSync(fd);
   }
+}
+
+export function buildNoFollowFlags(constants = fs.constants) {
+  if (typeof constants.O_NOFOLLOW !== 'number') {
+    throw new Error('secure plugin write requires O_NOFOLLOW support');
+  }
+  return constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW;
 }
 
 function resolveNuxtPluginDestination(cwd, pluginFile) {
