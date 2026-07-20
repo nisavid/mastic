@@ -11,6 +11,7 @@ from .canonical import canonical_fingerprint, canonical_timestamp
 
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ARTIFACT_DIGEST = re.compile(r"(?:sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})\Z")
 
 
 def _identity(value: object, field_name: str) -> str:
@@ -27,6 +28,12 @@ def _identity(value: object, field_name: str) -> str:
 def _digest(value: object, field_name: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _artifact_digest(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or _ARTIFACT_DIGEST.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 or SHA-512 digest")
     return value
 
 
@@ -132,10 +139,10 @@ class UpgradeCandidate:
         for field_name in (
             "installation_observation_fingerprint",
             "source_artifact_digest",
-            "target_artifact_digest",
             "current_resolution_fingerprint",
         ):
             _digest(getattr(self, field_name), field_name.replace("_", " "))
+        _artifact_digest(self.target_artifact_digest, "target artifact digest")
         _aware(self.source_observed_at, "source observation time")
         _aware(
             self.current_resolution_observed_at,
