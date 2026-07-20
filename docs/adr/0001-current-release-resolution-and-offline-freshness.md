@@ -16,21 +16,25 @@ currentness.
 
 ## Decision
 
-A canonical unsigned Current Release Resolution payload binds one External
-Application Installation, Installation Owner, effective Release Channel,
-platform and architecture, exact release, artifact coordinate and digest,
-authority identity and normalized response digest, observation and expiry
-times, resolver-policy and validation-profile identities, evidence provenance,
-and a discriminated signature binding. A `derived_attestation` binding contains
-the Attestation Issuer identity, and its evidence envelope attaches that
-issuer's signature over the canonical resolution payload. An `upstream_claim`
-binding instead contains the profile-trusted upstream key identity, and its
-envelope attaches that upstream signature over the entire canonical resolution
-payload; it contains no Attestation Issuer. Signature fields are not part of the
-canonical resolution payload, and verifiers reject missing, mixed, or
-kind-incompatible binding fields. An upstream signature that does not cover
-every canonical payload field is ineligible for `upstream_claim`; resolution
-must use `derived_attestation` instead.
+A canonical Current Release Resolution payload binds one External Application
+Installation and exact Installation Observation fingerprint, Installation
+Owner, effective Release Channel, platform and architecture, exact release,
+artifact coordinate and digest, authority identity and normalized response
+digest, observation and expiry times, resolver-policy and validation-profile
+identities, and evidence provenance. An online resolver records this payload as
+direct Observed Evidence. It does not attach an unissued signature binding.
+
+Offline use wraps that complete payload in a Signed Current Release Resolution
+with exactly one discriminated signature path. A `derived_attestation` binding
+contains the Attestation Issuer identity, and its evidence envelope attaches
+that issuer's signature over the canonical resolution payload. An
+`upstream_claim` binding instead contains the profile-trusted upstream key
+identity, and its envelope attaches that upstream signature over the entire
+canonical resolution payload; it contains no Attestation Issuer. Signature
+fields are not part of the canonical resolution payload, and verifiers reject
+missing, mixed, or kind-incompatible binding fields. An upstream signature that
+does not cover every canonical payload field is ineligible for
+`upstream_claim`; offline resolution must use `derived_attestation` instead.
 
 Resolution reads the authority, materializes the exact artifact evidence, and
 reads the authority again. A changed result retries within a bounded limit.
@@ -70,19 +74,20 @@ Plan records the earliest expiry imposed by the authority evidence,
 signed currentness Evidence, and profile; neither the Plan nor its operator
 selects or extends that policy.
 
-Evidence uses exactly one signature path. For `upstream_claim`, an upstream
-signature may serve directly only when it covers the entire canonical resolution
-payload under a profile-trusted key. Coverage includes the installation, owner,
-channel, platform and architecture, validation-profile identity, observation
-and policy-derived expiry, and the exact release, artifact coordinate, and
-artifact digest as one authenticated tuple. A publisher signature over only an
-artifact, release, or currentness statement is retained as provenance but is
-insufficient for `upstream_claim`. For `derived_attestation`, an Attestation
-Issuer authorized by the validation profile signs the canonical unsigned
-resolution payload after observing the authority over authenticated transport.
-The target verifies the kind-specific binding, trusted key, signature, and
-expiry. This proves only what the selected signature path authenticates; it
-never represents an issuer observation as a publisher-signed statement.
+Offline Evidence uses exactly one signature path. For `upstream_claim`, an
+upstream signature may serve directly only when it covers the entire canonical
+resolution payload under a profile-trusted key. Coverage includes the
+installation, owner, channel, platform and architecture, validation-profile
+identity, observation and policy-derived expiry, and the exact release,
+artifact coordinate, and artifact digest as one authenticated tuple. A
+publisher signature over only an artifact, release, or currentness statement is
+retained as provenance but is insufficient for `upstream_claim`. For
+`derived_attestation`, an Attestation Issuer authorized by the validation
+profile signs the canonical unsigned resolution payload after observing the
+authority over authenticated transport. The target verifies the kind-specific
+binding, trusted key, signature, and expiry. This proves only what the selected
+signature path authenticates; it never represents an issuer observation as a
+publisher-signed statement.
 
 Offline expiry requires coherent time. MASTIC checks signed observation and
 expiry bounds against local time and a persisted highest-trusted-time
