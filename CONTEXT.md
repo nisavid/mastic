@@ -20,10 +20,50 @@ A Plan limited to installing MASTIC and dependencies shared by every
 Blueprint.
 _Avoid_: setup plan, Stack Plan
 
+**External Application**:
+An externally maintained product identity. MASTIC coordinates its installations
+and configuration targets without owning the application's lifecycle.
+_Avoid_: client, application binary, installation
+
+**External Application Installation**:
+One concrete installable unit of an External Application on a host, with its
+own Installation Owner, Release Intent, observed state, and recovery boundary.
+_Avoid_: application, client, component
+
+**Installation Owner**:
+The application-native installer, package manager, or deployment system that
+controls one External Application Installation's lifecycle.
+_Avoid_: MASTIC owner, executable path, inferred owner
+
+**Release Channel**:
+An Installation Owner's native release stream, selected independently for one
+External Application Installation and inherited from its Blueprint when
+unspecified.
+_Avoid_: version range, release pin
+
+**Release Intent**:
+The portable choice to track the current release of a selected Release Channel
+or, by explicit exception, preserve one exact release.
+_Avoid_: resolved version, dependency pin
+
+**Current Release Resolution**:
+Time-bounded Plan evidence that maps current Release Intent to one exact release
+using the selected Release Channel's authority. An exact Release Intent bypasses
+current-release lookup, verifies that exact release through its selected owner
+and channel, and makes no currency claim.
+_Avoid_: desired version, permanent pin, validation fixture
+
 **Application Configuration Target**:
-One independently selected and evidenced configuration scope for a consuming
-application, such as a Codex configuration or Hindsight profile.
+One independently selected and evidenced configuration scope for an External
+Application, linked explicitly to each installation that consumes, mutates,
+obtains credentials from, supplies credentials to, or probes it.
 _Avoid_: client, account, global configuration
+
+**Managed Configuration Closure**:
+The smallest complete set of interdependent application settings whose
+explicit values, defaults, or absence establish one selected behavior and that
+MASTIC owns and restores together.
+_Avoid_: touched keys, written fields, whole configuration
 
 **Validated Plan**:
 A Plan whose exact host and component combination satisfies an accepted
