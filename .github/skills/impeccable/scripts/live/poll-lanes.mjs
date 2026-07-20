@@ -12,3 +12,7 @@ export function selectAvailablePendingEvent(entries, { now = Date.now(), types =
     .filter((entry) => !allowed || allowed.has(entry.event?.type))
     .sort((a, b) => eventPriority(a.event) - eventPriority(b.event) || a.seq - b.seq)[0] || null;
 }
+
+export function isPendingEntryActive(entries, entry) {
+  return entries.includes(entry);
+}
