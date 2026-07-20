@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping
+
+from mastic.infrastructure.config_store import private_file_lock
 
 
 _SCHEMA_LOCK = threading.Lock()
@@ -72,9 +75,16 @@ _RAW_INFERENCE_KEYS = frozenset(
 _RAW_INFERENCE_KEY_IDENTITIES = frozenset(
     _canonical_key(key) for key in _RAW_INFERENCE_KEYS
 )
-# Raw inference-shaped values are denied unless a future operational schema
-# names an exact, reviewed path here. An empty allowlist is intentional.
-_ALLOWED_RAW_INFERENCE_PATHS: frozenset[tuple[str, ...]] = frozenset()
+# Raw inference-shaped values are denied unless an exact reviewed path and
+# deterministic content-free value are named here.
+_ALLOWED_RAW_INFERENCE_VALUES = {
+    ("record", "issues", "message"): frozenset(
+        {
+            "Target lifecycle has not been observed.",
+            "Target condition has not been observed.",
+        }
+    )
+}
 
 
 class SensitiveContentError(ValueError):
@@ -164,6 +174,25 @@ class OperationalStateStore:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         return {"journal_mode": str(mode).lower(), "schema_version": int(version)}
+
+    @contextmanager
+    def resource_transition(self, kind: str, resource_id: str) -> Iterator[None]:
+        """Serialize one logical resource across threads and processes."""
+
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("resource transition requires a nonempty kind")
+        if not isinstance(resource_id, str) or not resource_id:
+            raise ValueError("resource transition requires a nonempty identity")
+        lock_identity = hashlib.sha256(
+            f"{kind}\0{resource_id}".encode("utf-8")
+        ).hexdigest()
+        lock_path = (
+            self._path.parent
+            / f".{self._path.name}.resource-locks"
+            / f"{lock_identity}.lock"
+        )
+        with private_file_lock(lock_path):
+            yield
 
     def put_operation(self, operation: Mapping[str, object]) -> dict[str, object]:
         """Create or replace one durable operation DTO by identity."""
@@ -602,7 +631,7 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
             normalized_path = tuple(_canonical_key(part) for part in (*path, raw_key))
             if (
                 normalized_key in _RAW_INFERENCE_KEY_IDENTITIES
-                and normalized_path not in _ALLOWED_RAW_INFERENCE_PATHS
+                and not _allowed_raw_inference_value(normalized_path, value[raw_key])
             ):
                 location = ".".join((*path, raw_key))
                 raise SensitiveContentError(
@@ -623,6 +652,11 @@ def _normalize(value: object, path: tuple[str, ...]) -> object:
     if isinstance(value, float) and math.isfinite(value):
         return value
     raise TypeError(f"operational DTO contains unsupported value {value!r}")
+
+
+def _allowed_raw_inference_value(path: tuple[str, ...], value: object) -> bool:
+    allowed = _ALLOWED_RAW_INFERENCE_VALUES.get(path)
+    return isinstance(value, str) and allowed is not None and value in allowed
 
 
 def _validate_page(after_sequence: int, limit: int) -> None:

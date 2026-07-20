@@ -172,17 +172,23 @@ def preview_bundle():
 
 
 def authorization(preview):
-    return AuthorizedOwnerUpgrade(SHA_D, SHA_E, preview.fingerprint)
+    return AuthorizedOwnerUpgrade(SHA_D, SHA_E, SHA_F, preview.fingerprint)
 
 
 class Verifier:
     def __init__(self, accepted=True):
         self.accepted = accepted
         self.calls = []
+        self.authorization_held = False
 
-    def verify(self, selected, preview, authorization, artifact_closure):
+    @contextmanager
+    def hold_authorization(self, selected, preview, authorization, artifact_closure):
         self.calls.append((selected, preview, authorization, artifact_closure))
-        return self.accepted
+        self.authorization_held = True
+        try:
+            yield self.accepted
+        finally:
+            self.authorization_held = False
 
 
 class Discovery:
@@ -279,6 +285,44 @@ def apply(
 
 
 class ExternalApplicationLifecycleTests(unittest.TestCase):
+    def test_authorization_remains_held_through_owner_execution(self):
+        preview, artifacts = preview_bundle()
+        source = observation(observed_at=NOW + timedelta(seconds=3))
+        fenced = observation(observed_at=NOW + timedelta(seconds=4))
+        target = observation(
+            release="0.144.6",
+            owner_installation=SHA_F,
+            observed_at=NOW + timedelta(seconds=6),
+        )
+        verifier = Verifier()
+
+        class GuardedExecutor(Executor):
+            def apply_exact(self, request):
+                self.assert_authorized()
+                return super().apply_exact(request)
+
+            @staticmethod
+            def assert_authorized():
+                if not verifier.authorization_held:
+                    raise AssertionError("owner execution escaped authorization lease")
+
+        result = apply(
+            preview,
+            artifacts,
+            Discovery([source, fenced, target]),
+            Resolver(
+                [
+                    resolution(source, observed_at=NOW + timedelta(seconds=5)),
+                    resolution(target, observed_at=NOW + timedelta(seconds=7)),
+                ]
+            ),
+            GuardedExecutor(verified_post_state=target.state_fingerprint),
+            verifier=verifier,
+        )
+
+        self.assertEqual(result.mutation_outcome, MutationOutcome.VERIFIED)
+        self.assertFalse(verifier.authorization_held)
+
     def test_preview_binds_stable_state_target_closure_and_exact_action(self):
         preview, artifacts = preview_bundle()
 

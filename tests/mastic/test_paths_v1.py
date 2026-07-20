@@ -40,6 +40,10 @@ class PathsV1Tests(unittest.TestCase):
             paths.control_socket, Path("/Users/ivan/.local/state/mastic/masticd.sock")
         )
         self.assertEqual(
+            paths.planning_grant_key,
+            Path("/Users/ivan/.local/state/mastic/planning-grant.key"),
+        )
+        self.assertEqual(
             paths.runtime_dir, Path("/Users/ivan/.local/share/mastic/runtimes")
         )
         self.assertEqual(paths.log_dir, Path("/Users/ivan/Library/Logs/mastic"))

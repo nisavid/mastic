@@ -150,6 +150,20 @@ the connecting process has the same user identity through peer credentials
 before accepting protocol work. The socket is loopback-equivalent local IPC
 and is never exposed on a network interface.
 
+Authenticated local Plan Approval receipts use `planning-grant.key` in the
+same effective state directory. MASTIC atomically publishes that key as an
+exact 32-byte, user-owned, regular file with mode `0600` under a user-owned
+directory with mode `0700`. Daemon composition receives the receipt issuer;
+the Planning Record Repository receives only the verifier and revalidates every
+stored Approval when it is read.
+
+The first authoritative Planning Record consumer admits only evidence-free,
+partial Plan Assessments with exact unobserved target and summary projections.
+Nonempty Evidence closures, Claims, policy inputs, observed target projections,
+or Step satisfactions fail closed until production composition supplies their
+trusted Evidence and Operational Record resolvers. This boundary prevents a
+digest-only reference from becoming mutation authority.
+
 Physical runtime and model operations receive durable operation identities.
 Public v1 supports listing and inspecting those operations. It does not claim
 resume or cancellation semantics that an owner cannot guarantee.
