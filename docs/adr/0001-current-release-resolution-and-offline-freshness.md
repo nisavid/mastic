@@ -36,14 +36,21 @@ Resolution reads the authority, materializes the exact artifact evidence, and
 reads the authority again. A changed result retries within a bounded limit.
 Persistent instability leaves only the affected installation's current-release
 resolution unresolved and prevents that installation from contributing a fully
-specified exact target to a candidate Plan. Discovery aggregates the issue only
-when the Plan Purpose requires that installation; unrelated installations remain
-independently resolvable.
+specified exact target to a candidate Plan. Discovery records No Candidate for
+the Blueprint and Plan Purpose only when the Plan Purpose requires that
+installation and no candidate Plan can be constructed; unrelated installations
+remain independently resolvable. When a stable exact candidate target exists,
+missing Evidence makes its Plan Disposition Blocked only for a Plan Purpose
+whose policy requires that Evidence to be established already. A separately
+assessed validation purpose may gather it within its declared safety envelope.
+The resulting Claim Conflict remains a policy input; the selected policy blocks
+only when a non-overridable rule applies to that conflict and Plan Purpose.
 
 Plans are immutable. Online Apply re-resolves at the last safe point before
 each affected installation mutation. A changed exact artifact, owner, channel,
-evidence mode, or material compatibility evidence blocks that Plan and creates
-a successor Plan with a focused approval diff. If owner-native auto-update has
+evidence mode, or material compatibility evidence makes that Plan's disposition
+Blocked and creates a successor Plan with a focused approval diff. If
+owner-native auto-update has
 already produced the Plan's exact artifact, MASTIC may treat the mutation as
 complete only after revalidating the owner, active installation, artifact
 identity, and dependent evidence. MASTIC never infers another owner or creates
@@ -80,40 +87,47 @@ never represents an issuer observation as a publisher-signed statement.
 Offline expiry requires coherent time. MASTIC checks signed observation and
 expiry bounds against local time and a persisted highest-trusted-time
 watermark, allowing only a small policy-defined skew. Clock rollback, missing
-or expired evidence, authority contradiction, and owner ambiguity prevent
+or expired Evidence, authority contradiction, and owner ambiguity prevent
 the affected installation from contributing a candidate target when they leave
-no fully specified exact release. When an exact candidate target already exists,
-those conditions make its Plan a Blocked Plan. No new installation mutation
-starts after expiry; an operation already in flight may only reach a safe
-completion, verification, or rollback boundary. An online
-authority outage never silently changes evidence mode. A complete, unexpired
-closure may instead support a separately generated offline or mixed-mode
-successor Plan.
+no fully specified exact release. Discovery aggregates that failure to No
+Candidate only when the Plan Purpose requires the installation and no candidate
+Plan can be constructed. When an exact candidate target exists but its Current
+Evidence is missing or expired, its Plan Disposition is Blocked for any Plan
+Purpose whose policy requires established currentness; a separately assessed
+validation purpose may gather replacement Evidence within its safety envelope.
+No new installation mutation starts after expiry; an operation already in
+flight may only reach a safe completion, verification, or rollback boundary.
+An online authority outage never silently changes evidence mode. A complete,
+unexpired closure may instead support a separately generated offline or
+mixed-mode successor Plan.
 
-Release Intent, Currency Claim, Plan classification, Completion, and Readiness
-are distinct. Plan classifications are mutually exclusive current evaluations
-of immutable Plan evidence; reevaluation does not rewrite the Plan or its
-history. Missing or expired currency evidence makes an existing Plan whose
-Release Intent tracks current a Blocked Plan. A Plan with an exact Release Intent
-makes no currentness claim but may be a Validated Plan when it satisfies the
-validation profile, even after its former channel advances. Known-Risk requires
-evidence of an actual overridable soft conflict; an exact Release Intent is not
-itself a risk. MASTIC never silently substitutes an exact Release Intent for a
-current-tracking Release Intent or an older validated release for an unresolved
-current release.
+Release Intent, Currency Claim, Claim Qualification, Claim Applicability
+Assessment, Plan Disposition, Completion, and Operational Condition are
+distinct. Reevaluation does not rewrite the Plan or its history. Missing or
+expired currency Evidence makes the disposition of a Plan whose Release Intent
+tracks current Blocked only when its Plan Purpose requires established
+currentness. A bounded validation purpose may instead gather replacement
+Evidence within its safety envelope. A Plan with an exact Release Intent makes
+no currentness claim but may carry applicable, Verified compatibility Claims
+and an Eligible disposition even after its former channel advances. An exact
+Release Intent is not itself a risk. MASTIC never silently substitutes an exact
+Release Intent for a current-tracking Release Intent or an older release for an
+unresolved current release.
 
 An ordinary channel withdrawal may permit a new Plan with an exact Release
 Intent. A security revocation, same-release digest contradiction, or hard safety
-violation is non-overridable and Blocked. A Release Intent that tracks current
-never causes an implicit downgrade when an authority moves backward; a Plan
-with an exact Release Intent may propose a native-owner downgrade only with
-complete evidence and approval.
+violation makes the Plan Disposition Blocked for the covered unsafe activity and
+cannot be approved for that activity. It does not implicitly block a separately
+assessed safe rollback, removal, or bounded remediation purpose. A Release Intent
+that tracks current never causes an implicit downgrade when an authority moves
+backward; a Plan with an exact Release Intent may propose a native-owner
+downgrade only with complete Evidence and approval.
 
 ## Consequences
 
 Static application versions and immutable artifact digests remain useful test
 fixtures and integrity inputs, but they cannot serve as current-release policy.
 Each independently owned Hindsight installation resolves separately. Closure,
-installation, canary, performance, and readiness evidence bind to the resolved
-installation identity, and a change invalidates only that installation and its
-dependent evidence rather than the entire closure indiscriminately.
+installation, canary, performance, and operational Evidence bind to the
+resolved installation identity, and a change invalidates only that installation
+and its dependent Evidence rather than the entire closure indiscriminately.
