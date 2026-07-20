@@ -111,7 +111,6 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
 
             response = await asyncio.wait_for(read_message(second_reader), timeout=1)
             self.assertEqual(response["error"]["code"], "connection_limit")
-            del first_reader
 
     async def test_idle_timeout_does_not_interrupt_an_active_operation(self) -> None:
         async def handle(request, emit_progress):
@@ -533,7 +532,6 @@ class ControlProtocolV1Tests(unittest.IsolatedAsyncioTestCase):
 
             await asyncio.wait_for(server.close(), timeout=0.2)
             await self._close_writer(writer)
-            del reader
 
     async def _negotiate(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

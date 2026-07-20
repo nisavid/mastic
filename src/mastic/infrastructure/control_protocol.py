@@ -332,7 +332,8 @@ class UnixControlServer:
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            # A peer disconnect is the normal terminal state for this handler.
+            return
         finally:
             if connection is not None and connection.cancelling():
                 for task in tasks:

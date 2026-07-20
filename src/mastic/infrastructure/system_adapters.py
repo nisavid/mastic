@@ -225,7 +225,8 @@ class PendingSubprocessManagedProcess(SubprocessManagedProcess):
         try:
             self.abort()
         except Exception:
-            pass
+            # Destructors cannot report best-effort cleanup failures safely.
+            return
 
 
 class PsutilManagedProcess:
@@ -252,13 +253,15 @@ class PsutilManagedProcess:
         try:
             self._process.terminate()
         except psutil.NoSuchProcess:
-            pass
+            # Termination is already complete when the process has exited.
+            return
 
     def kill(self) -> None:
         try:
             self._process.kill()
         except psutil.NoSuchProcess:
-            pass
+            # Killing is already complete when the process has exited.
+            return
 
     def wait(self, timeout: float) -> int:
         try:
@@ -584,7 +587,7 @@ class ExactRuntimeLaunchSupply:
             )
         snapshot = self._validate_model(configured_model, model)
         try:
-            assessment = self._model_security.require(
+            self._model_security.require(
                 configured_model.revision.repository,
                 configured_model.revision.revision,
             )

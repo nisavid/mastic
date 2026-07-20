@@ -215,8 +215,8 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(title, "setup")
             self.assertEqual(self.app.selected_operation, "setup")
             self.assertIn("resolved preview", body)
-            self.assertTrue(
-                self.app.query_one("#operation-form").styles.display == "block"
+            self.assertEqual(
+                self.app.query_one("#operation-form").styles.display, "block"
             )
             capacity = self.app.query_one("#parameter-capacity", Select)
             for value in ("balanced", "long-context", "native-context"):

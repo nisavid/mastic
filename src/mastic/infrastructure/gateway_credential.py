@@ -7,6 +7,7 @@ import os
 import secrets
 import stat
 import threading
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -66,10 +67,9 @@ class GatewayCredential:
             os.fsync(parent)
             return token
         finally:
-            try:
+            # Another creator may already have consumed the temporary link.
+            with suppress(FileNotFoundError):
                 os.unlink(temporary_name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
             os.close(parent)
 
     def authenticate(self, authorization: str | None) -> bool:
