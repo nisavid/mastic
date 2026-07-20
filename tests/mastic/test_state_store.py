@@ -9,10 +9,72 @@ from unittest.mock import patch
 from mastic.infrastructure.state_store import (
     OperationalStateStore,
     SensitiveContentError,
+    SnapshotCompareError,
 )
 
 
 class OperationalStateStoreTests(unittest.TestCase):
+    def test_compare_and_put_snapshot_is_an_exact_atomic_predecessor_fence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite3"
+            first_store = OperationalStateStore(path)
+            second_store = OperationalStateStore(path)
+            first = first_store.compare_and_put_snapshot(
+                {"kind": "pointer", "id": "scope", "version": "1:first"},
+                expected_current_version=None,
+            )
+
+            with self.assertRaises(SnapshotCompareError):
+                second_store.compare_and_put_snapshot(
+                    {"kind": "pointer", "id": "scope", "version": "1:other"},
+                    expected_current_version=None,
+                )
+
+            second = second_store.compare_and_put_snapshot(
+                {"kind": "pointer", "id": "scope", "version": "2:second"},
+                expected_current_version=first["version"],
+            )
+            self.assertEqual(first_store.snapshot("pointer", "scope"), second)
+
+            with self.assertRaises(SnapshotCompareError):
+                first_store.compare_and_put_snapshot(
+                    {"kind": "pointer", "id": "scope", "version": "3:stale"},
+                    expected_current_version=first["version"],
+                )
+
+    def test_compare_and_put_snapshot_allows_one_concurrent_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite3"
+            OperationalStateStore(path).compare_and_put_snapshot(
+                {"kind": "pointer", "id": "scope", "version": "1:first"},
+                expected_current_version=None,
+            )
+            barrier = threading.Barrier(8)
+
+            def replace_pointer(index: int) -> str:
+                store = OperationalStateStore(path)
+                barrier.wait()
+                try:
+                    store.compare_and_put_snapshot(
+                        {
+                            "kind": "pointer",
+                            "id": "scope",
+                            "version": f"2:successor-{index}",
+                        },
+                        expected_current_version="1:first",
+                    )
+                except SnapshotCompareError:
+                    return "rejected"
+                return "stored"
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                outcomes = tuple(pool.map(replace_pointer, range(8)))
+
+            self.assertEqual(outcomes.count("stored"), 1)
+            self.assertEqual(outcomes.count("rejected"), 7)
+
     def test_append_event_once_is_atomic_across_concurrent_store_instances(
         self,
     ) -> None:
