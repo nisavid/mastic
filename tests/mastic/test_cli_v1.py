@@ -185,6 +185,16 @@ class CliV1Tests(unittest.TestCase):
             {"query": "Qwen", "source": "curated", "limit": 8},
         )
 
+    def test_help_preserves_underscored_positional_metavar(self) -> None:
+        result = self.runner.invoke(
+            self.app,
+            ["application-target", "inspect", "--help"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("{APPLICATION_TARGET}", result.output)
+        self.assertIn("Application Configuration Target name", result.output)
+
     def test_model_cache_is_a_real_nested_command_group(self) -> None:
         result = self.runner.invoke(
             self.app,
