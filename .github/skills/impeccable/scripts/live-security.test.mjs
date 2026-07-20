@@ -21,6 +21,121 @@ function runScript(script, args, cwd) {
   }).trim();
 }
 
+async function postJson(url, body, origin = 'https://preview.example') {
+  return fetch(url, {
+    method: 'POST',
+    headers: { Origin: origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+async function readSseUntil(reader, predicate, timeoutMs = 1_000) {
+  const decoder = new TextDecoder();
+  let buffered = '';
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const waitMs = deadline - Date.now();
+    const result = await Promise.race([
+      reader.read(),
+      new Promise((resolve) => setTimeout(() => resolve(null), waitMs)),
+    ]);
+    if (result === null || result.done) return null;
+    buffered += decoder.decode(result.value, { stream: true });
+    const frames = buffered.split('\n\n');
+    buffered = frames.pop() || '';
+    for (const frame of frames) {
+      const data = frame.split('\n').find((line) => line.startsWith('data: '));
+      if (!data) continue;
+      const event = JSON.parse(data.slice('data: '.length));
+      if (predicate(event)) return event;
+    }
+  }
+  return null;
+}
+
+test('completed live sessions ignore late generation checkpoints', async () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-fence-'));
+  fs.writeFileSync(path.join(projectRoot, 'index.html'), '<div>original</div>\n');
+  let serverInfo = null;
+  let reader = null;
+  try {
+    serverInfo = JSON.parse(runScript(serverScript, ['--background'], projectRoot));
+    const baseUrl = `http://127.0.0.1:${serverInfo.port}`;
+    const token = serverInfo.token;
+    const id = 'deadbeef';
+    const stream = await fetch(`${baseUrl}/events?token=${token}`, {
+      headers: { Origin: 'https://preview.example' },
+    });
+    assert.equal(stream.status, 200);
+    reader = stream.body.getReader();
+    assert.equal(
+      (await readSseUntil(reader, (event) => event.type === 'connected'))?.type,
+      'connected',
+    );
+
+    const generate = await postJson(`${baseUrl}/events?token=${token}`, {
+      token,
+      type: 'generate',
+      id,
+      count: 1,
+      action: 'polish',
+      pageUrl: '/',
+      element: { outerHTML: '<div>original</div>' },
+    });
+    assert.equal(generate.status, 200);
+    const complete = await postJson(`${baseUrl}/poll`, {
+      token,
+      type: 'complete',
+      id,
+      sourceEventType: 'generate',
+      file: 'index.html',
+    });
+    assert.equal(complete.status, 200);
+    assert.equal(
+      (await readSseUntil(reader, (event) => event.type === 'complete'))?.type,
+      'complete',
+    );
+
+    await reader.cancel();
+    const completedStream = await fetch(`${baseUrl}/events?token=${token}`, {
+      headers: { Origin: 'https://preview.example' },
+    });
+    assert.equal(completedStream.status, 200);
+    reader = completedStream.body.getReader();
+    assert.equal(
+      (await readSseUntil(reader, (event) => event.type === 'connected'))?.type,
+      'connected',
+    );
+
+    const checkpoint = await postJson(`${baseUrl}/events?token=${token}`, {
+      token,
+      type: 'checkpoint',
+      id,
+      revision: 1,
+      reason: 'variants_ready',
+      phase: 'completed',
+      arrivedVariants: 1,
+      expectedVariants: 1,
+      previewFile: 'index.html',
+    });
+    assert.equal(checkpoint.status, 200);
+    assert.equal(
+      await readSseUntil(reader, (event) => event.type === 'variant_progress', 250),
+      null,
+    );
+  } finally {
+    if (reader) await reader.cancel().catch(() => {});
+    if (serverInfo) {
+      try {
+        runScript(serverScript, ['stop', '--keep-inject'], projectRoot);
+      } catch {
+        try { process.kill(serverInfo.pid, 'SIGTERM'); } catch {}
+      }
+    }
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test('live mode protects its capability and project source boundary', async () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-security-'));
   const projectRoot = path.join(fixtureRoot, 'project');
