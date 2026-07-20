@@ -1,4 +1,6 @@
+import tomllib
 import unittest
+from pathlib import Path
 from threading import Event
 
 from rich.cells import cell_len
@@ -12,6 +14,9 @@ from mastic.application.status import (
     StatusSnapshot,
 )
 from mastic.interfaces.tui import MasticApp
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class _Dispatcher:
@@ -82,6 +87,11 @@ class TuiV1Tests(unittest.IsolatedAsyncioTestCase):
         self.catalogue = build_operation_catalogue()
         self.dispatcher = _Dispatcher()
         self.app = MasticApp(self.dispatcher, self.catalogue, _Snapshots())
+
+    def test_supported_textual_range_provides_the_null_select_sentinel(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+
+        self.assertIn("textual>=8,<9", project["project"]["dependencies"])
 
     async def test_operations_console_has_stable_nav_workspace_and_inspector(
         self,
