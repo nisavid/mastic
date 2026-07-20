@@ -72,13 +72,16 @@ cannot simply scrape an aggregate-stats URL. The collectible dimensions are:
 
 - **Per-request token counts for non-streaming responses** — from the `usage`
   object (`prompt_tokens`, `completion_tokens`, `total_tokens`,
-  `cached_tokens`). Do not assume a streamed response includes usage; collect
-  it only when the stream explicitly provides it or through separate proxy or
-  client instrumentation. The servers do not report aggregate usage.
+  `prompt_tokens_details.cached_tokens`). Do not assume a streamed response
+  includes usage; collect it only when the stream explicitly provides it or
+  through separate proxy or client instrumentation. The servers do not report
+  aggregate usage.
 - **Process-level stats** — RSS memory, CPU% — from `psutil` on the server
   PID, not from the HTTP API.
-- **Request latency** (TTFT, total) — the supervisor must time requests
-  (proxy); there is no server-native latency reporting.
+- **Request latency** — the supervisor or proxy must measure TTFT from request
+  start to the first response token or chunk, and total latency through the
+  final response or stream completion. There is no server-native latency
+  reporting.
 
 ## Reference for the supervisor
 
