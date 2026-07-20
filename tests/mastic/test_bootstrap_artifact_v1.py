@@ -21,10 +21,10 @@ _SUBPROCESS_TIMEOUT = 30
 class BootstrapArtifactV1Tests(unittest.TestCase):
     def test_every_distribution_build_uses_the_exact_hashed_backend(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        self.assertEqual(project["build-system"]["requires"], ["hatchling==1.27.0"])
+        self.assertEqual(project["build-system"]["requires"], ["hatchling==1.31.0"])
 
         build_lock = (ROOT / "packaging" / "build-backend.lock").read_text()
-        self.assertIn("hatchling==1.27.0", build_lock)
+        self.assertIn("hatchling==1.31.0", build_lock)
         self.assertIn("--hash=sha256:", build_lock)
         for workflow_name in ("bootstrap-artifact.yml", "python-quality.yml"):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
