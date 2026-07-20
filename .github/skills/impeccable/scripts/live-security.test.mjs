@@ -122,6 +122,61 @@ test('live mode protects its capability and project source boundary', async () =
       assert.equal((await response.text()).trim(), body, sourcePath);
     }
 
+    const completedSessionId = 'cafebabe';
+    const generate = await fetch(`${baseUrl}/events?token=${validToken}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: validToken,
+        type: 'generate',
+        id: completedSessionId,
+        count: 3,
+        action: 'impeccable',
+        element: { outerHTML: '<section>preview</section>' },
+      }),
+    });
+    assert.equal(generate.status, 200);
+    const complete = await fetch(`${baseUrl}/poll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: validToken,
+        type: 'complete',
+        id: completedSessionId,
+        file: 'inside.txt',
+      }),
+    });
+    assert.equal(complete.status, 200);
+
+    const eventsController = new AbortController();
+    const events = await fetch(`${baseUrl}/events?token=${validToken}`, {
+      signal: eventsController.signal,
+    });
+    assert.equal(events.status, 200);
+    const eventReader = events.body.getReader();
+    await eventReader.read();
+    const lateCheckpoint = await fetch(`${baseUrl}/events?token=${validToken}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: validToken,
+        type: 'checkpoint',
+        id: completedSessionId,
+        revision: 1,
+        reason: 'variants_progress',
+        arrivedVariants: 1,
+        expectedVariants: 3,
+        previewFile: 'inside.txt',
+      }),
+    });
+    assert.equal(lateCheckpoint.status, 200);
+    const lateEvent = await Promise.race([
+      eventReader.read().then(({ value }) => new TextDecoder().decode(value)),
+      new Promise((resolve) => setTimeout(() => resolve(''), 250)),
+    ]);
+    eventsController.abort();
+    assert.equal(lateEvent.includes('variant_progress'), false);
+
     const configPath = path.join(configDir, 'config.json');
     const tokenizedScript = `live.js?token=${encodeURIComponent(validToken)}`;
 
