@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 from mastic.application.application_upgrade_policy import (
     UpgradePolicyAssessment,
@@ -75,6 +75,10 @@ class VerifiedArtifact:
             "archive_digest": self.archive_digest,
             "installed_payload_digest": self.installed_payload_digest,
         }
+
+    @property
+    def fingerprint(self) -> str:
+        return canonical_fingerprint(self.canonical_payload())
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +202,7 @@ class OwnerUpgradePreview:
 
     application_identity: str
     installation_identity: str
+    plan_purpose: str
     source_observation_fingerprint: str
     source_state_fingerprint: str
     owner_identity: str
@@ -220,6 +225,7 @@ class OwnerUpgradePreview:
         for field_name in (
             "application_identity",
             "installation_identity",
+            "plan_purpose",
             "owner_identity",
             "owner_installation_identity",
             "owner_runtime_identity",
@@ -244,7 +250,8 @@ class OwnerUpgradePreview:
         if not isinstance(self.action, OwnerUpgradeAction):
             raise ValueError("owner action is required")
         if (
-            self.action.owner_identity != self.owner_identity
+            self.plan_purpose != "reconciliation"
+            or self.action.owner_identity != self.owner_identity
             or self.action.target_release != self.target_release
             or self.action.artifact_closure_fingerprint
             != self.artifact_closure_fingerprint
@@ -261,6 +268,7 @@ class OwnerUpgradePreview:
             {
                 "application_identity": self.application_identity,
                 "installation_identity": self.installation_identity,
+                "plan_purpose": self.plan_purpose,
                 "source_observation_fingerprint": self.source_observation_fingerprint,
                 "source_state_fingerprint": self.source_state_fingerprint,
                 "owner_identity": self.owner_identity,
@@ -286,14 +294,16 @@ class OwnerUpgradePreview:
 class AuthorizedOwnerUpgrade:
     """Untrusted Plan/Approval references requiring authoritative verification."""
 
-    plan_fingerprint: str
-    plan_approval_fingerprint: str
+    plan_identity: str
+    approval_identity: str
+    assessment_identity: str
     preview_fingerprint: str
 
     def __post_init__(self) -> None:
         for field_name in (
-            "plan_fingerprint",
-            "plan_approval_fingerprint",
+            "plan_identity",
+            "approval_identity",
+            "assessment_identity",
             "preview_fingerprint",
         ):
             _sha256(getattr(self, field_name), field_name.replace("_", " "))
@@ -302,8 +312,9 @@ class AuthorizedOwnerUpgrade:
     def fingerprint(self) -> str:
         return canonical_fingerprint(
             {
-                "plan_fingerprint": self.plan_fingerprint,
-                "plan_approval_fingerprint": self.plan_approval_fingerprint,
+                "plan_identity": self.plan_identity,
+                "approval_identity": self.approval_identity,
+                "assessment_identity": self.assessment_identity,
                 "preview_fingerprint": self.preview_fingerprint,
             }
         )
@@ -446,11 +457,22 @@ class CurrentResolver(Protocol):
 
 
 class OwnerUpgradeAuthorizationVerifier(Protocol):
-    def verify(
+    def hold_authorization(
         self,
         selected: ExternalApplicationInstallation,
         preview: OwnerUpgradePreview,
         authorization: AuthorizedOwnerUpgrade,
+        artifact_closure: VerifiedArtifactClosure,
+    ) -> AbstractContextManager[bool]: ...
+
+
+class OwnerUpgradeMaterialVerifier(Protocol):
+    """Verify owner-specific closure and action shape without mutation."""
+
+    def verify_authorization_material(
+        self,
+        selected: ExternalApplicationInstallation,
+        preview: OwnerUpgradePreview,
         artifact_closure: VerifiedArtifactClosure,
     ) -> bool: ...
 
@@ -466,6 +488,22 @@ class ArtifactClosureReleaser(Protocol):
 
 
 Transition = Callable[[str], AbstractContextManager[None]]
+
+
+@contextmanager
+def _verified_authorization(
+    verifier: OwnerUpgradeAuthorizationVerifier,
+    selected: ExternalApplicationInstallation,
+    preview: OwnerUpgradePreview,
+    authorization: AuthorizedOwnerUpgrade,
+    artifact_closure: VerifiedArtifactClosure,
+) -> Iterator[None]:
+    with verifier.hold_authorization(
+        selected, preview, authorization, artifact_closure
+    ) as verified:
+        if not verified:
+            raise ValueError("owner upgrade authorization was not verified")
+        yield
 
 
 def build_owner_upgrade_preview(
@@ -500,6 +538,7 @@ def build_owner_upgrade_preview(
     return OwnerUpgradePreview(
         application_identity=candidate.application_identity,
         installation_identity=candidate.installation_identity,
+        plan_purpose="reconciliation",
         source_observation_fingerprint=source_observation.fingerprint,
         source_state_fingerprint=source_observation.state_fingerprint,
         owner_identity=candidate.owner_identity,
@@ -580,11 +619,16 @@ def _apply_owner_upgrade_retained(
     clock: Callable[[], datetime],
 ) -> OwnerMutationResult:
     _validate_selected(selected, preview, authorization, artifact_closure)
-    if not authorization_verifier.verify(
-        selected, preview, authorization, artifact_closure
+    with (
+        _verified_authorization(
+            authorization_verifier,
+            selected,
+            preview,
+            authorization,
+            artifact_closure,
+        ),
+        transition(selected.installation_identity),
     ):
-        raise ValueError("owner upgrade authorization was not verified")
-    with transition(selected.installation_identity):
         try:
             source = _discover(selected, discovery)
         except InstallationDiscoveryError:

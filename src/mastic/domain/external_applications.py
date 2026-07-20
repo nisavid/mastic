@@ -73,6 +73,25 @@ class ExternalApplicationInstallation:
         _required_identity(self.platform, "platform")
         _required_identity(self.architecture, "architecture")
 
+    @property
+    def fingerprint(self) -> str:
+        """Portable complete selection used by an installation Plan Target."""
+
+        return canonical_fingerprint(
+            {
+                "application_identity": self.application_identity,
+                "installation_identity": self.installation_identity,
+                "owner_identity": self.owner_identity,
+                "release_intent": {
+                    "kind": self.release_intent.kind.value,
+                    "channel": self.release_intent.channel,
+                    "exact_release": self.release_intent.exact_release,
+                },
+                "platform": self.platform,
+                "architecture": self.architecture,
+            }
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class InstallationObservation:

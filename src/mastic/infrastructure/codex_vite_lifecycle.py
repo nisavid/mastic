@@ -17,9 +17,13 @@ from mastic.application.external_application_lifecycle import (
     OwnerUpgradeExecutionEvidence,
     OwnerUpgradeNotAttemptedError,
     OwnerUpgradeRequest,
+    OwnerUpgradePreview,
     VerifiedArtifactClosure,
 )
-from mastic.domain.external_applications import InstallationObservation
+from mastic.domain.external_applications import (
+    ExternalApplicationInstallation,
+    InstallationObservation,
+)
 
 
 _NODE_RUNTIME = re.compile(r"node:([0-9]+\.[0-9]+\.[0-9]+)\Z")
@@ -190,6 +194,40 @@ class CodexViteOwnerLifecycle:
             observation.owner_runtime_identity,
             artifact_closure,
         )
+
+    def verify_authorization_material(
+        self,
+        selected: ExternalApplicationInstallation,
+        preview: OwnerUpgradePreview,
+        artifact_closure: VerifiedArtifactClosure,
+    ) -> bool:
+        """Verify exact Codex/Vite closure and action before transition locking."""
+
+        try:
+            if (
+                selected.application_identity != "external-application:codex"
+                or selected.installation_identity
+                != "application-installation:codex:vite"
+                or selected.application_identity != preview.application_identity
+                or selected.installation_identity != preview.installation_identity
+                or selected.owner_identity != preview.owner_identity
+                or selected.release_intent.channel != preview.release_channel
+                or selected.platform != "darwin"
+                or selected.platform != preview.platform
+                or selected.architecture != "arm64"
+                or selected.architecture != preview.architecture
+                or artifact_closure.application_identity
+                != selected.application_identity
+            ):
+                return False
+            expected = self._action(
+                preview.owner_identity,
+                preview.owner_runtime_identity,
+                artifact_closure,
+            )
+            return expected.fingerprint == preview.action.fingerprint
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
 
     def apply_exact(
         self, request: OwnerUpgradeRequest

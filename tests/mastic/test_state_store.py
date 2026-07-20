@@ -279,6 +279,20 @@ class OperationalStateStoreTests(unittest.TestCase):
                             {"id": f"op-{key}", "details": {key: "raw content"}}
                         )
 
+            with self.assertRaisesRegex(
+                SensitiveContentError, "cannot persist inference content"
+            ):
+                store.put_snapshot(
+                    {
+                        "kind": "mastic.plan-assessment",
+                        "id": "spoofed",
+                        "version": 1,
+                        "record": {
+                            "issues": [{"message": "raw prompt and response content"}]
+                        },
+                    }
+                )
+
     def test_bounds_metric_retention_and_paginates_sequence_queries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = OperationalStateStore(

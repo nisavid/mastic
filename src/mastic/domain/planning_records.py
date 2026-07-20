@@ -4,25 +4,72 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from .canonical import canonical_fingerprint, canonical_timestamp
+from .canonical import canonical_fingerprint, canonical_json_bytes, canonical_timestamp
 
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_CANONICAL_TIMESTAMP = re.compile(
+    r"(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})"
+    r"T(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
+    r"(?:\.(?P<fraction>[0-9]{1,9}))?Z\Z"
+)
 _PLAN_PURPOSES = frozenset(
     {"validation", "activation", "reconciliation", "rollback", "removal"}
 )
 _LIFECYCLE_STATES = frozenset({"absent", "present", "active"})
+_ASSESSMENT_SORT_KEYS = {
+    "claims": ("claim_identity",),
+    "claim_qualifications": ("claim_identity",),
+    "claim_applicability": ("claim_identity",),
+    "claim_conflicts": ("conflict_identity",),
+}
+_POSITION_SORT_KEYS = {
+    "support": ("claim_identity",),
+    "permission": ("claim_identity",),
+    "searches": ("search_identity",),
+}
+_SUPPORTED_ASSESSMENT_ISSUES = {
+    "lifecycle_not_observed": (
+        "Target lifecycle has not been observed.",
+        ("inspect target lifecycle",),
+    ),
+    "condition_not_observed": (
+        "Target condition has not been observed.",
+        ("run the target canary",),
+    ),
+}
 
 
 class PlanDisposition(StrEnum):
     ELIGIBLE = "eligible"
     APPROVAL_REQUIRED = "approval_required"
     BLOCKED = "blocked"
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class CanonicalInstant:
+    value: datetime
+    nanosecond_remainder: int
+    canonical: str = field(compare=False)
+
+    def plus(self, duration: timedelta) -> CanonicalInstant:
+        if not isinstance(duration, timedelta):
+            raise TypeError("canonical instant duration must be a timedelta")
+        shifted = self.value + duration
+        nanoseconds = shifted.microsecond * 1_000 + self.nanosecond_remainder
+        whole = canonical_timestamp(shifted.replace(microsecond=0)).removesuffix("Z")
+        fraction = f"{nanoseconds:09d}".rstrip("0")
+        canonical = f"{whole}.{fraction}Z" if fraction else f"{whole}Z"
+        return CanonicalInstant(
+            shifted,
+            self.nanosecond_remainder,
+            canonical,
+        )
 
 
 def _mapping(value: object, name: str) -> dict[str, object]:
@@ -53,6 +100,12 @@ def _string(value: object, name: str) -> str:
     return value
 
 
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ValueError(f"{name} must be nonempty trimmed text")
+    return value
+
+
 def _digest(value: object, name: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{name} must be a lowercase SHA-256 digest")
@@ -66,20 +119,40 @@ def _positive_integer(value: object, name: str) -> int:
 
 
 def _canonical_time(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.endswith("Z"):
+    return parse_canonical_time(value, name).canonical
+
+
+def parse_canonical_time(value: object, name: str) -> CanonicalInstant:
+    if not isinstance(value, str):
         raise ValueError(f"{name} must be a canonical UTC timestamp")
+    matched = _CANONICAL_TIMESTAMP.fullmatch(value)
+    if matched is None:
+        raise ValueError(f"{name} must be a canonical UTC timestamp")
+    fraction = matched.group("fraction")
+    if fraction is not None and fraction.endswith("0"):
+        raise ValueError(f"{name} must be a canonical UTC timestamp")
+    nanoseconds = 0 if fraction is None else int(fraction.ljust(9, "0"))
     try:
-        parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+        parsed = datetime(
+            int(matched.group("year")),
+            int(matched.group("month")),
+            int(matched.group("day")),
+            int(matched.group("hour")),
+            int(matched.group("minute")),
+            int(matched.group("second")),
+            nanoseconds // 1_000,
+            tzinfo=UTC,
+        )
     except ValueError as error:
         raise ValueError(f"{name} must be a canonical UTC timestamp") from error
-    if canonical_timestamp(parsed) != value:
-        raise ValueError(f"{name} must be a canonical UTC timestamp")
-    return value
+    return CanonicalInstant(parsed, nanoseconds % 1_000, value)
 
 
-def _parsed_canonical_time(value: object, name: str) -> datetime:
-    canonical = _canonical_time(value, name)
-    return datetime.fromisoformat(canonical.removesuffix("Z") + "+00:00")
+def datetime_instant(value: datetime, name: str) -> CanonicalInstant:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    normalized = value.astimezone(UTC)
+    return CanonicalInstant(normalized, 0, canonical_timestamp(normalized))
 
 
 def _sorted_unique_strings(value: object, name: str) -> tuple[str, ...]:
@@ -650,8 +723,10 @@ def _validate_mutations(
         ):
             raise ValueError("owner-upgrade mutation references do not resolve")
         referenced.add(mutation.mutation_id)
-    declared = {mutation_id for step in steps.values() for mutation_id in step[2]}
-    if referenced != declared:
+    declared = [mutation_id for step in steps.values() for mutation_id in step[2]]
+    if len(declared) != len(set(declared)):
+        raise ValueError("each Plan mutation must belong to exactly one Plan step")
+    if referenced != set(declared):
         raise ValueError("Plan step mutation IDs must equal the mutation set")
     return mutations
 
@@ -721,20 +796,18 @@ class PlanApproval:
             raise ValueError(
                 "approval rule and override sets must be nonempty and disjoint"
             )
-        granted_datetime = _parsed_canonical_time(
+        granted_instant = parse_canonical_time(
             record["granted_at"], "approval grant time"
         )
-        granted_at = canonical_timestamp(granted_datetime)
+        granted_at = granted_instant.canonical
         valid_value = record["valid_until"]
-        valid_datetime = (
+        valid_instant = (
             None
             if valid_value is None
-            else _parsed_canonical_time(valid_value, "approval validity endpoint")
+            else parse_canonical_time(valid_value, "approval validity endpoint")
         )
-        valid_until = (
-            None if valid_datetime is None else canonical_timestamp(valid_datetime)
-        )
-        if valid_datetime is not None and valid_datetime <= granted_datetime:
+        valid_until = None if valid_instant is None else valid_instant.canonical
+        if valid_instant is not None and valid_instant <= granted_instant:
             raise ValueError("Plan Approval validity window must be nonempty")
         receipt = GrantReceipt.from_mapping(record["grant_receipt"])
         statement = {
@@ -826,27 +899,51 @@ class PlanAssessment:
         evidence_ids = _sorted_unique_digests(
             record["evidence_ids"], "assessment Evidence identities"
         )
-        evaluated_at, policy_fingerprint, evidence_fingerprint = _validate_evaluation(
-            record["evaluation"], projection, evidence_ids
-        )
+        if evidence_ids:
+            raise ValueError(
+                "Plan Assessment Evidence requires a trusted Evidence resolver"
+            )
+        (
+            evaluated_at,
+            policy_fingerprint,
+            evidence_fingerprint,
+            policy_rules,
+        ) = _validate_evaluation(record["evaluation"], projection, evidence_ids)
         _validate_policy_inputs(record["policy_inputs"])
         for key in (
             "claims",
             "claim_qualifications",
             "claim_applicability",
             "claim_conflicts",
-            "issues",
         ):
-            _validate_canonical_object_array(record[key], key)
+            items = _validate_canonical_object_array(
+                record[key], name=key, primary_keys=_ASSESSMENT_SORT_KEYS[key]
+            )
+            if items:
+                raise ValueError(f"{key} require trusted Planning Record resolvers")
         positions = _mapping(record["positions"], "assessment positions")
         _exact_keys(positions, {"support", "permission", "searches"}, "positions")
         for key in ("support", "permission", "searches"):
-            _validate_canonical_object_array(positions[key], f"position {key}")
+            items = _validate_canonical_object_array(
+                positions[key],
+                name=f"position {key}",
+                primary_keys=_POSITION_SORT_KEYS[key],
+            )
+            if items:
+                raise ValueError(
+                    f"position {key} requires trusted Planning Record resolvers"
+                )
+        target_ids = projection["target_ids"]
+        if not isinstance(target_ids, tuple):
+            raise AssertionError("validated Plan projection targets are malformed")
+        issue_ids = _validate_issues(record["issues"], target_ids)
         approval_ids = _validate_approval_references(record["approvals"])
         disposition, applicable = _validate_policy_assessment(
-            record["policy_assessment"], approval_ids
+            record["policy_assessment"], approval_ids, policy_rules
         )
-        _validate_operational_assessment(record["operational_assessment"])
+        _validate_operational_assessment(
+            record["operational_assessment"], target_ids, issue_ids
+        )
         instance = object.__new__(cls)
         values = (
             ("assessment_identity", identity),
@@ -912,7 +1009,7 @@ def _validate_plan_projection(value: object) -> dict[str, object]:
 
 def _validate_evaluation(
     value: object, projection: Mapping[str, object], evidence_ids: tuple[str, ...]
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, Mapping[str, tuple[str, bool]]]:
     evaluation = _mapping(value, "assessment evaluation")
     _exact_keys(
         evaluation,
@@ -929,6 +1026,7 @@ def _validate_evaluation(
             "fingerprint",
             "input_requirements",
             "rules",
+            "approval_authority",
             "candidate_selection",
         },
         "selected policy",
@@ -941,8 +1039,17 @@ def _validate_evaluation(
     }
     if canonical_fingerprint(policy_payload) != policy_fingerprint:
         raise ValueError("policy fingerprint does not match the selected policy")
-    _validate_canonical_object_array(policy["input_requirements"], "policy inputs")
+    input_requirements = _validate_canonical_object_array(
+        policy["input_requirements"],
+        name="policy inputs",
+        primary_keys=(),
+    )
+    if input_requirements:
+        raise ValueError(
+            "policy input requirements require trusted Planning Record resolvers"
+        )
     rules = _validate_rule_definitions(policy["rules"])
+    _validate_approval_authority(policy["approval_authority"], rules)
     candidate = _mapping(policy["candidate_selection"], "candidate-selection rule")
     _exact_keys(candidate, {"rule_id", "version"}, "candidate-selection rule")
     _string(candidate["rule_id"], "candidate-selection rule ID")
@@ -989,21 +1096,55 @@ def _validate_evaluation(
     )
     if canonical_fingerprint(list(evidence_ids)) != evidence_fingerprint:
         raise ValueError("Evidence-set fingerprint does not match assessment Evidence")
-    if len(rules) != len(set(rules)):
-        raise ValueError("policy rule identities must be unique")
-    return evaluated_at, policy_fingerprint, evidence_fingerprint
+    return evaluated_at, policy_fingerprint, evidence_fingerprint, rules
 
 
-def _validate_rule_definitions(value: object) -> tuple[str, ...]:
+def _validate_rule_definitions(value: object) -> dict[str, tuple[str, bool]]:
     rules = [_mapping(item, "policy rule") for item in _sequence(value, "policy rules")]
-    identities: list[str] = []
+    definitions: dict[str, tuple[str, bool]] = {}
     for rule in rules:
         rule_id = _string(rule.get("rule_id"), "policy rule ID")
+        result = rule.get("result")
+        overridable = rule.get("overridable")
+        if result not in {"satisfied", "approval_required", "blocked"}:
+            raise ValueError("policy rule result is invalid")
+        if type(overridable) is not bool or (overridable and result != "blocked"):
+            raise ValueError("policy rule overridability is invalid")
         _freeze(rule)
-        identities.append(rule_id)
-    if identities != sorted(identities):
+        if rule_id in definitions:
+            raise ValueError("policy rule identities must be unique")
+        definitions[rule_id] = (str(result), overridable)
+    if tuple(definitions) != tuple(sorted(definitions)):
         raise ValueError("policy rules must be sorted by rule ID")
-    return tuple(identities)
+    return definitions
+
+
+def _validate_approval_authority(
+    value: object, rules: Mapping[str, tuple[str, bool]]
+) -> None:
+    authority = _mapping(value, "policy Approval authority")
+    _exact_keys(
+        authority,
+        {"subject_fingerprints", "rule_ids", "override_rule_ids"},
+        "policy Approval authority",
+    )
+    subjects = _sorted_unique_digests(
+        authority["subject_fingerprints"], "authorized subject fingerprints"
+    )
+    ordinary = _sorted_unique_strings(
+        authority["rule_ids"], "authorized Approval rule IDs"
+    )
+    overrides = _sorted_unique_strings(
+        authority["override_rule_ids"], "authorized Override rule IDs"
+    )
+    if (ordinary or overrides) and not subjects:
+        raise ValueError("policy Approval authority requires authorized subjects")
+    if set(ordinary) & set(overrides):
+        raise ValueError("policy Approval and Override rule sets must be disjoint")
+    if any(rules.get(rule_id) != ("approval_required", False) for rule_id in ordinary):
+        raise ValueError("policy ordinary Approval rule is not approval-required")
+    if any(rules.get(rule_id) != ("blocked", True) for rule_id in overrides):
+        raise ValueError("policy Override rule is not overridable-blocked")
 
 
 def _validate_policy_inputs(value: object) -> None:
@@ -1026,18 +1167,99 @@ def _validate_policy_inputs(value: object) -> None:
         "evidence_ids",
         "discovery_evidence_ids",
     ):
-        _sorted_unique_digests(inputs[key], f"policy-input {key}")
+        if _sorted_unique_digests(inputs[key], f"policy-input {key}"):
+            raise ValueError(
+                f"policy-input {key} require trusted Planning Record resolvers"
+            )
     payload = {key: entry for key, entry in inputs.items() if key != "fingerprint"}
     if canonical_fingerprint(payload) != fingerprint:
         raise ValueError("policy-input fingerprint does not match")
 
 
-def _validate_canonical_object_array(value: object, name: str) -> None:
+def _validate_canonical_object_array(
+    value: object,
+    *,
+    name: str,
+    primary_keys: tuple[str, ...],
+) -> tuple[dict[str, object], ...]:
     items = [_mapping(item, name) for item in _sequence(value, name)]
-    frozen = [_freeze(item) for item in items]
-    encoded = [canonical_fingerprint(_thaw(item)) for item in frozen]
+    encoded = [canonical_json_bytes(item) for item in items]
     if len(set(encoded)) != len(encoded):
         raise ValueError(f"{name} contains duplicate records")
+    ordering: list[tuple[object, ...]] = []
+    for item, canonical in zip(items, encoded, strict=True):
+        ordering.append(
+            tuple(_string(item.get(key), f"{name} {key}") for key in primary_keys)
+            + (canonical,)
+        )
+    if ordering != sorted(ordering):
+        raise ValueError(f"{name} must be canonically sorted")
+    return tuple(items)
+
+
+def _validate_issues(
+    value: object, target_ids: tuple[str, ...]
+) -> dict[str, tuple[str, str]]:
+    issues = _validate_canonical_object_array(
+        value, name="issues", primary_keys=("issue_identity",)
+    )
+    identities: dict[str, tuple[str, str]] = {}
+    for issue in issues:
+        _exact_keys(
+            issue,
+            {
+                "issue_identity",
+                "category",
+                "code",
+                "scope",
+                "message",
+                "evidence_ids",
+                "next_actions",
+            },
+            "assessment issue",
+        )
+        identity = _versioned_embedded_identity(
+            issue, "issue_identity", "assessment issue"
+        )
+        if issue["category"] not in {"observation", "execution", "policy"}:
+            raise ValueError("assessment issue category is invalid")
+        code = _string(issue["code"], "assessment issue code")
+        supported = _SUPPORTED_ASSESSMENT_ISSUES.get(code)
+        if supported is None:
+            raise ValueError("assessment issue code is not supported")
+        message = _text(issue["message"], "assessment issue message")
+        scope = _mapping(issue["scope"], "assessment issue scope")
+        _exact_keys(scope, {"kind", "id"}, "assessment issue scope")
+        if scope["kind"] != "target" or scope["id"] not in target_ids:
+            raise ValueError("assessment issue scope does not name a Plan target")
+        if _sorted_unique_digests(
+            issue["evidence_ids"], "assessment issue Evidence identities"
+        ):
+            raise ValueError(
+                "assessment issue Evidence requires a trusted Evidence resolver"
+            )
+        actions = [
+            _text(item, "assessment issue next action")
+            for item in _sequence(
+                issue["next_actions"], "assessment issue next actions"
+            )
+        ]
+        if len(set(actions)) != len(actions):
+            raise ValueError("assessment issue next actions must be unique")
+        if (message, tuple(actions)) != supported:
+            raise ValueError("assessment issue text does not match its stable code")
+        identities[identity] = (str(scope["id"]), code)
+    return identities
+
+
+def _versioned_embedded_identity(
+    record: Mapping[str, object], identity_field: str, name: str
+) -> str:
+    identity = _digest(record[identity_field], f"{name} identity")
+    payload = {key: value for key, value in record.items() if key != identity_field}
+    if canonical_fingerprint(payload) != identity:
+        raise ValueError(f"{name} identity does not match its canonical record")
+    return identity
 
 
 def _validate_approval_references(value: object) -> tuple[str, ...]:
@@ -1057,7 +1279,9 @@ def _validate_approval_references(value: object) -> tuple[str, ...]:
 
 
 def _validate_policy_assessment(
-    value: object, approval_ids: tuple[str, ...]
+    value: object,
+    approval_ids: tuple[str, ...],
+    policy_rules: Mapping[str, tuple[str, bool]],
 ) -> tuple[PlanDisposition, tuple[str, ...]]:
     assessment = _mapping(value, "Policy Assessment")
     _exact_keys(
@@ -1075,12 +1299,14 @@ def _validate_policy_assessment(
         disposition = PlanDisposition(assessment["disposition"])
     except (TypeError, ValueError) as error:
         raise ValueError("Plan Disposition is invalid") from error
-    _sorted_unique_digests(
+    applicable_claims = _sorted_unique_digests(
         assessment["applicable_claim_ids"], "applicable Claim identities"
     )
-    _sorted_unique_digests(
+    conflicts = _sorted_unique_digests(
         assessment["claim_conflict_ids"], "Claim Conflict identities"
     )
+    if applicable_claims or conflicts:
+        raise ValueError("Policy Assessment Claims require trusted resolvers")
     approval_evaluation = _mapping(
         assessment["approval_evaluation"], "Approval evaluation"
     )
@@ -1122,8 +1348,17 @@ def _validate_policy_assessment(
     elif approval_ids or evaluations:
         raise ValueError("missing or unneeded Approval cannot carry evaluations")
     results = _validate_rule_evaluations(
-        assessment["rule_evaluations"], set(applicable)
+        assessment["rule_evaluations"], set(applicable), policy_rules
     )
+    expected_requirement = (
+        "evaluated"
+        if approval_ids
+        else "missing"
+        if "approval_required" in results
+        else "not_required"
+    )
+    if requirement != expected_requirement:
+        raise ValueError("Approval requirement does not match policy rules")
     reduced = (
         PlanDisposition.BLOCKED
         if "blocked" in results
@@ -1136,7 +1371,11 @@ def _validate_policy_assessment(
     return disposition, tuple(applicable)
 
 
-def _validate_rule_evaluations(value: object, applicable: set[str]) -> set[str]:
+def _validate_rule_evaluations(
+    value: object,
+    applicable: set[str],
+    policy_rules: Mapping[str, tuple[str, bool]],
+) -> set[str]:
     evaluations = [
         _mapping(item, "rule evaluation")
         for item in _sequence(value, "rule evaluations")
@@ -1156,24 +1395,44 @@ def _validate_rule_evaluations(value: object, applicable: set[str]) -> set[str]:
             },
             "rule evaluation",
         )
-        rule_ids.append(_string(evaluation["rule_id"], "rule ID"))
+        rule_id = _string(evaluation["rule_id"], "rule ID")
+        rule_ids.append(rule_id)
+        definition = policy_rules.get(rule_id)
+        if definition is None:
+            raise ValueError("rule evaluation is not selected by policy")
+        base_result, overridable = definition
         result = evaluation["result"]
         if result not in {"satisfied", "approval_required", "blocked"}:
             raise ValueError("rule evaluation result is invalid")
         results.add(str(result))
         for key in ("claim_ids", "claim_conflict_ids", "evidence_ids"):
-            _sorted_unique_digests(evaluation[key], f"rule {key}")
+            if _sorted_unique_digests(evaluation[key], f"rule {key}"):
+                raise ValueError(f"rule {key} require trusted record resolvers")
         approval = evaluation["approval_identity"]
-        if approval is not None:
+        if approval is None:
+            if result != base_result:
+                raise ValueError("unapproved rule result differs from selected policy")
+        else:
             identity = _digest(approval, "rule Approval identity")
-            if result != "satisfied" or identity not in applicable:
+            if (
+                result != "satisfied"
+                or identity not in applicable
+                or not (
+                    base_result == "approval_required"
+                    or (base_result == "blocked" and overridable)
+                )
+            ):
                 raise ValueError("rule names an inapplicable Approval")
-    if rule_ids != sorted(rule_ids) or len(set(rule_ids)) != len(rule_ids):
-        raise ValueError("rule evaluations must be sorted and unique")
+    if rule_ids != list(policy_rules):
+        raise ValueError("rule evaluations must exactly cover selected policy rules")
     return results
 
 
-def _validate_operational_assessment(value: object) -> None:
+def _validate_operational_assessment(
+    value: object,
+    plan_target_ids: tuple[str, ...],
+    issue_targets: Mapping[str, tuple[str, str]],
+) -> None:
     assessment = _mapping(value, "Plan Operational Assessment")
     _exact_keys(
         assessment,
@@ -1189,11 +1448,153 @@ def _validate_operational_assessment(value: object) -> None:
     if completion["value"] not in {"partial", "complete"}:
         raise ValueError("Plan Completion value is invalid")
     _sorted_unique_strings(completion["required_step_ids"], "required step IDs")
-    _validate_canonical_object_array(
-        completion["step_satisfactions"], "step satisfactions"
+    satisfactions = _validate_canonical_object_array(
+        completion["step_satisfactions"],
+        name="step satisfactions",
+        primary_keys=("step_id", "step_fingerprint"),
     )
-    _validate_canonical_object_array(assessment["targets"], "operational targets")
-    _mapping(assessment["summary"], "operational summary")
+    if satisfactions:
+        raise ValueError("Step satisfaction requires a trusted Step Evidence resolver")
+    if completion["value"] != "partial":
+        raise ValueError("evidence-free Plan Completion must be partial")
+    targets = _validate_canonical_object_array(
+        assessment["targets"],
+        name="operational targets",
+        primary_keys=("target_id", "plan_target_fingerprint"),
+    )
+    target_ids: list[str] = []
+    referenced_issues: set[str] = set()
+    for target in targets:
+        _exact_keys(
+            target,
+            {
+                "target_id",
+                "target_kind",
+                "subject_fingerprint",
+                "plan_target_fingerprint",
+                "completion",
+                "lifecycle",
+                "operational_condition",
+                "issue_ids",
+            },
+            "operational target",
+        )
+        target_id = _string(target["target_id"], "operational target ID")
+        target_ids.append(target_id)
+        if target["target_kind"] != "external_application_installation":
+            raise ValueError("operational target kind is invalid")
+        _digest(target["subject_fingerprint"], "operational target subject")
+        _digest(target["plan_target_fingerprint"], "operational Plan Target")
+        if target["completion"] != "partial":
+            raise ValueError("evidence-free target Completion must be partial")
+        lifecycle_issues = _validate_unobserved_projection(
+            target["lifecycle"],
+            "target lifecycle",
+            target_id,
+            "lifecycle_not_observed",
+            issue_targets,
+        )
+        condition_issues = _validate_unobserved_projection(
+            target["operational_condition"],
+            "operational condition",
+            target_id,
+            "condition_not_observed",
+            issue_targets,
+        )
+        declared_issues = frozenset(
+            _sorted_unique_digests(target["issue_ids"], "operational target issues")
+        )
+        if declared_issues != lifecycle_issues | condition_issues:
+            raise ValueError("operational target issues do not match its projections")
+        referenced_issues.update(declared_issues)
+    if tuple(target_ids) != plan_target_ids:
+        raise ValueError("operational targets must exactly project Plan targets")
+    if referenced_issues != set(issue_targets):
+        raise ValueError("assessment issues must be referenced by their target")
+    _validate_unobserved_summary(assessment["summary"], plan_target_ids)
+
+
+def _validate_unobserved_projection(
+    value: object,
+    name: str,
+    target_id: str,
+    expected_code: str,
+    issue_targets: Mapping[str, tuple[str, str]],
+) -> frozenset[str]:
+    projection = _mapping(value, name)
+    _exact_keys(projection, {"observation", "issue_ids"}, name)
+    if projection["observation"] != "not_observed":
+        raise ValueError(f"evidence-free {name} must be not_observed")
+    references = frozenset(
+        _sorted_unique_digests(projection["issue_ids"], f"{name} issue identities")
+    )
+    if not references or any(
+        issue_targets.get(identity) != (target_id, expected_code)
+        for identity in references
+    ):
+        raise ValueError(f"{name} issues are missing or unresolved")
+    return references
+
+
+def _validate_unobserved_summary(value: object, target_ids: tuple[str, ...]) -> None:
+    summary = _mapping(value, "operational summary")
+    _exact_keys(
+        summary,
+        {
+            "by_completion",
+            "by_lifecycle_state",
+            "by_operational_condition",
+            "lifecycle_not_observed",
+            "lifecycle_not_applicable",
+            "condition_not_observed",
+            "condition_not_applicable",
+        },
+        "operational summary",
+    )
+    completion = _mapping(summary["by_completion"], "Completion summary")
+    _exact_keys(completion, {"partial", "complete"}, "Completion summary")
+    if _sorted_unique_strings(
+        completion["partial"], "partial target IDs"
+    ) != target_ids or _sorted_unique_strings(
+        completion["complete"], "complete target IDs"
+    ):
+        raise ValueError("Completion summary does not match partial targets")
+    lifecycle = _mapping(summary["by_lifecycle_state"], "lifecycle summary")
+    _exact_keys(
+        lifecycle,
+        {"absent", "present", "transitioning", "active"},
+        "lifecycle summary",
+    )
+    condition = _mapping(summary["by_operational_condition"], "condition summary")
+    _exact_keys(
+        condition,
+        {"functional", "degraded", "nonfunctional"},
+        "condition summary",
+    )
+    if any(
+        _sorted_unique_strings(items, f"{name} summary target IDs")
+        for name, items in (*lifecycle.items(), *condition.items())
+    ):
+        raise ValueError("evidence-free observed summary buckets must be empty")
+    if (
+        _sorted_unique_strings(
+            summary["lifecycle_not_observed"], "unobserved lifecycle target IDs"
+        )
+        != target_ids
+        or _sorted_unique_strings(
+            summary["condition_not_observed"], "unobserved condition target IDs"
+        )
+        != target_ids
+        or _sorted_unique_strings(
+            summary["lifecycle_not_applicable"],
+            "inapplicable lifecycle target IDs",
+        )
+        or _sorted_unique_strings(
+            summary["condition_not_applicable"],
+            "inapplicable condition target IDs",
+        )
+    ):
+        raise ValueError("unobserved summary does not exactly partition targets")
 
 
 @dataclass(frozen=True, slots=True, init=False)

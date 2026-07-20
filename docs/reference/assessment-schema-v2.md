@@ -340,6 +340,13 @@ record under `scope_identity` with version
 before compare-and-append, then validates both the predecessor identity and
 one-less predecessor version against the latest stored pointer.
 
+An authorized physical mutation that depends on the current Plan holds a
+scope-specific current-pointer transition lease from its final authoritative
+verification through mutation outcome determination. Every current-pointer
+compare-and-append takes the same cross-process lease. A replacement therefore
+waits for an in-flight authorized mutation, and a mutation cannot proceed after
+its Plan has been replaced between verification and owner execution.
+
 `scope_identity` is the SHA-256 digest of the canonical two-key object
 `{"kind": scope.kind, "id": scope.id}`. It is a stable identity for the
 declared-scope lineage, not the mutable definition's fingerprint. The embedded
@@ -353,6 +360,9 @@ There is intentionally one compare-and-append pointer lineage per stable
 declared scope, not one per scope fingerprint or Plan Purpose. A purpose change
 therefore replaces the current selection through the same predecessor chain;
 `plan_purpose` participates in pointer identity but never in the storage key.
+Every pointer snapshot is retained as the immutable audit lineage. Pointer
+history is not replaceable lifecycle-status history and is intentionally not
+subject to bounded snapshot pruning.
 
 ## Step Evidence record
 
@@ -650,7 +660,7 @@ or contradictory projections are invalid.
   "valid_until": null,
   "grant_receipt": {
     "kind": "authenticated_grant_receipt",
-    "verifier_id": "mastic-local-auth:v1",
+    "verifier_id": "mastic-local-auth:hmac-sha256:v1",
     "statement_fingerprint": "sha256:APPROVAL_STATEMENT",
     "proof": "base64url:AUTHENTICATED_PROOF"
   }
@@ -675,6 +685,10 @@ signature, MAC, or operating-system-authenticated local grant over that exact
 statement. The Planning Record Repository accepts an Approval only through this
 authenticated boundary and revalidates the receipt on read. A content digest
 without a valid grant receipt never authorizes anything.
+
+For `kind: "local_user"`, the authorization-subject fingerprint is the JCS
+SHA-256 digest of exactly `{"kind":"local_user","id":"<uid>"}`, where
+`<uid>` is the authenticated decimal operating-system user ID.
 
 ## Plan Assessment record
 
@@ -717,6 +731,11 @@ without a valid grant receipt never authorizes anything.
       "fingerprint": "sha256:POLICY",
       "input_requirements": [],
       "rules": [],
+      "approval_authority": {
+        "subject_fingerprints": [],
+        "rule_ids": [],
+        "override_rule_ids": []
+      },
       "candidate_selection": {
         "rule_id": "prefer-policy-ranked-eligible",
         "version": 1

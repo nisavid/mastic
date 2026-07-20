@@ -34,6 +34,10 @@ class MasticPaths:
         return self.state_dir / "gateway.token"
 
     @property
+    def planning_grant_key(self) -> Path:
+        return self.state_dir / "planning-grant.key"
+
+    @property
     def runtime_dir(self) -> Path:
         return self.data_dir / "runtimes"
 
