@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 from mastic.application.current_release import (
@@ -9,6 +10,7 @@ from mastic.application.current_release import (
     ReleaseAuthorityUnavailableError,
     resolve_current_release,
 )
+from mastic.domain.canonical import canonical_fingerprint
 from mastic.domain.external_applications import (
     AuthorityReleaseObservation,
     ExternalApplicationInstallation,
@@ -42,6 +44,7 @@ def observation(**changes: object) -> InstallationObservation:
         "architecture": "arm64",
         "installed_release": "0.144.5",
         "owner_installation_identity": "vite-prefix:/Users/sumi/.vite-plus",
+        "owner_runtime_identity": "node:24.18.0",
         "installed_artifact_digest": "sha256:" + "b" * 64,
         "active_invocation": "/Users/sumi/.vite-plus/bin/codex",
         "reachable_invocations": (
@@ -119,6 +122,17 @@ class UnavailableMaterializer:
 
 
 class ExternalApplicationIdentityTests(unittest.TestCase):
+    def test_installation_state_fingerprint_excludes_only_observation_time(
+        self,
+    ) -> None:
+        first = observation()
+        later = replace(first, observed_at=NOW + timedelta(seconds=1))
+        changed = replace(first, installed_artifact_digest="sha256:" + "c" * 64)
+
+        self.assertNotEqual(first.fingerprint, later.fingerprint)
+        self.assertEqual(first.state_fingerprint, later.state_fingerprint)
+        self.assertNotEqual(first.state_fingerprint, changed.state_fingerprint)
+
     def test_release_intent_distinguishes_current_from_exact(self) -> None:
         current = ReleaseIntent.current(channel="npm:latest")
         exact = ReleaseIntent.exact(channel="npm:latest", release="0.144.6")
@@ -232,6 +246,38 @@ class CurrentReleaseResolutionTests(unittest.TestCase):
         )
         self.assertEqual(materializer.coordinates, ["npm:@openai/codex@0.144.6"])
         self.assertNotIn("signature_binding", result.canonical_payload())
+
+        later = replace(
+            result,
+            installation_observation_fingerprint="sha256:" + "e" * 64,
+            observed_at=result.observed_at + timedelta(seconds=1),
+            expires_at=result.expires_at + timedelta(seconds=1),
+        )
+        changed = replace(result, artifact_digest="sha256:" + "f" * 64)
+        self.assertNotEqual(result.fingerprint, later.fingerprint)
+        self.assertEqual(
+            result.resolved_target_fingerprint,
+            later.resolved_target_fingerprint,
+        )
+        self.assertNotEqual(
+            result.resolved_target_fingerprint,
+            changed.resolved_target_fingerprint,
+        )
+        freshness_fields = {
+            "installation_observation_fingerprint",
+            "observed_at",
+            "expires_at",
+        }
+        self.assertEqual(
+            result.resolved_target_fingerprint,
+            canonical_fingerprint(
+                {
+                    key: value
+                    for key, value in result.canonical_payload().items()
+                    if key not in freshness_fields
+                }
+            ),
+        )
 
     def test_authority_validity_can_shorten_profile_expiry(self) -> None:
         valid_until = NOW + timedelta(minutes=5)

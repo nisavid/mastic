@@ -49,6 +49,7 @@ def observation(*, application: str = "codex") -> InstallationObservation:
         installation_identity=selected.installation_identity,
         owner_identity=selected.owner_identity,
         owner_installation_identity=f"owner-installation:{application}:one",
+        owner_runtime_identity="runtime:one",
         release_channel="stable",
         platform="darwin",
         architecture="arm64",

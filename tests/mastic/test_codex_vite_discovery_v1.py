@@ -2,6 +2,7 @@ import json
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -199,7 +200,7 @@ class ViteFixture:
             ),
         }
 
-    def discover(self):
+    def discovery(self) -> CodexViteDiscovery:
         return CodexViteDiscovery(
             vp_home=self.vp_home,
             path=self.path,
@@ -207,13 +208,30 @@ class ViteFixture:
             observed_at=lambda: NOW,
             platform="darwin",
             architecture="arm64",
-        ).discover(
+        )
+
+    def discover(self):
+        return self.discovery().discover(
             selected_installation_identity=("application-installation:codex:vite"),
             selected_release_channel="stable",
         )
 
 
 class CodexViteDiscoveryTests(unittest.TestCase):
+    def test_discovery_rejects_unsupported_platform_before_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary))
+
+            with self.assertRaisesRegex(ValueError, "darwin/arm64"):
+                CodexViteDiscovery(
+                    vp_home=fixture.vp_home,
+                    path=fixture.path,
+                    runner=fixture.runner,
+                    observed_at=lambda: NOW,
+                    platform="linux",
+                    architecture="x86_64",
+                )
+
     def test_package_tree_bound_covers_current_apple_silicon_closure(self) -> None:
         self.assertGreaterEqual(_MAX_PACKAGE_BYTES, 768 * 1024 * 1024)
 
@@ -287,6 +305,86 @@ class CodexViteDiscoveryTests(unittest.TestCase):
                 invalid.exception.reason_code,
                 "package_identity_mismatch",
             )
+
+    def test_payload_roots_preserve_the_discovered_owner_layout(self) -> None:
+        for owner in ("npm", "vp"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as temporary:
+                fixture = ViteFixture(Path(temporary), source=owner)
+                discovery = CodexViteDiscovery(
+                    vp_home=fixture.vp_home,
+                    path=fixture.path,
+                    runner=fixture.runner,
+                    observed_at=lambda: NOW,
+                    platform="darwin",
+                    architecture="arm64",
+                )
+                observed = discovery.discover(
+                    selected_installation_identity="application-installation:codex:vite",
+                    selected_release_channel="stable",
+                )
+
+                roots = discovery.payload_roots(observed)
+
+                self.assertEqual(roots["primary"], fixture.package_root.resolve())
+                self.assertEqual(
+                    roots["platform"],
+                    fixture.package_root.resolve()
+                    / "node_modules/@openai/codex-darwin-arm64",
+                )
+
+    def test_payload_roots_reject_wrong_application_before_filesystem_access(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="vp")
+            observed = fixture.discover()
+            fixture.bin_config_path.unlink()
+
+            with self.assertRaises(CodexViteDiscoveryError) as invalid:
+                fixture.discovery().payload_roots(
+                    replace(
+                        observed,
+                        application_identity="external-application:hindsight",
+                    )
+                )
+
+            self.assertEqual(invalid.exception.reason_code, "owner_metadata_invalid")
+
+    def test_payload_roots_reject_owner_metadata_drift_after_discovery(self) -> None:
+        for owner in ("npm", "vp"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as temporary:
+                fixture = ViteFixture(Path(temporary), source=owner)
+                discovery = fixture.discovery()
+                observed = discovery.discover(
+                    selected_installation_identity=(
+                        "application-installation:codex:vite"
+                    ),
+                    selected_release_channel="stable",
+                )
+                package_path = fixture.package_root / "package.json"
+                package_metadata = json.loads(package_path.read_text())
+                package_metadata["tampered"] = True
+                package_path.write_text(json.dumps(package_metadata))
+
+                with self.assertRaises(CodexViteDiscoveryError) as ambiguous:
+                    discovery.payload_roots(observed)
+
+                self.assertEqual(ambiguous.exception.reason_code, "owner_ambiguous")
+
+    def test_payload_roots_reject_symlinked_vite_package_components(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="vp")
+            discovery = fixture.discovery()
+            observed = fixture.discover()
+            install_root = fixture.package_root.parents[3]
+            attacker_root = fixture.root / "attacker-controlled-install"
+            install_root.rename(attacker_root)
+            install_root.symlink_to(attacker_root, target_is_directory=True)
+
+            with self.assertRaises(CodexViteDiscoveryError) as invalid:
+                discovery.payload_roots(observed)
+
+            self.assertEqual(invalid.exception.reason_code, "package_identity_mismatch")
 
     def test_vite_legacy_empty_install_id_uses_the_supported_legacy_layout(
         self,

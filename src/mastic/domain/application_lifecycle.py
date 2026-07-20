@@ -2,49 +2,18 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from .canonical import canonical_fingerprint, canonical_timestamp
-
-
-_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_ARTIFACT_DIGEST = re.compile(r"(?:sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})\Z")
-
-
-def _identity(value: object, field_name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or any(character.isspace() for character in value)
-    ):
-        raise ValueError(f"{field_name} must be a nonempty identity")
-    return value
-
-
-def _digest(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-    return value
-
-
-def _artifact_digest(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or _ARTIFACT_DIGEST.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 or SHA-512 digest")
-    return value
-
-
-def _aware(value: object, field_name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ValueError(f"{field_name} must be timezone-aware")
-    return value
+from .canonical import (
+    canonical_fingerprint,
+    canonical_timestamp,
+    require_artifact_digest as _artifact_digest,
+    require_aware as _aware,
+    require_identity as _identity,
+    require_sha256 as _digest,
+)
 
 
 class ReleaseTransitionKind(StrEnum):
@@ -110,6 +79,7 @@ class UpgradeCandidate:
     installation_observation_fingerprint: str
     owner_identity: str
     owner_installation_identity: str
+    owner_runtime_identity: str
     release_channel: str
     platform: str
     architecture: str
@@ -129,6 +99,7 @@ class UpgradeCandidate:
             "installation_identity",
             "owner_identity",
             "owner_installation_identity",
+            "owner_runtime_identity",
             "release_channel",
             "platform",
             "architecture",
@@ -161,6 +132,7 @@ class UpgradeCandidate:
             ),
             "owner_identity": self.owner_identity,
             "owner_installation_identity": self.owner_installation_identity,
+            "owner_runtime_identity": self.owner_runtime_identity,
             "release_channel": self.release_channel,
             "platform": self.platform,
             "architecture": self.architecture,

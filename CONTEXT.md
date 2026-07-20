@@ -57,10 +57,25 @@ _Avoid_: MASTIC owner, executable path, inferred owner
 **Installation Observation**:
 Time-bound Observed State for one exact External Application Installation,
 binding its MASTIC identity and fingerprint to the owner-native installation
-identity, Installation Owner, effective Release Channel, platform,
-architecture, installed artifact, and reachable invocations. It does not
-select an owner or authorize mutation.
+identity, Installation Owner, owner runtime identity, effective Release
+Channel, platform, architecture, installed artifact, and reachable
+invocations. Its stable state fingerprint excludes only the observation time.
+It does not select an owner or authorize mutation.
 _Avoid_: External Application Installation, inventory row, lifecycle authority
+
+**Owner Runtime Identity**:
+The exact runtime selected by an Installation Owner for one External
+Application Installation. An owner-preserving mutation keeps this identity
+unless a separately authorized Plan changes it.
+_Avoid_: application release, host default runtime, inferred compatibility
+
+**Verified Artifact Closure**:
+The complete bounded set of exact archives and installed payload fingerprints
+required to materialize one External Application Installation target. It is
+bound to a Current Release Resolution and retained in private staging until its
+single mutation attempt finishes. It proves artifact identity, not mutation
+authority or operational fitness.
+_Avoid_: package cache, dependency lock, Plan Approval
 
 **Release Channel**:
 An Installation Owner's native release stream, selected independently for one
@@ -96,6 +111,20 @@ A durable subject-bound rule that may require MASTIC to construct and assess a
 new exact same-owner, same-channel Current upgrade Plan. It never acts as Plan
 Approval and never authorizes a downgrade, owner switch, or channel switch.
 _Avoid_: auto-update setting, standing approval, upgrade Plan
+
+**Mutation Outcome**:
+The evidence-backed result of one authorized mutation attempt:
+`not_attempted`, `verified`, or `unknown`. It is independent of whether a
+successor Plan is required. Once owner execution evidence verifies the exact
+request and artifact closure, later observation drift cannot change the
+mutation outcome from `verified`; it requires a successor Plan instead.
+_Avoid_: Plan Disposition, Operational Condition, command exit status
+
+**Artifact Cleanup Outcome**:
+Whether the private Verified Artifact Closure was successfully released after
+an upgrade attempt or remains retained for explicit cleanup. Cleanup failure
+never changes or masks Mutation Outcome.
+_Avoid_: Mutation Outcome, Removal Plan, artifact verification
 
 **Validated Backup**:
 A fresh content-addressed backup bound to one exact Installation Observation,
