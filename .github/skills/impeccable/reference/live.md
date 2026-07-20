@@ -302,7 +302,7 @@ Complete HTML replacement of the original element for each variant, not a CSS-on
 
 Colocate preview CSS as a `<style>` tag inside the variant wrapper; `<style>` works anywhere in modern browsers and keeps each delivered state internally complete (no FOUC).
 
-**Atomic default:** write CSS + all variants + parameter manifests in one edit at `insertLine`, preserving the established behavior.
+**Atomic default for HTML/JSX paths:** write CSS + all variants + parameter manifests in one edit at `insertLine`, preserving the established behavior. For Svelte component previews, write each variant to `componentDir/vN.svelte` and parameters to `componentDir/params.json`; generation must not edit the route source.
 
 Use the `cssAuthoring` object returned by `live-wrap.mjs` to author the temporary preview CSS. The style opening tag shown below is the common case; replace it with `cssAuthoring.styleTag` when the tool returns a different one. The variant markup shape is otherwise stable:
 

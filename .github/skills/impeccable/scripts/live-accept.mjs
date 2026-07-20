@@ -120,35 +120,8 @@ Output (JSON):
   }
 
   const requestedOperation = isDiscard ? 'discard' : 'accept';
-  const priorReceipt = readAcceptReceipt(process.cwd(), id);
-  if (priorReceipt) {
-    const sameOperation = priorReceipt.operation === requestedOperation
-      && (isDiscard || String(priorReceipt.variantId) === String(variantNum));
-    console.log(JSON.stringify(sameOperation
-      ? { ...priorReceipt.result, handled: true, alreadyApplied: true }
-      : {
-          // mode: 'error' is what marks this a real failure rather than a manual
-          // handoff. Without it, live/completion.mjs classifies the reply as
-          // agent_done and reference/live.md tells the agent to "read file, find
-          // markers, edit" by hand — which would apply a second, conflicting
-          // accept on top of the one the receipt already recorded.
-          handled: false,
-          mode: 'error',
-          error: 'accept_receipt_conflict',
-          priorOperation: priorReceipt.operation,
-          priorVariantId: priorReceipt.variantId ?? null,
-        }));
-    return;
-  }
   const emitResult = (rawResult) => {
     const result = markPreviewFailure(rawResult);
-    if (result?.handled !== false) {
-      writeAcceptReceipt(process.cwd(), id, {
-        operation: requestedOperation,
-        variantId: isDiscard ? null : String(variantNum),
-        result,
-      });
-    }
     console.log(JSON.stringify(result));
   };
 
@@ -171,41 +144,56 @@ Output (JSON):
     if (isDiscard) {
       let result;
       try {
-        result = withSourceLockSync(
-          path.resolve(process.cwd(), svelteComponentManifest.sourceFile),
-          'discard:' + id,
-          () => {
+        result = withAcceptReceiptSourceLock({
+          cwd: process.cwd(),
+          id,
+          operation: requestedOperation,
+          variantId: null,
+          targetFile: path.resolve(process.cwd(), svelteComponentManifest.sourceFile),
+          apply: () => {
             removeSvelteComponentSession(id, process.cwd());
-            return { handled: true };
+            return {
+              handled: true,
+              file: svelteComponentManifest.sourceFile,
+              carbonize: false,
+              previewMode: 'svelte-component',
+              componentDir: svelteComponentManifest.componentDir,
+            };
           },
-          { waitMs: ACCEPT_LOCK_WAIT_MS },
-        );
+        });
       } catch (err) {
         result = operationFailure(err);
       }
-      emitResult({
-        ...result,
-        file: svelteComponentManifest.sourceFile,
-        carbonize: false,
-        previewMode: 'svelte-component',
-        componentDir: svelteComponentManifest.componentDir,
-      });
+      emitResult(result);
       return;
     }
 
     let result;
     try {
-      result = withSourceLockSync(
-        path.resolve(process.cwd(), svelteComponentManifest.sourceFile),
-        'accept:' + id,
-        () => inlineSvelteComponentAccept(
-          svelteComponentManifest,
-          variantNum,
-          paramValues,
-          process.cwd(),
-        ),
-        { waitMs: ACCEPT_LOCK_WAIT_MS },
-      );
+      result = withAcceptReceiptSourceLock({
+        cwd: process.cwd(),
+        id,
+        operation: requestedOperation,
+        variantId: String(variantNum),
+        targetFile: path.resolve(process.cwd(), svelteComponentManifest.sourceFile),
+        apply: () => {
+          const applied = inlineSvelteComponentAccept(
+            svelteComponentManifest,
+            variantNum,
+            paramValues,
+            process.cwd(),
+          );
+          if (applied.carbonize) {
+            applied.todo = 'REQUIRED before next poll: carbonize cleanup in ' + applied.file + '. See reference/live.md "Required after accept".';
+          }
+          return {
+            handled: applied.handled !== false,
+            ...applied,
+            previewMode: 'svelte-component',
+            componentDir: svelteComponentManifest.componentDir,
+          };
+        },
+      });
     } catch (err) {
       result = operationFailure(err, {
         file: svelteComponentManifest.sourceFile,
@@ -214,7 +202,7 @@ Output (JSON):
         componentDir: svelteComponentManifest.componentDir,
       });
     }
-    if (result.carbonize) {
+    if (result.carbonize && !result.alreadyApplied) {
       result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + result.file + '. See reference/live.md "Required after accept".';
     }
     emitResult({ handled: result.handled !== false, ...result });
@@ -253,16 +241,30 @@ Output (JSON):
     // contention. Without this catch the CLI exits non-zero with empty stdout
     // and the agent gets no JSON to act on.
     try {
-      result = handleDiscard(id, lines, targetFile);
+      result = withAcceptReceiptSourceLock({
+        cwd: process.cwd(),
+        id,
+        operation: requestedOperation,
+        variantId: null,
+        targetFile,
+        apply: () => ({ handled: true, file: relFile, carbonize: false, ...handleDiscardUnlocked(id, lines, targetFile) }),
+      });
     } catch (err) {
       emitResult(operationFailure(err, { file: relFile }));
       return;
     }
-    emitResult({ handled: true, file: relFile, carbonize: false, ...result });
+    emitResult(result);
   } else {
     let result;
     try {
-      result = handleAccept(id, variantNum, lines, targetFile, paramValues);
+      result = withAcceptReceiptSourceLock({
+        cwd: process.cwd(),
+        id,
+        operation: requestedOperation,
+        variantId: String(variantNum),
+        targetFile,
+        apply: () => ({ handled: true, file: relFile, ...handleAcceptUnlocked(id, variantNum, lines, targetFile, paramValues) }),
+      });
     } catch (err) {
       emitResult(operationFailure(err, { file: relFile }));
       return;
@@ -287,6 +289,37 @@ Output (JSON):
     }
     emitResult({ handled: true, file: relFile, ...result });
   }
+}
+
+function withAcceptReceiptSourceLock({ cwd, id, operation, variantId, targetFile, apply }) {
+  return withSourceLockSync(
+    targetFile,
+    `${operation}:${id}`,
+    () => {
+      const priorReceipt = readAcceptReceipt(cwd, id);
+      if (priorReceipt) {
+        const sameOperation = priorReceipt.operation === operation
+          && (operation === 'discard' || String(priorReceipt.variantId) === String(variantId));
+        return sameOperation
+          ? { ...priorReceipt.result, handled: true, alreadyApplied: true }
+          : {
+              handled: false,
+              mode: 'error',
+              error: 'accept_receipt_conflict',
+              priorOperation: priorReceipt.operation,
+              priorVariantId: priorReceipt.variantId ?? null,
+            };
+      }
+      const result = apply();
+      if (result?.handled !== false) {
+        const receiptResult = { ...result };
+        delete receiptResult.acceptedOriginalText;
+        writeAcceptReceipt(cwd, id, { operation, variantId, result: receiptResult });
+      }
+      return result;
+    },
+    { waitMs: ACCEPT_LOCK_WAIT_MS },
+  );
 }
 
 /**
