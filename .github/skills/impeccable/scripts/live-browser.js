@@ -3691,7 +3691,9 @@
     const container = copyEditContainerContext(contextElement);
     if (container) for (const op of ops) op.container = container;
     try {
-      const res = await fetch('http://localhost:' + PORT + '/manual-edit-stash', {
+      const res = await fetch(
+        'http://localhost:' + PORT + '/manual-edit-stash?token=' + encodeURIComponent(TOKEN),
+        {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3701,7 +3703,8 @@
           element: extractContext(contextElement),
           ops,
         }),
-      });
+        },
+      );
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || ('HTTP ' + res.status));
@@ -6320,7 +6323,7 @@
   const SSE_MAX_RETRIES = 20;  // generous: heartbeats keep the connection alive, so retries mean real trouble
 
   function connectSSE() {
-    evtSource = new EventSource('http://localhost:' + PORT + '/events?token=' + TOKEN);
+    evtSource = new EventSource('http://localhost:' + PORT + '/events?token=' + encodeURIComponent(TOKEN));
 
     evtSource.onopen = () => {
       sseRetries = 0; // reset on successful (re)connect
@@ -6518,7 +6521,7 @@
       console.debug('[impeccable] Dropped optional live event:', err);
       return null;
     }
-    return fetch('http://localhost:' + PORT + '/events', {
+    return fetch('http://localhost:' + PORT + '/events?token=' + encodeURIComponent(TOKEN), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(msg),
