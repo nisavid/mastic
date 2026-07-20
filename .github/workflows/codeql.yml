@@ -43,7 +43,14 @@ jobs:
         with:
           build-mode: none
           languages: python
-          queries: security-and-quality
+          config: |
+            queries:
+              - uses: security-and-quality
+            query-filters:
+              # Protocol method bodies intentionally use `...`; CodeQL treats
+              # those interface declarations as executable no-op statements.
+              - exclude:
+                  id: py/ineffectual-statement
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
