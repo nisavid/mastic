@@ -261,7 +261,10 @@ def _signature_parameter(parameter: Parameter) -> SignatureParameter:
         value_type = str if parameter.required else str | None
         default = SignatureParameter.empty if parameter.required else None
     if parameter.kind is ParameterKind.ARGUMENT:
-        annotation = Annotated[value_type, typer.Argument(help=help_text)]
+        annotation = Annotated[
+            value_type,
+            typer.Argument(help=help_text, metavar=parameter.name.upper()),
+        ]
     else:
         option_flag = parameter.flag or "--" + parameter.name
         if parameter.value_type == "tristate_boolean":
