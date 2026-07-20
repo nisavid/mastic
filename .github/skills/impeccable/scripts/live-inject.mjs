@@ -8,7 +8,7 @@
  * with zero LLM involvement.
  *
  * Usage:
- *   node live-inject.mjs --port PORT   # Insert the live script tag
+ *   node live-inject.mjs --port PORT --token TOKEN   # Insert the live script tag
  *   node live-inject.mjs --remove      # Remove the live script tag
  *   node live-inject.mjs --check       # Check whether live config exists
  */
@@ -83,6 +83,7 @@ Reads configuration from .impeccable/live/config.json.
 
 Modes:
   --port PORT   Insert script tag pointing at http://localhost:PORT/live.js
+  --token TOKEN Require TOKEN before serving the token-bearing live script
   --remove      Remove the script tag (if present)
   --check       Print whether .impeccable/live/config.json exists and its content
 
@@ -162,18 +163,24 @@ Output (JSON):
     console.error(JSON.stringify({ ok: false, error: 'missing_port' }));
     process.exit(1);
   }
+  const tokenIdx = args.indexOf('--token');
+  const token = tokenIdx !== -1 ? args[tokenIdx + 1] : '';
+  if (!/^[A-Za-z0-9-]{16,128}$/.test(token || '')) {
+    console.error(JSON.stringify({ ok: false, error: 'missing_or_invalid_token' }));
+    process.exit(1);
+  }
   const gitIgnore = ensureLiveGitIgnores(
     process.cwd(),
     nuxt ? [nuxt.pluginFile] : [],
   );
 
   if (svelteKit) {
-    const adapterResult = applySvelteKitLiveAdapter({ cwd: process.cwd(), port, config });
+    const adapterResult = applySvelteKitLiveAdapter({ cwd: process.cwd(), port, token, config });
     console.log(JSON.stringify({ ok: true, port, adapter: 'sveltekit', gitIgnore, results: [adapterResult] }));
     return;
   }
   if (nuxt) {
-    const adapterResult = applyNuxtLiveAdapter({ cwd: process.cwd(), port, project: nuxt });
+    const adapterResult = applyNuxtLiveAdapter({ cwd: process.cwd(), port, token, project: nuxt });
     console.log(JSON.stringify({
       ok: !adapterResult.error,
       port,
@@ -190,7 +197,7 @@ Output (JSON):
     if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
     const content = fs.readFileSync(absFile, 'utf-8');
     const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax));
-    const withTag = insertTag(withoutOld, config, port, relFile);
+    const withTag = insertTag(withoutOld, config, port, token, relFile);
     if (withTag === withoutOld) {
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
     }
@@ -276,9 +283,9 @@ export function detectNuxtProject(cwd = process.cwd()) {
   return { configFile, appDir, pluginFile };
 }
 
-export function buildNuxtPlugin(port) {
+export function buildNuxtPlugin(port, token) {
   return `/* ${NUXT_PLUGIN_MARKER} */
-const liveSrc = 'http://localhost:${port}/live.js';
+const liveSrc = 'http://localhost:${port}/live.js?token=${encodeURIComponent(token)}';
 const liveSelector = 'script[data-impeccable-live-nuxt]';
 
 export default defineNuxtPlugin(() => {
@@ -303,7 +310,7 @@ export default defineNuxtPlugin(() => {
 `;
 }
 
-export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, project = detectNuxtProject(cwd) }) {
+export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project = detectNuxtProject(cwd) }) {
   if (!project) return { error: 'nuxt_not_detected' };
   const absFile = path.join(cwd, project.pluginFile);
   const existing = fs.existsSync(absFile) ? fs.readFileSync(absFile, 'utf-8') : null;
@@ -315,7 +322,7 @@ export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, project = dete
     };
   }
 
-  const content = buildNuxtPlugin(port);
+  const content = buildNuxtPlugin(port, token);
   fs.mkdirSync(path.dirname(absFile), { recursive: true });
   if (content !== existing) fs.writeFileSync(absFile, content, 'utf-8');
   return {
@@ -497,7 +504,7 @@ function validateConfig(cfg) {
 function commentOpen(syntax) { return syntax === 'jsx' ? '{/*' : '<!--'; }
 function commentClose(syntax) { return syntax === 'jsx' ? '*/}' : '-->'; }
 
-function buildTagBlock(syntax, port, filePath) {
+function buildTagBlock(syntax, port, token, filePath) {
   const open = commentOpen(syntax);
   const close = commentClose(syntax);
   // Astro processes <script> tags by default and rewrites src to its own
@@ -506,7 +513,7 @@ function buildTagBlock(syntax, port, filePath) {
   const scriptAttrs = isAstro ? 'is:inline ' : '';
   return (
     open + ' ' + MARKER_OPEN_TEXT + ' ' + close + '\n' +
-    '<script ' + scriptAttrs + 'src="http://localhost:' + port + '/live.js"></script>\n' +
+    '<script ' + scriptAttrs + 'src="http://localhost:' + port + '/live.js?token=' + encodeURIComponent(token) + '"></script>\n' +
     open + ' ' + MARKER_CLOSE_TEXT + ' ' + close + '\n'
   );
 }
@@ -528,9 +535,9 @@ function readLineEndingAt(content, index) {
   return '';
 }
 
-function insertTag(content, config, port, filePath) {
+function insertTag(content, config, port, token, filePath) {
   const lineEnding = detectLineEnding(content);
-  const block = normalizeLineEndings(buildTagBlock(config.commentSyntax, port, filePath), lineEnding);
+  const block = normalizeLineEndings(buildTagBlock(config.commentSyntax, port, token, filePath), lineEnding);
   // insertBefore: match the LAST occurrence. Anchors like `</body>` naturally
   // belong at the end, and the same literal can appear earlier in code blocks
   // within rendered documentation pages.

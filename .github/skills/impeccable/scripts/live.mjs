@@ -17,7 +17,7 @@
  *   node live.mjs --help
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,7 +112,7 @@ The agent should then:
   }
 
   // 3. Inject the script tag at the current port
-  const injectOut = runScript('live-inject.mjs', ['--port', String(serverInfo.port)], { cwd: activeCwd });
+  const injectOut = runScript('live-inject.mjs', ['--port', String(serverInfo.port), '--token', serverInfo.token], { cwd: activeCwd });
   const injectResult = safeParse(injectOut);
   if (!injectResult || !injectResult.ok) {
     console.log(JSON.stringify({
@@ -255,12 +255,16 @@ function globToRegex(pattern) {
 
 function runScript(name, args, options = {}) {
   const scriptPath = path.join(__dirname, name);
-  const cmd = `node "${scriptPath}" ${args.map(a => `"${a}"`).join(' ')}`;
   try {
-    return execSync(cmd, { encoding: 'utf-8', cwd: options.cwd || process.cwd(), timeout: 15_000 });
+    return execFileSync(process.execPath, [scriptPath, ...args], {
+      encoding: 'utf-8',
+      cwd: options.cwd || process.cwd(),
+      timeout: 15_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
   } catch (err) {
-    // execSync throws on non-zero exit; return stdout if any
-    return err.stdout || err.message || '';
+    // Keep capability-bearing argv out of surfaced command errors.
+    return err.stdout || '';
   }
 }
 
