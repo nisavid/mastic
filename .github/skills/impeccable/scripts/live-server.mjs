@@ -298,7 +298,7 @@ function recordGenerationCheckpoint(event) {
   } catch {
     // Checkpoint instrumentation is best-effort.
   }
-  if (snapshot?.generationCanceled === true) return;
+  if (snapshot?.generationCanceled === true || GENERATION_FENCED_PHASES.has(snapshot?.phase)) return;
   // Only checkpoints that report a change in variant availability are
   // generation progress. The browser also checkpoints for durability on Tune
   // slider drags, resumes, and anchor recovery; treating those as progress
