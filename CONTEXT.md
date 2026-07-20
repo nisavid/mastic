@@ -54,6 +54,14 @@ The application-native installer, package manager, or deployment system that
 controls one External Application Installation's lifecycle.
 _Avoid_: MASTIC owner, executable path, inferred owner
 
+**Installation Observation**:
+Time-bound Observed State for one exact External Application Installation,
+binding its MASTIC identity and fingerprint to the owner-native installation
+identity, Installation Owner, effective Release Channel, platform,
+architecture, installed artifact, and reachable invocations. It does not
+select an owner or authorize mutation.
+_Avoid_: External Application Installation, inventory row, lifecycle authority
+
 **Release Channel**:
 An Installation Owner's native release stream, selected independently for one
 External Application Installation and inherited from its Blueprint when
@@ -68,10 +76,20 @@ _Avoid_: resolved version, dependency pin
 **Current Release Resolution**:
 Time-bounded Plan evidence that proves the selected Release Channel's
 authority mapped current Release Intent to one exact release at an observed
-time. It makes no compatibility or validation claim. An exact Release Intent
-bypasses current-release lookup, verifies that exact release through its
-selected owner and channel, and makes no Currency Claim.
+time, bound to the exact Installation Observation used to construct the
+authority query. Direct online resolution is Observed Evidence. Offline use
+requires a Signed Current Release Resolution whose envelope authenticates the
+complete canonical resolution payload. Current Release Resolution makes no
+compatibility or validation claim. An exact Release Intent bypasses
+current-release lookup, verifies that exact release through its selected owner
+and channel, and makes no Currency Claim.
 _Avoid_: desired version, permanent pin, validation fixture
+
+**Signed Current Release Resolution**:
+One Current Release Resolution plus exactly one authentic signature path and
+its signature. It is required for offline use and never inferred from an
+unsigned online observation.
+_Avoid_: Current Release Resolution, artifact signature, cached lookup
 
 **Currency Claim**:
 The time-bounded statement that an exact release was the latest release
