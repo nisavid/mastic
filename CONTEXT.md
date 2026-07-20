@@ -62,7 +62,7 @@ _Avoid_: latest version, validated release
 **Attestation Issuer**:
 A validation-profile-authorized signer that seals current-release observations
 for offline verification when no profile-trusted upstream signature covers the
-complete Currency Claim.
+entire canonical Current Release Resolution payload.
 _Avoid_: Installation Owner, release authority, closure builder
 
 **Application Configuration Target**:
@@ -77,48 +77,129 @@ explicit values, defaults, or absence establish one selected behavior and that
 MASTIC owns and restores together.
 _Avoid_: touched keys, written fields, whole configuration
 
-**Validated Plan**:
-A Plan whose exact host and component combination satisfies an accepted
-validation profile and carries its stated guarantees. Its Release Intent and
-Currency Claim are evaluated separately.
-_Avoid_: supported mode, expert plan
+**Evidence**:
+A source-attributed record used to assess a Claim, including its producer,
+observer, or issuer identities, acquisition method, scope, subject identity
+bindings, and observation time.
+_Avoid_: claim, policy decision, operational result
 
-**Exploratory Plan**:
-A Plan with incomplete validation evidence and no known result predicting a
-soft conflict or hard violation.
-_Avoid_: unvalidated mode, expert plan
+**Evidence Provenance**:
+How Evidence arose and who produced, observed, or issued it, expressed as
+Reported, Declared, Observed, or Derived without ranking those methods by
+strength or conferring Claim Authority.
+_Avoid_: evidence state, confidence, validation level
 
-**Known-Risk Plan**:
-A Plan with evidence of a soft fit, compatibility, performance, or support
-conflict that a user may explicitly override.
-_Avoid_: Override Plan, expert plan
+**Claim Authority**:
+The explicitly bound entity whose assertion or position a Claim represents.
+Evidence custody, observation, or transmission does not confer this authority.
+_Avoid_: evidence source, observer, policy authority
 
-**Blocked Plan**:
-A Plan that violates a non-overridable invariant or has an impossible
-dependency and cannot be executed.
-_Avoid_: Known-Risk Plan, failed plan
+**Claim**:
+A scope-bound assertion about one exact subject, predicate, and result that is
+assessed from Evidence.
+_Avoid_: evidence, Plan status, guarantee
+
+**Claim Qualification**:
+The confidence warranted for a Claim by its Evidence under the applicable
+evidence policy, expressed as Unknown, Provisional, or Verified.
+_Avoid_: Evidence Provenance, Claim Conflict, applicability
+
+**Claim Conflict**:
+A relation or aggregate assessment showing that two or more independently
+qualified Claims cannot all hold for the same subject, predicate, scope, and
+effective time.
+_Avoid_: Claim Qualification, supersession, policy disagreement
+
+**Claim Applicability Assessment**:
+The composite evaluation of a Claim for an exact candidate, Plan Purpose, and
+evaluation time. It retains four independent facets: scope is In Scope or Out
+of Scope; time is Not Yet Effective, Effective, or Expired; lineage is Current
+in Series or Superseded; and revocation is Standing or Revoked. A Claim is
+Applicable only when it is In Scope, Effective, Current in Series, and Standing;
+every non-applicable reason remains available to policy and audit. Superseded
+requires an explicit successor from the same authority and Claim series whose
+effective window covers the evaluation time. Revoked means the Claim or its
+attestation was explicitly withdrawn by its Claim Authority or a recognized
+revocation authority, not that a separate safety Claim revoked an artifact.
+_Avoid_: Claim Qualification, Claim Conflict, intrinsic Claim state
+
+**Support Position**:
+An authority-scoped Claim that an exact arrangement is Supported or
+Unsupported. Positions from different authorities coexist and do not
+substitute for compatibility Evidence.
+_Avoid_: Permission Position, compatibility, Plan Disposition
+
+**Permission Position**:
+An authority-scoped Claim that a covered activity is Permitted or Prohibited.
+A Verified, Applicable prohibition from an authority that the selected policy
+recognizes as binding requires a non-overridable Blocked disposition for that
+activity. Other qualifications and conflicts remain policy inputs and may fail
+closed without establishing that the prohibition exists.
+_Avoid_: Support Position, compatibility, operational condition
+
+**No Published Position Found**:
+A bounded, time-stamped search result stating that no support or permission
+position was found in the searched authority sources. It is not itself the
+authority's position.
+_Avoid_: Unsupported, Prohibited, undocumented position
+
+**Plan Purpose**:
+The single bounded activity a Plan is intended to authorize, such as
+validation, activation, reconciliation, rollback, or removal. A validation
+purpose may gather Evidence only within its declared safety envelope and does
+not authorize normal activation; activation requires a successor Plan.
+_Avoid_: Exploratory Plan, Plan classification, Release Intent
+
+**Plan Disposition**:
+The time-bound, policy-derived actionability assessment of one exact Plan and
+Plan Purpose under the applicable Claims, policy, and approvals, expressed as
+Eligible, Approval Required, or Blocked. Approval Required means no sufficient
+bound Plan Approval applies at assessment time; attaching one recomputes the
+disposition without rewriting the Plan. Relevant Evidence, Claim, purpose, or
+policy drift requires reassessment.
+_Avoid_: Validated Plan, Known-Risk Plan, readiness
+
+**Plan Approval**:
+The explicit user authorization that satisfies the approval requirement for an
+Approval Required Plan after review of its applicable Claims and consequences.
+It binds the exact Plan fingerprint, Plan Purpose, policy rule, Evidence set,
+and applicable Claims.
+_Avoid_: Plan Disposition, readiness, blanket consent
 
 **Override**:
-The explicit user decision to proceed with a Known-Risk Plan after reviewing
-its evidence and consequences.
-_Avoid_: expert mode, warning acceptance
+A Plan Approval that explicitly supersedes one overridable default policy rule
+within its declared scope.
+_Avoid_: Plan Approval, warning acceptance, expert mode
 
-**No Validated Fit**:
-A completed discovery outcome in which no Validated Plan satisfies the
-machine and Blueprint; it makes no deployment-readiness claim.
-_Avoid_: Blocked, Degraded
+**No Candidate**:
+A completed discovery outcome in which discovery cannot construct a candidate
+Plan for the Blueprint and intended Plan Purpose. When candidates exist, each
+has its own Plan Disposition; No Eligible Candidate may summarize a set in
+which none is Eligible.
+_Avoid_: Blocked Plan, No Eligible Candidate, No Validated Fit
 
 **Completion**:
-Whether every selected Plan target has been evaluated, expressed as Partial
-or Complete independently of readiness.
-_Avoid_: readiness, success
+Whether every required step for the exact Plan Purpose has admissible terminal
+completion Evidence for its exact fingerprint, expressed as Partial or
+Complete independently of lifecycle state and operational condition. Reused
+and newly produced Evidence count equally; Failed or Blocked attempts do not.
+Per-target Completion is derived from that target's required steps, and Plan
+Completion requires every target to be Complete.
+_Avoid_: lifecycle state, operational condition, success
 
-**Readiness**:
-The verified operational outcome of a target or Plan, expressed as Pending,
-Unverified, Ready, or Degraded independently of completion.
-_Avoid_: completion, plan evidence
+**Target Lifecycle State**:
+The observed installation or activation state of an exact target, independent
+of Completion and Operational Condition. Its exact vocabulary is defined by
+the target lifecycle contract.
+_Avoid_: operational condition, Plan Disposition, execution-step state
+
+**Operational Condition**:
+The observed functional state of an exact target whose lifecycle makes that
+observation meaningful, independent of Completion, Claim Qualification,
+Support Position, Permission Position, and Plan Disposition.
+_Avoid_: lifecycle state, readiness, support, actionability
 
 **Public Validation Registry**:
-A shared source of validation results derived from public, reproducible
-artifacts for evaluating Blueprints against current component evidence.
+A shared source of Evidence and Claim assessments derived from public,
+reproducible artifacts for evaluating Blueprints.
 _Avoid_: private telemetry store, user-content database
