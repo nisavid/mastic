@@ -1458,6 +1458,10 @@ export function shouldEmitAckForFile(filePath, config = null) {
   return Boolean(configured && configured.engine === 'html');
 }
 
+export function cleanWinnerSkipReason() {
+  return 'clean-non-ui-ack';
+}
+
 export function designSystemOptions(config, detector, projectCwd) {
   if (config?.designSystem?.enabled === false) return {};
   if (!detector || typeof detector.loadDesignSystemForCwd !== 'function') return {};
@@ -1801,7 +1805,7 @@ export async function runHook({ stdinJson, env = {}, cwd = process.cwd(), now = 
     // Distinct from non-ui-ack so the audit log shows noise being suppressed on
     // purpose rather than a file the hook could not classify.
     if (cleanWinner) {
-      return result({ emitted: false, skipped: 'non-ui-ack', durationMs: Date.now() - started });
+      return result({ emitted: false, skipped: cleanWinnerSkipReason(), durationMs: Date.now() - started });
     }
 
     if (cleanAckDeduped) {

@@ -31,7 +31,7 @@ import {
 import { createLiveSessionStore, GENERATION_FENCED_PHASES } from './live/session-store.mjs';
 import { runGenerationPreflight } from './live/generation-preflight.mjs';
 import { validateEvent } from './live/event-validation.mjs';
-import { selectAvailablePendingEvent } from './live/poll-lanes.mjs';
+import { isPendingEntryActive, selectAvailablePendingEvent } from './live/poll-lanes.mjs';
 import { createManualEditRoutes } from './live/manual-edit-routes.mjs';
 import { LIVE_COMMANDS } from './live/vocabulary.mjs';
 import {
@@ -178,6 +178,8 @@ async function leaseEvent(entry, leaseMs) {
     if (idx !== -1) state.pendingEvents.splice(idx, 1);
     return entry.event;
   }
+  // Accept or discard can retire the event while scaffolding is in flight.
+  if (!isPendingEntryActive(state.pendingEvents, entry)) return entry.event;
   // Re-stamp so the lease window starts when the agent actually receives the
   // work, not when scaffolding began.
   entry.leaseUntil = Date.now() + leaseMs;

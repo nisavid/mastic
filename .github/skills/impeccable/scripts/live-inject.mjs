@@ -315,7 +315,11 @@ export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project
   const destination = resolveNuxtPluginDestination(cwd, project.pluginFile);
   if (destination.error) return { file: project.pluginFile, error: destination.error };
   const absFile = destination.file;
-  const existing = fs.existsSync(absFile) ? fs.readFileSync(absFile, 'utf-8') : null;
+  const existingStat = lstatIfPresent(absFile);
+  if (existingStat?.isSymbolicLink()) {
+    return { file: project.pluginFile, error: 'nuxt_plugin_symlink' };
+  }
+  const existing = existingStat ? fs.readFileSync(absFile, 'utf-8') : null;
   if (existing !== null && !existing.includes(NUXT_PLUGIN_MARKER)) {
     return {
       file: project.pluginFile,
@@ -330,16 +334,35 @@ export function applyNuxtLiveAdapter({ cwd = process.cwd(), port, token, project
   if (!pathIsWithin(destination.root, resolvedDir)) {
     return { file: project.pluginFile, error: 'nuxt_plugin_path_outside_project' };
   }
-  if (fs.existsSync(absFile) && fs.lstatSync(absFile).isSymbolicLink()) {
-    return { file: project.pluginFile, error: 'nuxt_plugin_symlink' };
-  }
-  if (content !== existing) fs.writeFileSync(absFile, content, 'utf-8');
+  if (content !== existing) writeFileNoFollow(absFile, content);
   return {
     file: project.pluginFile,
     inserted: true,
     changed: content !== existing,
     devOnly: true,
   };
+}
+
+function lstatIfPresent(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function writeFileNoFollow(file, content) {
+  const flags = fs.constants.O_WRONLY
+    | fs.constants.O_CREAT
+    | fs.constants.O_TRUNC
+    | fs.constants.O_NOFOLLOW;
+  const fd = fs.openSync(file, flags, 0o600);
+  try {
+    fs.writeFileSync(fd, content, 'utf-8');
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function resolveNuxtPluginDestination(cwd, pluginFile) {
