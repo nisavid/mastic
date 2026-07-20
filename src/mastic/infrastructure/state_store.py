@@ -81,6 +81,10 @@ class SensitiveContentError(ValueError):
     """Operational state attempted to persist inference content."""
 
 
+class SnapshotCompareError(RuntimeError):
+    """A versioned snapshot no longer has the expected current predecessor."""
+
+
 class OperationalStateStore:
     """Persist deterministic operational DTOs in a private SQLite database."""
 
@@ -315,6 +319,54 @@ class OperationalStateStore:
                         f"snapshot {kind}/{resource_id} version {dto['version']!r} "
                         "is immutable"
                     )
+            self._prune_snapshot_history(connection)
+        return dto
+
+    def compare_and_put_snapshot(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        expected_current_version: str | int | None,
+    ) -> dict[str, object]:
+        """Append one snapshot only when its resource has the exact predecessor."""
+
+        dto = _record(snapshot)
+        kind = _identity(dto, "kind", "snapshot")
+        resource_id = _identity(dto, "id", "snapshot")
+        version = _snapshot_version(dto)
+        expected = (
+            None
+            if expected_current_version is None
+            else _encode_version(expected_current_version)
+        )
+        encoded = _encode(dto)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT version FROM snapshots
+                WHERE kind = ? AND resource_id = ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (kind, resource_id),
+            ).fetchone()
+            actual = str(row[0]) if row is not None else None
+            if actual != expected:
+                raise SnapshotCompareError(
+                    f"snapshot {kind}/{resource_id} predecessor changed"
+                )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO snapshots(kind, resource_id, version, dto_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (kind, resource_id, version, encoded),
+                )
+            except sqlite3.IntegrityError as error:
+                raise SnapshotCompareError(
+                    f"snapshot {kind}/{resource_id} version already exists"
+                ) from error
             self._prune_snapshot_history(connection)
         return dto
 
