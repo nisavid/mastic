@@ -79,6 +79,8 @@ These equality checks are identity invariants, not adapter inference.
 | Desired State Repository | Load, version, diff, and compare-and-swap exact MASTIC-owned declarations | Physical reconciliation and observations |
 | Planning Record Repository | Append immutable Plans, Approvals, and Plan Assessments and compare-and-append current Plan pointers | Deriving policy, executing Plans, and operational observation |
 | Operational Record Repository | Append operations, Step Evidence, Evidence, observations, and recovery records | Desired State, Plan selection, Approval, and policy derivation |
+| Policy Registry | Resolve the independently authenticated Policy Selection and complete canonical policy for an exact declared scope and Plan Purpose | Policy evaluation, caller-selected policy, and Approval issuance |
+| Plan Generator Registry | Resolve the authenticated versioned Plan generator selected for an exact Blueprint, declared scope, and Plan Purpose | Candidate generation, policy selection, and candidate ranking |
 | Inference Engine Catalogue | Resolve engine definitions and declared capabilities | Installation or selection policy |
 | Runtime Supply | Discover, install, adopt, verify, and prepare an exact Runtime Installation | Service lifecycle, process control, and routing |
 | Model Supply | Discover, materialize, verify, and release exact Model Installations and shared-cache references | Alias and service selection policy |
