@@ -271,10 +271,13 @@ forbidden from being named by a mutation. This discriminator and exact ordered
 membership participate in `step_fingerprint`; an executable step cannot omit
 or substitute its mutation content.
 
-`proposed_declarations` is the sorted exact set of complete, canonical,
-secret-free Desired State declaration objects the Plan would create or replace.
-Every declaration's identity and fingerprint are validated from its complete
-kind-specific content. `mutations` is sorted by unique `mutation_id`. Each
+`proposed_declarations` is the exact set of complete, canonical, secret-free
+Desired State declaration objects the Plan would create or replace. Before
+identity calculation, it is sorted lexicographically by declaration identity
+and then fingerprint; both fields are required and validated from complete
+kind-specific content. Declaration identities are unique, and an exact or
+identity-colliding duplicate invalidates the Plan rather than being silently
+removed. `mutations` is sorted by unique `mutation_id`. Each
 mutation binds one exact required step and Plan Target, names the owning
 capability port and operation, carries the complete secret-free adapter request
 with opaque credential references, states the exact expected-current identity
@@ -881,21 +884,12 @@ approval evaluation must name an entry in `approvals`.
 
 ```json
 {
-  "disposition": "approval_required",
-  "applicable_claim_ids": ["sha256:CLAIM"],
+  "disposition": "eligible",
+  "applicable_claim_ids": [],
   "claim_conflict_ids": [],
-  "rule_evaluations": [
-    {
-      "rule_id": "publisher-support-exception",
-      "result": "approval_required",
-      "claim_ids": ["sha256:CLAIM"],
-      "claim_conflict_ids": [],
-      "evidence_ids": [],
-      "approval_identity": null
-    }
-  ],
+  "rule_evaluations": [],
   "approval_evaluation": {
-    "requirement": "missing",
+    "requirement": "not_required",
     "evaluations": []
   }
 }
@@ -1114,6 +1108,19 @@ Observation failure never implies `nonfunctional`. Performance may establish
 measured threshold. A null Operational Contract requires `not_applicable`. A
 non-null contract defines the assessment but condition remains `not_applicable`
 when the current lifecycle makes functional observation meaningless.
+
+Every Operational Contract declares a sorted, unique
+`condition_applicable_lifecycle_states` subset of `absent`, `present`,
+`transitioning`, and `active`, plus
+`condition_when_lifecycle_not_applicable: true|false`. For an observed lifecycle
+state, condition is `not_applicable` exactly when that state is absent from the
+declared set, with reason code `lifecycle_state_excluded_by_contract`. When the
+lifecycle axis itself is `not_applicable`, the boolean decides whether condition
+may be observed; `false` requires reason code
+`lifecycle_axis_excluded_by_contract`. A null Operational Contract requires
+reason code `no_operational_contract`. An unobserved lifecycle never by itself
+proves condition inapplicable: independently admissible condition Evidence may
+still establish a value; otherwise condition is `not_observed` with an issue.
 
 Every observed lifecycle or condition projection has sorted, unique
 `evidence_ids`. Each identity resolves within the top-level Evidence closure to
