@@ -139,7 +139,7 @@ The OptiQ 0.3.3 MTP adapter has two important source-level compatibility risks:
    is used, OptiQ therefore sees none of the raw values and falls back to
    `temperature=0`, `top_p=0`, `top_k=0`, and `min_p=0`; it also drops both
    penalties.
-3. Normal no-seed text requests on a batchable model use mlx-lm's
+3. Normal no-seed chat and text requests on a batchable model use mlx-lm's
    [`BatchGenerator` path](https://github.com/ml-explore/mlx-lm/blob/ed1fca4cef15a824c5f1702c80f70b4cffc8e4dd/mlx_lm/server.py#L685-L829),
    which bypasses `stream_generate` entirely. In that path the sampler and
    penalties work, but the MTP patch is also bypassed.

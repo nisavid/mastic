@@ -35,6 +35,11 @@ CLI flags: `--model`, `--host`, `--port`, `--draft-model`,
 `--prompt-cache-size`, `--prompt-concurrency`, `--pipeline`, plus sampling
 (`--temp`, `--top-p`, `--top-k`, …).
 
+Neither `mlx_lm.server` nor the OptiQ wrapper provides application-layer
+authentication or authorization. Treat the raw HTTP API as a trusted-boundary
+interface: bind it to loopback or place it behind an authenticated proxy before
+exposing it to another host.
+
 **No `/stats`, `/metrics`, or process-info endpoint.**
 
 ## `optiq serve` (v0.3.1)
@@ -79,9 +84,10 @@ cannot simply scrape an aggregate-stats URL. The collectible dimensions are:
 - **Process-level stats** — RSS memory, CPU% — from `psutil` on the server
   PID, not from the HTTP API.
 - **Request latency** — the supervisor or proxy must measure TTFT from request
-  start to the first response token or chunk, and total latency through the
-  final response or stream completion. There is no server-native latency
-  reporting.
+  start to the first token-bearing response. For SSE, ignore comment,
+  keep-alive, and metadata frames and begin at the first token-bearing `data:`
+  event, not the first transport chunk. Measure total latency through the
+  terminal event. There is no server-native latency reporting.
 
 ## Reference for the supervisor
 
