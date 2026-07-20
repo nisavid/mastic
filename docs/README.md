@@ -39,7 +39,6 @@ Use explanation pages to study why the product is shaped this way.
 - [Architecture](explanation/architecture.md) — dependency direction,
   persistence, lifecycle, gateway, resource admission, and verification seams.
 
-Research notes under [`docs/research/`](research/) and
-[`docs/mastic/research/`](mastic/research/) preserve supporting investigation.
-They are evidence for ongoing design work, not user-facing compatibility
-promises.
+Research notes under [`docs/research/`](research/) preserve supporting
+investigation. They are evidence for ongoing design work, not user-facing
+compatibility promises.
