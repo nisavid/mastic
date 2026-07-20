@@ -15,10 +15,29 @@ An exact machine-bound set of mutations, dependencies, evidence, approvals,
 and recovery data produced by evaluating a Blueprint.
 _Avoid_: Blueprint, Stack Plan
 
+**Plan Target**:
+An exact identity-bound subject selected by a Plan for observation, validation,
+mutation, reconciliation, rollback, or removal.
+_Avoid_: component, step, application target
+
 **Bootstrap Plan**:
 A Plan limited to installing MASTIC and dependencies shared by every
 Blueprint.
 _Avoid_: setup plan, Stack Plan
+
+**Desired State**:
+The durable exact host-local declarations MASTIC owns after the Plan is
+Eligible for its purpose. A required Plan Approval is a separate authorization
+prerequisite for applying or mutating this state. It may reference externally
+owned resources only when their external owner and MASTIC's authorized
+convergence boundary are recorded; referencing them does not transfer lifecycle
+ownership.
+_Avoid_: Blueprint, Plan, configuration file, Observed State
+
+**Observed State**:
+Time-bound observations of exact subjects, retained as Evidence without
+granting mutation authority.
+_Avoid_: Desired State, cached truth, Plan outcome
 
 **External Application**:
 An externally maintained product identity. MASTIC coordinates its installations
@@ -76,6 +95,107 @@ The smallest complete set of interdependent application settings whose
 explicit values, defaults, or absence establish one selected behavior and that
 MASTIC owns and restores together.
 _Avoid_: touched keys, written fields, whole configuration
+
+**Inference Engine**:
+The stable software family and capability contract that can execute local
+model inference.
+_Avoid_: Runtime Installation, process, model, service
+
+**Runtime Installation**:
+One exact executable environment of an Inference Engine on a host, identified
+by version, provenance, launcher, and observed capabilities.
+_Avoid_: engine, Service Run, virtual environment path
+
+**Model Revision**:
+One immutable upstream model-content identity.
+_Avoid_: model name, Model Installation, Model Alias
+
+**Model Installation**:
+One host-accessible materialization of an exact Model Revision with recorded
+provenance and ownership boundaries.
+_Avoid_: model cache, Model Revision, Model Alias
+
+**Model Alias**:
+A stable MASTIC-owned name that selects one Model Installation without changing
+the installation's identity.
+_Avoid_: model slug, repository, Inference Route
+
+**Inference Service**:
+A stable desired serving declaration that binds a Runtime Installation, Model
+Alias, and Workload Profile.
+_Avoid_: Service Run, process, endpoint
+
+**Service Run**:
+One concrete activation instance of an Inference Service with its own identity
+and lifecycle observations.
+_Avoid_: Inference Service, Managed Process, operation
+
+**Managed Process**:
+An operating-system process whose lifecycle MASTIC is explicitly authorized to
+control as a physical realization of a Service Run or another lifecycle unit.
+_Avoid_: Inference Service, Service Run, arbitrary process
+
+**Process Identity**:
+The operating-system identity used to distinguish one process instance from PID
+reuse. It is never a resource, service, or run identity.
+_Avoid_: PID, Service Run identity, operation identity
+
+**Client Protocol**:
+One exact application-facing request, response, tool, streaming, continuation,
+and error contract.
+_Avoid_: HTTP, SSE, OpenAI-compatible, provider
+
+**Inference Provider**:
+A logical inference capability and credential boundary, local or remote, that
+may expose one or more Provider Endpoints.
+_Avoid_: Application Provider Binding, Installation Owner, endpoint
+
+**Provider Endpoint**:
+One exact observed request-serving endpoint, owned by a Service Run when
+locally served or by an Inference Provider when externally supplied.
+_Avoid_: Inference Provider, Inference Route, application base URL
+
+**Application Provider Binding**:
+An External Application's provider entry that binds one Application
+Configuration Target to a Client Protocol, Inference Route, and opaque
+credential-reference identity within the binding's declared scope.
+_Avoid_: Inference Provider, provider string, Installation Owner
+
+**Inference Route**:
+A stable desired selection identity, owned by one exact route-owner identity
+within one declared scope, that binds a Client Protocol and Workload Profile to
+one Inference Service or Inference Provider. An Application Provider Binding
+and its route have the same declared scope. The current Route Publication
+resolves directly to an exact Provider Endpoint and also retains the owning
+Service Run identity when the route selects an Inference Service.
+_Avoid_: URL, port, Inference Service, Route Publication
+
+**Route Publication**:
+A time-bound observed association between one Inference Route and a currently
+usable exact Provider Endpoint, bound to the route's owning declared scope and
+route-owner identity and to the exact publisher identity that materialized it.
+A service-backed publication also binds the endpoint's owning Service Run.
+_Avoid_: Inference Route, desired route, Gateway Route
+
+**Workload Profile**:
+A named desired request behavior covering the applicable context, concurrency,
+generation, and template choices for a target or route.
+_Avoid_: Profile, Validation Profile, Application Profile
+
+**Validation Profile**:
+A versioned set of evidence, authority, freshness, and policy requirements used
+to assess Claims and Plan Disposition.
+_Avoid_: Profile, Workload Profile, performance result
+
+**Operational Contract**:
+A versioned declaration of the functional behavior, observations, and any
+thresholds used to assess one exact target's Operational Condition.
+_Avoid_: Validation Profile, Workload Profile, health result
+
+**Application Profile**:
+An External Application's own named configuration namespace when that namespace
+is part of an Application Configuration Target's identity.
+_Avoid_: Profile, Workload Profile, MASTIC profile
 
 **Evidence**:
 A source-attributed record used to assess a Claim, including its producer,
@@ -150,6 +270,11 @@ purpose may gather Evidence only within its declared safety envelope and does
 not authorize normal activation; activation requires a successor Plan.
 _Avoid_: Exploratory Plan, Plan classification, Release Intent
 
+**Policy Assessment**:
+A time-bound evaluation of one immutable Plan, its applicable Claims, selected
+policy, and Plan Approvals that produces Plan Disposition.
+_Avoid_: Plan Operational Assessment, policy result, Plan outcome
+
 **Plan Disposition**:
 The time-bound, policy-derived actionability assessment of one exact Plan and
 Plan Purpose under the applicable Claims, policy, and approvals, expressed as
@@ -166,6 +291,17 @@ It binds the exact Plan fingerprint, Plan Purpose, policy rule, Evidence set,
 and applicable Claims.
 _Avoid_: Plan Disposition, readiness, blanket consent
 
+**Plan Operational Assessment**:
+A time-bound evaluation of Completion and Target Operational Snapshots for one
+exact Plan and Plan Purpose.
+_Avoid_: Policy Assessment, readiness, Plan outcome
+
+**Plan Assessment**:
+A versioned record that composes sibling Policy Assessment and Plan Operational
+Assessment projections over the same Plan, Plan Purpose, Evidence set, policy,
+and evaluation time without collapsing their results.
+_Avoid_: Plan outcome, readiness, status
+
 **Override**:
 A Plan Approval that explicitly supersedes one overridable default policy rule
 within its declared scope.
@@ -180,24 +316,50 @@ _Avoid_: Blocked Plan, No Eligible Candidate, No Validated Fit
 
 **Completion**:
 Whether every required step for the exact Plan Purpose has admissible terminal
-completion Evidence for its exact fingerprint, expressed as Partial or
-Complete independently of lifecycle state and operational condition. Reused
-and newly produced Evidence count equally; Failed or Blocked attempts do not.
-Per-target Completion is derived from that target's required steps, and Plan
-Completion requires every target to be Complete.
+completion Evidence for its exact fingerprint, expressed as `partial` or
+`complete` independently of lifecycle state and operational condition. Reused
+and newly produced Evidence count equally; `failed` or `blocked` attempts do
+not. Per-target Completion is derived from that target's required steps, and
+Plan Completion requires every target to be `complete`.
 _Avoid_: lifecycle state, operational condition, success
 
 **Target Lifecycle State**:
-The observed installation or activation state of an exact target, independent
-of Completion and Operational Condition. Its exact vocabulary is defined by
-the target lifecycle contract.
+The current materialization and participation state of an exact Plan Target,
+expressed as `absent`, `present`, `transitioning`, or `active`. The
+`transitioning` state records its source state, destination state, and
+operation identity. `active` means the target exists and is the current
+effective realization in its target-specific
+operational relationship or participates in live execution; Plan selection or
+a Desired State reference alone does not make it `active`.
 _Avoid_: operational condition, Plan Disposition, execution-step state
 
 **Operational Condition**:
-The observed functional state of an exact target whose lifecycle makes that
-observation meaningful, independent of Completion, Claim Qualification,
-Support Position, Permission Position, and Plan Disposition.
+The current observed functional condition of an exact Plan Target whose
+lifecycle makes observation meaningful, expressed as `functional`, `degraded`,
+or `nonfunctional`. It is independent of Completion, lifecycle, Claim
+Qualification, Support Position, Permission Position, and Plan Disposition.
+`not_observed` and `not_applicable` are observation-axis states, not Operational
+Condition values.
 _Avoid_: lifecycle state, readiness, support, actionability
+
+**Target Operational Snapshot**:
+A time-bound, identity-bound projection containing one Plan Target's lifecycle
+observation, Operational Condition when applicable and observed, Evidence, and
+issues.
+_Avoid_: target status, readiness, Plan Disposition
+
+**Operational Summary**:
+Independent identity-preserving groupings of selected Plan Targets: one by
+Completion, one by Target Lifecycle State, and one by Operational Condition.
+The lifecycle and condition axes separately retain unobserved and
+not-applicable observation states. Missing, stale, failed, or unauthorized
+applicable Evidence maps to the affected `lifecycle_not_observed` or
+`condition_not_observed` bucket and cannot populate a current observation. An
+axis made meaningless by the target kind, lifecycle, or contract maps to
+`lifecycle_not_applicable` or `condition_not_applicable`. These are distinct
+summary buckets rather than lifecycle or condition values. The axes never form
+composite buckets, a scalar status, or a severity order.
+_Avoid_: overall readiness, worst state, Plan outcome
 
 **Public Validation Registry**:
 A shared source of Evidence and Claim assessments derived from public,

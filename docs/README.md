@@ -31,6 +31,11 @@ Use reference pages while operating or integrating MASTIC.
   formats, and exit behavior.
 - [Deployment contract](reference/deployment-contract.md) — launchd, owned
   paths, process boundaries, and deployment validation.
+- [Domain and adapter contracts](reference/domain-and-adapter-contracts.md) —
+  canonical resource identities, state ownership, lifecycle vocabulary, and
+  capability boundaries.
+- [Assessment schema version 2](reference/assessment-schema-v2.md) — exact
+  Plan, Evidence, Claim, assessment, discovery, and compatibility records.
 
 ## Understand the system
 

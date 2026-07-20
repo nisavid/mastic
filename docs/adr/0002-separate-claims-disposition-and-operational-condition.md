@@ -96,11 +96,12 @@ Operational Condition; operational issues; and live/durable convergence. It
 may emit observations or Evidence but does not own support, permission,
 currency, compatibility, integrity, Claim Qualification, Claim Conflict, Claim
 Applicability Assessment, Plan Disposition, Plan Approval, performance policy,
-or discovery selection. The exact Target Lifecycle State and Operational
-Condition values and the public and persisted migration from legacy `readiness`
-remain decisions under the domain-model ticket; no product code should depend
-on a guessed replacement shape. Execution-step `Blocked` remains distinct from
-Plan Disposition `Blocked` and must not be projected as it.
+or discovery selection. Target Lifecycle State, Operational Condition, and the
+public and persisted migration from legacy `readiness` follow
+[ADR 0003](0003-separate-declarations-lifecycle-and-adapter-capabilities.md) and
+the [assessment schema version 2](../reference/assessment-schema-v2.md).
+Execution-step `Blocked` remains distinct from Plan Disposition `Blocked` and
+must not be projected as it.
 
 Every persisted Plan identity, preview fingerprint, and approval fingerprint
 includes Plan Purpose. Confirmation cannot change purpose. A discovery or
@@ -113,14 +114,19 @@ Target Lifecycle State, or Operational Condition into legacy `readiness`.
 Schema version 1 remains a documented, lossy read adapter. It may be retired
 only in a later schema version after stored version 1 state has a supported
 migration and every supported consumer accepts version 2. Discovery uses a
-separate projection with `selection_outcome` equal to one of `no_candidate`,
-`no_eligible_candidate`, or `candidate_selected`. It always includes the
-evaluated candidate identities and dispositions. `no_candidate` requires an
-empty candidate set; `no_eligible_candidate` requires a nonempty set with no
-Eligible candidate; and `candidate_selected` requires exactly one selected Plan
-identity matching an Eligible candidate in that set. A selected Plan identity
-is absent for both negative outcomes. The projection never includes Completion,
-Target Lifecycle State, or Operational Condition.
+separate projection with `selection_outcome` equal to `candidate_selected`,
+`no_candidate`, or `no_eligible_candidate`. When candidates exist, it includes
+their identities and dispositions. It never includes Completion, Target
+Lifecycle State, or Operational Condition.
+
+Candidate discovery alone is not selection. As defined by the
+[version-2 discovery contract](../reference/assessment-schema-v2.md#plan-discovery),
+`candidate_selected` names exactly one policy-selected Eligible candidate even
+when several candidates exist. Approval Required and Blocked candidates remain
+visible but cannot be selected. `candidate_selected` is the only outcome with a
+selected candidate. When no candidates exist, discovery emits `no_candidate`,
+an empty candidate set, and a null selection. When candidates exist but none is
+Eligible, discovery emits `no_eligible_candidate` and a null selection.
 
 ## Consequences
 

@@ -33,8 +33,8 @@ component-specific tools.
 Calm, capable, and considerate. MASTIC should feel technically exact without
 becoming clinical, make machine adaptation understandable rather than magical,
 and reserve delight for useful clarity: a trustworthy recommendation, an
-honest No Validated Fit result, a safe Plan, a well-explained failure, or a
-target becoming Ready.
+honest No Candidate result, a safe Plan, a well-explained failure, or a
+target becoming Active while its Operational Condition is Functional.
 
 ## Anti-references
 
@@ -59,10 +59,11 @@ target becoming Ready.
 - **Plan before mutation.** Save a resumable exact Plan, show ownership and
   dependencies, and require renewed review when material inputs change.
 - **State stays precise.** Keep desired state, observed state, Plan evidence,
-  completion, readiness, and ownership distinct.
-- **Every outcome teaches.** Empty, pending, unverified, degraded, blocked,
-  no-fit, and successful states explain their evidence and offer a valid next
-  action.
+  Claim Qualification, Completion, Target Lifecycle State, Operational
+  Condition, Plan Disposition, and ownership distinct.
+- **Every outcome teaches.** Missing Evidence, Partial Completion, Degraded or
+  Nonfunctional targets, Blocked Plans, and No Candidate outcomes explain their
+  evidence and offer a valid next action.
 
 ## Accessibility & Inclusion
 
