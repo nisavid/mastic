@@ -4,6 +4,16 @@ MASTIC is a per-user local inference manager for Apple silicon. It manages
 runtimes, exact model revisions, named inference services, one stable loopback
 Gateway, and the Supervisor that owns durable work and live processes.
 
+The [domain and adapter contracts](../reference/domain-and-adapter-contracts.md)
+define the canonical resource graph and capability boundaries. The
+[assessment schema](../reference/assessment-schema-v2.md) defines the exact
+records used to keep policy and operational facts separate.
+
+The process, Gateway, and route sections below describe the current version-1
+deployment contract. They are implementation context, not a decision that the
+future Supervisor, daemon, Gateway, topology, protocol transformation, or route
+publication ports must keep that shape. Their owning decisions remain open.
+
 ## Dependency direction
 
 Dependencies point inward:
@@ -124,10 +134,12 @@ eviction are separate operations. Shared bytes are removed only through the
 official cache API after reference and ownership checks.
 
 Compatibility Assessments bind an exact Model Revision, Runtime Installation,
-launch-option set, and machine. Evidence remains reported, declared, derived,
-validated, conflicting, or unknown. Trust grants bind the exact revision,
-accepted risk set, and runtime installation and never override known security
-findings or integrity failures.
+launch-option set, and machine. Evidence remains reported, declared, observed,
+or derived according to how it arose. Claims separately retain explicit
+authority, Unknown, Provisional, or Verified Qualification, contextual
+Applicability, and conflict relations. Plan Approval binds the exact Plan,
+purpose, policy, applicable Claims, and Evidence set and never overrides a
+non-overridable security or integrity rule.
 
 ## Gateway
 
@@ -142,16 +154,30 @@ supplies it to the Application Configuration Targets it owns, but never forwards
 it to an inference runtime. A failed upstream does not take down the Gateway,
 and a request never starts a stopped service implicitly.
 
-Application Configuration Targets use workload-profiled Gateway base URLs under
-`/application-targets/<application-target>/profiles/<profile>/v1`. The profile resolves from mastic's
-validated desired state and must target the request's service route. Before
-forwarding, the Gateway replaces the supported generation and chat-template
-fields with that profile's values. This makes the complete request policy
-explicit even when an application cannot express the model profile natively. Runtime
-acceptance still has to prove that the selected inference-engine path honors
-those values. Ordinary `/v1` endpoints remain OpenAI-compatible routes for
-unmanaged applications and do not apply workload-profile mutations; they still
-require bearer authentication.
+Application Configuration Targets use Workload Profile-specific Gateway base
+URLs under
+`/application-targets/<application-target>/profiles/<profile>/v1`. The profile
+path segment is a binding/profile locator unique within the Application
+Configuration Target named by the preceding segment, not an unqualified domain
+identity. MASTIC resolves that entry from validated Desired State to one exact
+Application Provider Binding, its exact Inference Route, the current Route
+Publication, its exact Provider Endpoint, and a typed Workload Profile reference
+containing kind, stable identity, version, subject scope, and fingerprint. The
+resolved contract includes the Route Publication and Provider Endpoint identity
+and fingerprint. The Gateway rejects an absent, ambiguous, stale, or
+route-mismatched resolution, including a missing or stale publication, before
+forwarding. It then replaces the supported
+generation and chat-template fields with that profile's values. This makes the
+request-level policy explicit even when an application cannot express the
+Workload Profile natively. Runtime acceptance still has to prove that the
+selected Inference Engine path honors those values for an Inference Service
+route. For an Inference Provider route, Provider Adapter capability Evidence
+and acceptance Evidence for the exact Provider Endpoint and Workload Profile
+fingerprint must prove equivalent handling before an activation Plan selecting
+that exact route and profile resolution can have an Eligible disposition;
+otherwise the Gateway rejects the profile-specific resolution. Ordinary `/v1`
+endpoints remain OpenAI-compatible routes for unmanaged applications and do not
+apply Workload Profile mutations; they still require bearer authentication.
 
 The Gateway records enough content-free telemetry to explain admission,
 completion, pressure, and service correlation without retaining prompts,
