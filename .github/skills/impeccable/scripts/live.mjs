@@ -10,14 +10,14 @@
  *
  * After this, the agent's only remaining steps are:
  *   - Open the project's live dev/preview URL in the browser (optional, if browser automation exists)—not `serverPort`; that port is the Impeccable helper for /live.js and /poll
- *   - Enter the poll loop: `node live-poll.mjs`
+ *   - Enter the harness-native poll loop: `node live-poll.mjs`
  *
  * Usage:
  *   node live.mjs                   # Prepare everything, print JSON, exit
  *   node live.mjs --help
  */
 
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +40,7 @@ Prepare everything for live variant mode in a single command:
   - Starts (or reuses) the live server in the background
   - Injects the browser script tag
   - Reads PRODUCT.md / DESIGN.md for project context
+  - Prepares the harness-native foreground/background poll loop
   - In monorepos, choose a child app first; --target <path> is the fallback/manual path
 
 On success, prints a JSON blob with:
@@ -111,11 +112,7 @@ The agent should then:
   }
 
   // 3. Inject the script tag at the current port
-  const injectOut = runScript(
-    'live-inject.mjs',
-    ['--port', String(serverInfo.port), '--token', serverInfo.token],
-    { cwd: activeCwd },
-  );
+  const injectOut = runScript('live-inject.mjs', ['--port', String(serverInfo.port)], { cwd: activeCwd });
   const injectResult = safeParse(injectOut);
   if (!injectResult || !injectResult.ok) {
     console.log(JSON.stringify({
@@ -258,16 +255,12 @@ function globToRegex(pattern) {
 
 function runScript(name, args, options = {}) {
   const scriptPath = path.join(__dirname, name);
+  const cmd = `node "${scriptPath}" ${args.map(a => `"${a}"`).join(' ')}`;
   try {
-    return execFileSync(process.execPath, [scriptPath, ...args], {
-      encoding: 'utf-8',
-      cwd: options.cwd || process.cwd(),
-      timeout: 15_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    return execSync(cmd, { encoding: 'utf-8', cwd: options.cwd || process.cwd(), timeout: 15_000 });
   } catch (err) {
-    // Keep capability-bearing argv out of surfaced command errors.
-    return err.stdout || '';
+    // execSync throws on non-zero exit; return stdout if any
+    return err.stdout || err.message || '';
   }
 }
 
