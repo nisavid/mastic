@@ -40,3 +40,8 @@ python-version = "3.11"
 python-platform = "darwin"
 preset = "basic"
 disable-project-excludes-heuristics = true
+
+[tool.ruff.lint]
+# Preserve ineffectual-expression detection with Python-aware handling for
+# Protocol and stub bodies after excluding CodeQL's noisy equivalent.
+extend-select = ["B018"]
