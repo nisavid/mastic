@@ -581,7 +581,7 @@ class MasticApp(App[None]):
             if isinstance(control, Checkbox):
                 value = control.value
             elif isinstance(control, Select):
-                value = None if control.value is Select.BLANK else control.value
+                value = None if control.value is Select.NULL else control.value
                 if parameter.value_type == "tristate_boolean":
                     value = {"unchanged": None, "true": True, "false": False}[value]
             elif isinstance(control, Input):
