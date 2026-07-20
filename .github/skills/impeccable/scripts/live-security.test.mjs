@@ -29,6 +29,19 @@ async function postJson(url, body, origin = 'https://preview.example') {
   });
 }
 
+async function fetchAfterStartup(url, init) {
+  let lastError;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw lastError;
+}
+
 async function readSseUntil(reader, predicate, timeoutMs = 1_000) {
   const decoder = new TextDecoder();
   let buffered = '';
@@ -63,7 +76,7 @@ test('completed live sessions ignore late generation checkpoints', async () => {
     const baseUrl = `http://127.0.0.1:${serverInfo.port}`;
     const token = serverInfo.token;
     const id = 'deadbeef';
-    const stream = await fetch(`${baseUrl}/events?token=${token}`, {
+    const stream = await fetchAfterStartup(`${baseUrl}/events?token=${token}`, {
       headers: { Origin: 'https://preview.example' },
     });
     assert.equal(stream.status, 200);
@@ -154,7 +167,7 @@ test('live mode protects its capability and project source boundary', async () =
     const hostileOrigin = 'https://hostile.example';
     const previewOrigin = 'https://preview.example';
 
-    const missingToken = await fetch(`${baseUrl}/live.js`, {
+    const missingToken = await fetchAfterStartup(`${baseUrl}/live.js`, {
       headers: { Origin: hostileOrigin },
     });
     assert.equal(missingToken.status, 401);
