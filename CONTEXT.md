@@ -91,6 +91,30 @@ its signature. It is required for offline use and never inferred from an
 unsigned online observation.
 _Avoid_: Current Release Resolution, artifact signature, cached lookup
 
+**Unattended Upgrade Policy**:
+A durable subject-bound rule that may require MASTIC to construct and assess a
+new exact same-owner, same-channel Current upgrade Plan. It never acts as Plan
+Approval and never authorizes a downgrade, owner switch, or channel switch.
+_Avoid_: auto-update setting, standing approval, upgrade Plan
+
+**Validated Backup**:
+A fresh content-addressed backup bound to one exact Installation Observation,
+Current Release Resolution, and data-bearing upgrade candidate.
+_Avoid_: ownership backup, rollback point, archive path
+
+**Recovery Qualification**:
+Profile-specific Evidence that one exact Validated Backup restored in isolation
+and passed representative recall for one exact data-bearing upgrade candidate.
+It cannot be reused after the candidate or source observation changes.
+_Avoid_: backup success, application health check, rollback
+
+**Removal Plan**:
+An exact Plan naming each External Application Installation, Installation
+Owner, owner-native installation identity, and Installation Observation
+fingerprint authorized for removal. Ordinary product removal is not a Removal
+Plan and retains every external application.
+_Avoid_: uninstall list, cleanup, mastic remove
+
 **Currency Claim**:
 The time-bounded statement that an exact release was the latest release
 reported by one selected Release Channel's authority at an observed time.

@@ -746,7 +746,7 @@ class SetupV1Tests(unittest.TestCase):
         self.assertEqual(resolved.retained_settings, inventory.unrelated_settings)
         self.assertIn("coding", resolved.references)
 
-    def test_removal_includes_only_owned_applications_and_lists_adopted_apps(
+    def test_ordinary_removal_retains_every_external_application(
         self,
     ) -> None:
         resolved = self.resolver.resolve_removal(
@@ -756,11 +756,8 @@ class SetupV1Tests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            tuple(step.id for step in resolved.steps), ("application.remove",)
-        )
-        self.assertEqual(resolved.steps[0].inputs["applications"], ("hindsight",))
-        self.assertEqual(resolved.retained_settings, ("codex",))
+        self.assertEqual(resolved.steps, ())
+        self.assertEqual(resolved.retained_settings, ("codex", "hindsight"))
 
     def test_removal_execution_is_independent_of_setup_execution(self) -> None:
         resolved = self.resolver.resolve_removal(

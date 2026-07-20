@@ -16,7 +16,7 @@ complete arguments and options of one operation.
 | Command | Behavior |
 | --- | --- |
 | `mastic setup` | Previews and applies a complete local-inference Plan, resuming steps whose persisted terminal evidence matches. |
-| `mastic remove` | Previews and removes MASTIC-owned services, product state, and integrations; the external coordination locks and their directory remain. |
+| `mastic remove` | Previews and removes MASTIC-owned services, product state, and integrations; every external application and the external coordination locks remain. |
 | `mastic status` | Reports runtime state plus durable and current per-target setup outcomes without starting the system. |
 | `mastic check` | Applies operational and current application-target health policy to the status view. |
 | `mastic doctor` | Diagnoses application-target health and context alongside configuration, lifecycle, routing, and service failures. |
