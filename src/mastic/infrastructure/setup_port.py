@@ -16,8 +16,14 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
 from mastic.application.dispatch import ApplicationError
+from mastic.application.plan_outcome import (
+    ApplicationTargetObservation,
+    PlanAssessmentInput,
+    PlanOutcome,
+    PlanOutcomePolicy,
+    PlanStep,
+)
 from mastic.application.serialization import to_plain_data as _plain
 from mastic.application.setup import (
     Completion,
@@ -38,10 +44,6 @@ from mastic.application.setup import (
     SetupRequest,
     StepState,
 )
-from mastic.infrastructure.application_target_canaries import (
-    application_canary_evidence_sha256,
-)
-
 
 _GIB = 1024**3
 PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
@@ -73,10 +75,6 @@ PHASE1_HOST_PERFORMANCE_PROFILE: Mapping[str, object] = {
         },
     },
 }
-
-_READY_RESPONSE_SHA256 = (
-    "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d"
-)
 
 
 class OperationOwner(Protocol):
@@ -204,6 +202,7 @@ class DurableSetupOutcomeProvider:
             if performance_profile is None
             else performance_profile
         )
+        self._outcome_policy = PlanOutcomePolicy(self._performance_profile)
         self._application_targets = application_targets
 
     def outcome(self) -> Mapping[str, object]:
@@ -215,65 +214,67 @@ class DurableSetupOutcomeProvider:
             return _conservative_setup_outcome(malformed=False)
         try:
             normalized = _validated_plan(plan)
+            assessment_plan = _plan_from_stored(normalized)
             evidence = tuple(self._evidence.load("setup"))
-            outcome = _durable_setup_outcome(
-                normalized, evidence, self._performance_profile
+            observations, include_issues = self._observe_application_targets(
+                assessment_plan
             )
-            return self._reconcile_application_targets(normalized, outcome)
+            outcome = self._outcome_policy.assess(
+                assessment_plan, evidence, observations
+            )
+            result: dict[str, object] = {
+                "completion": outcome.completion.value,
+                "readiness": outcome.readiness.value,
+                "application_target_readiness": {
+                    target: readiness.value
+                    for target, readiness in outcome.application_target_readiness.items()
+                },
+                "evidence": ("setup-plan", "setup-evidence"),
+            }
+            if include_issues:
+                result["application_target_issues"] = tuple(
+                    {
+                        "code": issue.code,
+                        "application_target": issue.application_target,
+                        "state": issue.state,
+                        "message": issue.message,
+                        "next_actions": issue.next_actions,
+                    }
+                    for issue in outcome.application_target_issues
+                )
+            return result
         except (KeyError, OSError, RuntimeError, TypeError, ValueError):
             return _conservative_setup_outcome(malformed=True)
 
-    def _reconcile_application_targets(
-        self,
-        plan: Mapping[str, object],
-        outcome: Mapping[str, object],
-    ) -> Mapping[str, object]:
+    def _observe_application_targets(
+        self, plan: PlanAssessmentInput
+    ) -> tuple[tuple[ApplicationTargetObservation, ...], bool]:
         if self._application_targets is None:
-            return outcome
-        raw_targets = plan["application_targets"]
-        assert isinstance(raw_targets, Sequence)
-        readiness = dict(_target_readiness(outcome))
-        issues: list[Mapping[str, object]] = []
-        if not raw_targets:
-            return {**outcome, "application_target_issues": ()}
-        for raw_target in raw_targets:
-            target = str(raw_target)
+            return (), False
+        observations: list[ApplicationTargetObservation] = []
+        for target in plan.application_targets:
             try:
                 inspection = self._application_targets.execute(
                     "application-target.inspect",
                     {"application_target": target},
                 )
             except Exception:
-                readiness[target] = Readiness.UNVERIFIED.value
-                issues.append(_application_target_observation_issue(target))
+                observations.append(ApplicationTargetObservation(target, "unknown"))
                 continue
             if not isinstance(inspection, Mapping):
-                readiness[target] = Readiness.UNVERIFIED.value
-                issues.append(_application_target_observation_issue(target))
+                observations.append(ApplicationTargetObservation(target, "unknown"))
                 continue
             state = inspection.get("state")
-            if state == "healthy":
-                continue
-            if state in {
-                "missing",
-                "drifted",
-                "incompatible",
-                "malformed",
-                "unmanaged",
-            }:
-                readiness[target] = Readiness.UNVERIFIED.value
-                issues.append(
-                    _application_target_health_issue(target, state, inspection)
+            detail = inspection.get("detail")
+            observations.append(
+                ApplicationTargetObservation(
+                    target,
+                    state if isinstance(state, str) else "unknown",
+                    detail if isinstance(detail, str) and detail else None,
+                    _inspection_next_actions(inspection, target),
                 )
-            else:
-                readiness[target] = Readiness.UNVERIFIED.value
-                issues.append(_application_target_observation_issue(target))
-        return {
-            **outcome,
-            "readiness": _combined_readiness(readiness).value,
-            "application_target_readiness": readiness,
-            "application_target_issues": tuple(issues),
-        }
+            )
+        return tuple(observations), True
 
 
 PreflightProvider = Callable[[bool], SetupPreflight]
@@ -324,8 +325,8 @@ class SetupOperationPort:
         copied_profile = _plain(selected_profile)
         if not isinstance(copied_profile, Mapping):
             raise ValueError("performance profile must be an object")
-        _validate_performance_profile(copied_profile)
         self._performance_profile = copied_profile
+        self._outcome_policy = PlanOutcomePolicy(copied_profile)
 
     def preview(self, parameters: Mapping[str, object]) -> Mapping[str, object]:
         try:
@@ -372,6 +373,7 @@ class SetupOperationPort:
                 next_actions=("connect this Mac and retry", "mastic setup --help"),
             )
 
+        assessment_plan = _plan_from_resolved(resolved)
         if self._plan_store is not None:
             self._plan_store.record(
                 {
@@ -381,15 +383,13 @@ class SetupOperationPort:
                         for step in resolved.steps
                     ),
                     "application_targets": resolved.selection.application_targets,
-                    "performance_binding": _performance_binding(resolved),
+                    "performance_binding": assessment_plan.performance_binding,
                 }
             )
 
-        prior = _reusable_setup_evidence(
-            resolved,
-            tuple(self._evidence.load("setup")),
-            self._performance_profile,
-        )
+        prior = self._outcome_policy.assess(
+            assessment_plan, tuple(self._evidence.load("setup"))
+        ).reusable_evidence
         material = _restore_material(prior)
         results: dict[str, object] = {}
 
@@ -403,9 +403,10 @@ class SetupOperationPort:
                     {
                         "result": _content_free_result(
                             resolved,
+                            assessment_plan,
                             step.id,
                             result,
-                            self._performance_profile,
+                            self._outcome_policy,
                         )
                     }
                 ),
@@ -420,10 +421,8 @@ class SetupOperationPort:
             )
         except MutationExecutionError as error:
             current_evidence = tuple(self._evidence.load("setup"))
-            completion, readiness, target_readiness = _setup_outcome(
-                resolved,
-                current_evidence,
-                self._performance_profile,
+            completion, readiness, target_readiness = _outcome_values(
+                self._outcome_policy.assess(assessment_plan, current_evidence)
             )
             terminal = {
                 (item.step_id, item.fingerprint)
@@ -465,10 +464,8 @@ class SetupOperationPort:
                     },
                 },
             ) from error
-        completion, readiness, target_readiness = _setup_outcome(
-            resolved,
-            execution.evidence,
-            self._performance_profile,
+        completion, readiness, target_readiness = _outcome_values(
+            self._outcome_policy.assess(assessment_plan, execution.evidence)
         )
         return {
             **preview,
@@ -574,9 +571,9 @@ class SetupOperationPort:
                 confirmed=parameters.get("confirmed") is True,
             )
             resolved = self._resolver.resolve(facts, request, evidence=prior)
-            reusable = _reusable_setup_evidence(
-                resolved, prior, self._performance_profile
-            )
+            reusable = self._outcome_policy.assess(
+                _plan_from_resolved(resolved), prior
+            ).reusable_evidence
             if reusable != prior:
                 resolved = self._resolver.resolve(facts, request, evidence=reusable)
             return resolved
@@ -587,10 +584,11 @@ class SetupOperationPort:
 
     def _setup_preview(self, resolved: ResolvedSetup) -> Mapping[str, object]:
         preview = self._resolver.preview(resolved)
-        completion, readiness, target_readiness = _setup_outcome(
-            resolved,
-            tuple(self._evidence.load("setup")),
-            self._performance_profile,
+        completion, readiness, target_readiness = _outcome_values(
+            self._outcome_policy.assess(
+                _plan_from_resolved(resolved),
+                tuple(self._evidence.load("setup")),
+            )
         )
         identity = _preview_identity(
             resolved.steps,
@@ -1183,65 +1181,41 @@ def _durable_plan_step(
     return record
 
 
-def _resumable_material_valid(resolved: ResolvedSetup, evidence: SetupEvidence) -> bool:
-    if evidence.step_id not in {"runtime.install", "model.install"}:
-        return True
-    result = _evidence_result(evidence)
-    if result is None:
-        return False
-    try:
-        if evidence.step_id == "runtime.install":
-            _validate_runtime_result(resolved.selection, result)
-        else:
-            _validate_model_result(resolved.selection, result)
-    except RuntimeError:
-        return False
-    return True
+def _plan_from_resolved(resolved: ResolvedSetup) -> PlanAssessmentInput:
+    return PlanAssessmentInput(
+        steps=tuple(
+            PlanStep(
+                step.id,
+                step.fingerprint,
+                step.state,
+                _material_expectation(resolved.selection, step.id),
+            )
+            for step in resolved.steps
+        ),
+        application_targets=resolved.selection.application_targets,
+        performance_binding=_performance_binding(resolved),
+    )
 
 
-def _durable_resumable_material_valid(
-    step_id: str, evidence: SetupEvidence, expected_result: object
-) -> bool:
-    if step_id not in {"runtime.install", "model.install"}:
-        return True
-    if not _material_expectation_valid(step_id, expected_result):
-        return False
-    assert isinstance(expected_result, Mapping)
-    result = _evidence_result(evidence)
-    if result is None:
-        return False
-    installation_id = result.get("installation_id")
-    if not isinstance(installation_id, str) or not installation_id:
-        return False
-    revision = result.get("revision")
-    if step_id == "model.install":
-        return bool(
-            revision == expected_result["revision"]
-            and isinstance(revision, str)
-            and len(revision) in {40, 64}
-            and all(character in "0123456789abcdef" for character in revision)
-        )
-    lock_sha256 = result.get("lock_sha256")
-    return bool(
-        all(result.get(field) == value for field, value in expected_result.items())
-        and isinstance(result.get("runtime"), str)
-        and bool(result.get("runtime"))
-        and isinstance(result.get("version"), str)
-        and bool(result.get("version"))
-        and result.get("provenance") == "tested"
-        and isinstance(result.get("bundle_id"), str)
-        and bool(result.get("bundle_id"))
-        and isinstance(lock_sha256, str)
-        and len(lock_sha256) == 64
-        and all(character in "0123456789abcdef" for character in lock_sha256)
+def _outcome_values(
+    outcome: PlanOutcome,
+) -> tuple[str, str, Mapping[str, str]]:
+    return (
+        outcome.completion.value,
+        outcome.readiness.value,
+        {
+            target: readiness.value
+            for target, readiness in outcome.application_target_readiness.items()
+        },
     )
 
 
 def _content_free_result(
     resolved: ResolvedSetup,
+    plan: PlanAssessmentInput,
     step_id: str,
     result: Mapping[str, object],
-    performance_profile: Mapping[str, object],
+    outcome_policy: PlanOutcomePolicy,
 ) -> Mapping[str, object]:
     if step_id.startswith("application.canary."):
         response = result.get("response")
@@ -1249,7 +1223,6 @@ def _content_free_result(
             return {"profile": result.get("profile"), "ok": False}
         target = step_id.removeprefix("application.canary.")
         duration_seconds = _duration_seconds(response)
-        metric = f"{target}.native_canary.duration_seconds"
         return {
             "profile": result.get("profile"),
             "service": resolved.selection.service_name,
@@ -1257,16 +1230,9 @@ def _content_free_result(
             "exact_contract": response.get("exact_contract") is True,
             "phases": response.get("phases", ()),
             "evidence_sha256": response.get("evidence_sha256"),
-            "performance": {
-                "metric": metric,
-                "value": duration_seconds,
-                "unit": "seconds",
-                "band": _performance_band(
-                    resolved, metric, duration_seconds, performance_profile
-                ),
-                "profile_id": performance_profile.get("id"),
-                "profile_version": performance_profile.get("version"),
-            },
+            "performance": outcome_policy.canary_performance(
+                plan, target, duration_seconds
+            ),
         }
     if step_id != "verify.request":
         return result
@@ -1275,68 +1241,6 @@ def _content_free_result(
         "ok": result.get("ok") is True,
         "response_sha256": hashlib.sha256(text.encode()).hexdigest(),
     }
-
-
-def _setup_outcome(
-    resolved: ResolvedSetup,
-    evidence: Sequence[SetupEvidence],
-    performance_profile: Mapping[str, object],
-) -> tuple[str, str, Mapping[str, str]]:
-    current = {
-        (item.step_id, item.fingerprint): item
-        for item in evidence
-        if item.state in {StepState.COMPLETE, StepState.SKIPPED}
-    }
-    terminal = all(
-        (outcome := current.get((step.id, step.fingerprint))) is not None
-        and _terminal_setup_evidence_valid(resolved, outcome, performance_profile)
-        for step in resolved.steps
-    )
-    completion = Completion.COMPLETE if terminal else Completion.PARTIAL
-    target_readiness: dict[str, str] = {}
-    for target in resolved.selection.application_targets:
-        step = next(
-            item for item in resolved.steps if item.id == f"application.canary.{target}"
-        )
-        outcome = current.get((step.id, step.fingerprint))
-        if outcome is None:
-            target_readiness[target] = Readiness.PENDING.value
-        elif outcome.state is StepState.SKIPPED:
-            target_readiness[target] = Readiness.UNVERIFIED.value
-        else:
-            target_readiness[target] = _evidenced_canary_readiness(
-                resolved,
-                target,
-                outcome,
-                performance_profile,
-            )
-    if target_readiness:
-        values = set(target_readiness.values())
-        if Readiness.PENDING.value in values:
-            readiness = Readiness.PENDING
-        elif Readiness.UNVERIFIED.value in values:
-            readiness = Readiness.UNVERIFIED
-        elif Readiness.DEGRADED.value in values:
-            readiness = Readiness.DEGRADED
-        else:
-            readiness = Readiness.READY
-    else:
-        verification = next(
-            (item for item in resolved.steps if item.id == "verify.request"),
-            None,
-        )
-        outcome = (
-            current.get((verification.id, verification.fingerprint))
-            if verification is not None
-            else None
-        )
-        if outcome is None:
-            readiness = Readiness.PENDING
-        elif _verification_ready(outcome):
-            readiness = Readiness.READY
-        else:
-            readiness = Readiness.UNVERIFIED
-    return completion.value, readiness.value, target_readiness
 
 
 def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
@@ -1430,6 +1334,35 @@ def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:
     return normalized
 
 
+def _plan_from_stored(plan: Mapping[str, object]) -> PlanAssessmentInput:
+    raw_steps = plan["steps"]
+    raw_targets = plan["application_targets"]
+    assert isinstance(raw_steps, Sequence)
+    assert isinstance(raw_targets, Sequence)
+    return PlanAssessmentInput(
+        steps=tuple(
+            PlanStep(
+                id=str(step["id"]),
+                fingerprint=str(step["fingerprint"]),
+                state=StepState(str(step.get("state", StepState.READY.value))),
+                expected_result=(
+                    dict(step["expected_result"])
+                    if isinstance(step.get("expected_result"), Mapping)
+                    else None
+                ),
+            )
+            for step in raw_steps
+            if isinstance(step, Mapping)
+        ),
+        application_targets=tuple(str(target) for target in raw_targets),
+        performance_binding=(
+            dict(plan["performance_binding"])
+            if isinstance(plan.get("performance_binding"), Mapping)
+            else None
+        ),
+    )
+
+
 def _conservative_setup_outcome(*, malformed: bool) -> Mapping[str, object]:
     return {
         "completion": Completion.PARTIAL.value,
@@ -1437,69 +1370,6 @@ def _conservative_setup_outcome(*, malformed: bool) -> Mapping[str, object]:
             Readiness.UNVERIFIED.value if malformed else Readiness.PENDING.value
         ),
         "application_target_readiness": {},
-    }
-
-
-def _target_readiness(outcome: Mapping[str, object]) -> Mapping[str, str]:
-    value = outcome.get("application_target_readiness")
-    if not isinstance(value, Mapping) or not all(
-        isinstance(target, str) and isinstance(readiness, str)
-        for target, readiness in value.items()
-    ):
-        raise ValueError("application target readiness must be a string mapping")
-    return value  # type: ignore[return-value]
-
-
-def _combined_readiness(target_readiness: Mapping[str, str]) -> Readiness:
-    values = set(target_readiness.values())
-    known_values = {candidate.value for candidate in Readiness}
-    if not values or not values <= known_values:
-        return Readiness.UNVERIFIED
-    return next(
-        (
-            candidate
-            for candidate in (
-                Readiness.PENDING,
-                Readiness.UNVERIFIED,
-                Readiness.DEGRADED,
-                Readiness.READY,
-            )
-            if candidate.value in values
-        ),
-        Readiness.UNVERIFIED,
-    )
-
-
-def _application_target_health_issue(
-    target: str,
-    state: object,
-    inspection: Mapping[str, object],
-) -> Mapping[str, object]:
-    next_actions = _inspection_next_actions(inspection, target)
-    detail = inspection.get("detail")
-    message = (
-        detail
-        if isinstance(detail, str) and detail
-        else f"Application Configuration Target {target!r} is {state}."
-    )
-    return {
-        "code": f"application_target_{state}",
-        "application_target": target,
-        "state": state,
-        "message": message,
-        "next_actions": next_actions,
-    }
-
-
-def _application_target_observation_issue(target: str) -> Mapping[str, object]:
-    return {
-        "code": "application_target_observation_failed",
-        "application_target": target,
-        "state": "unknown",
-        "message": (
-            f"Application Configuration Target {target!r} could not be inspected."
-        ),
-        "next_actions": (f"mastic application-target inspect {target}",),
     }
 
 
@@ -1512,271 +1382,6 @@ def _inspection_next_actions(
         if actions:
             return actions
     return (f"mastic application-target inspect {target}",)
-
-
-def _durable_setup_outcome(
-    plan: Mapping[str, object],
-    evidence: Sequence[SetupEvidence],
-    performance_profile: Mapping[str, object],
-) -> Mapping[str, object]:
-    raw_steps = plan["steps"]
-    assert isinstance(raw_steps, Sequence)
-    steps = tuple(step for step in raw_steps if isinstance(step, Mapping))
-    current = {
-        (item.step_id, item.fingerprint): item
-        for item in evidence
-        if item.state in {StepState.COMPLETE, StepState.SKIPPED}
-    }
-    raw_binding = plan.get("performance_binding")
-    binding_valid = _performance_binding_valid(raw_binding)
-    bound_service = (
-        raw_binding.get("service") if isinstance(raw_binding, Mapping) else None
-    )
-    expected_service = bound_service if isinstance(bound_service, str) else None
-    completion = (
-        Completion.COMPLETE
-        if all(
-            (outcome := current.get((str(step["id"]), str(step["fingerprint"]))))
-            is not None
-            and _durable_terminal_setup_evidence_valid(
-                str(step["id"]),
-                outcome,
-                performance_profile,
-                expected_service,
-                binding_valid,
-                skip_authorized=step.get("state") == StepState.SKIPPED.value,
-                expected_result=step.get("expected_result"),
-            )
-            for step in steps
-        )
-        else Completion.PARTIAL
-    )
-    raw_targets = plan["application_targets"]
-    assert isinstance(raw_targets, Sequence)
-    target_readiness: dict[str, str] = {}
-    for raw_target in raw_targets:
-        target = str(raw_target)
-        canary = next(
-            step for step in steps if step["id"] == f"application.canary.{target}"
-        )
-        outcome = current.get((str(canary["id"]), str(canary["fingerprint"])))
-        if outcome is None:
-            target_readiness[target] = Readiness.PENDING.value
-        elif outcome.state is StepState.SKIPPED:
-            target_readiness[target] = Readiness.UNVERIFIED.value
-        else:
-            target_readiness[target] = _durable_canary_readiness(
-                target,
-                outcome,
-                performance_profile,
-                plan.get("performance_binding"),
-            )
-    if target_readiness:
-        readiness = _combined_readiness(target_readiness)
-    else:
-        verification = next(
-            (
-                current[(str(step["id"]), str(step["fingerprint"]))]
-                for step in steps
-                if step["id"] == "verify.request"
-                and (str(step["id"]), str(step["fingerprint"])) in current
-            ),
-            None,
-        )
-        if verification is None:
-            readiness = Readiness.PENDING
-        elif _verification_ready(verification):
-            readiness = Readiness.READY
-        else:
-            readiness = Readiness.UNVERIFIED
-    return {
-        "completion": completion.value,
-        "readiness": readiness.value,
-        "application_target_readiness": target_readiness,
-        "evidence": ("setup-plan", "setup-evidence"),
-    }
-
-
-def _durable_canary_band(
-    target: str,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-    *,
-    expected_service: str | None = None,
-) -> str | None:
-    try:
-        payload = json.loads(evidence.detail)
-        result = payload["result"]
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(result, Mapping):
-        return None
-    validated = _application_canary_performance(
-        target,
-        result,
-        performance_profile,
-        expected_service=expected_service,
-    )
-    if validated is None:
-        return None
-    performance, value = validated
-    if performance_profile.get("status") != "validated":
-        band = Readiness.UNVERIFIED.value
-    else:
-        band = _profile_metric_band(
-            f"{target}.native_canary.duration_seconds", value, performance_profile
-        )
-    if performance.get("band") != band:
-        return None
-    return band
-
-
-def _durable_canary_readiness(
-    target: str,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-    performance_binding: object,
-) -> str:
-    if not _performance_binding_matches(performance_binding, performance_profile):
-        return Readiness.UNVERIFIED.value
-    assert isinstance(performance_binding, Mapping)
-    service = performance_binding["service"]
-    assert isinstance(service, str)
-    band = _durable_canary_band(
-        target,
-        evidence,
-        performance_profile,
-        expected_service=service,
-    )
-    if band == "expected":
-        return Readiness.READY.value
-    if band == Readiness.DEGRADED.value:
-        return Readiness.DEGRADED.value
-    return Readiness.UNVERIFIED.value
-
-
-def _durable_terminal_setup_evidence_valid(
-    step_id: str,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-    expected_service: str | None,
-    performance_binding_valid: bool,
-    *,
-    skip_authorized: bool,
-    expected_result: object,
-) -> bool:
-    if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
-        return False
-    if not _durable_resumable_material_valid(step_id, evidence, expected_result):
-        return False
-    if step_id.startswith("application.canary."):
-        if not performance_binding_valid:
-            return False
-        if evidence.state is StepState.SKIPPED:
-            return skip_authorized
-        target = step_id.removeprefix("application.canary.")
-        return (
-            _durable_canary_band(
-                target,
-                evidence,
-                performance_profile,
-                expected_service=expected_service,
-            )
-            is not None
-        )
-    if evidence.state is StepState.SKIPPED:
-        return False
-    if step_id == "verify.request":
-        return _verification_ready(evidence)
-    return True
-
-
-def _verification_ready(evidence: SetupEvidence) -> bool:
-    if evidence.state is not StepState.COMPLETE:
-        return False
-    try:
-        payload = json.loads(evidence.detail)
-        result = payload["result"]
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return False
-    digest = result.get("response_sha256") if isinstance(result, Mapping) else None
-    return bool(
-        isinstance(result, Mapping)
-        and result.get("ok") is True
-        and digest == _READY_RESPONSE_SHA256
-    )
-
-
-def _application_canary_contract_ready(
-    target: str,
-    result: Mapping[str, object],
-    *,
-    expected_service: str | None = None,
-) -> bool:
-    contract = APPLICATION_CANARY_CONTRACTS.get(target)
-    if contract is None:
-        return False
-    profile = contract.profile
-    phases = contract.phases
-    raw_phases = result.get("phases")
-    service = result.get("service")
-    if not isinstance(service, str) or not service:
-        return False
-    expected_digest = application_canary_evidence_sha256(
-        target=target,
-        profile=profile,
-        service=service,
-        phases=phases,
-        exact_contract=True,
-    )
-    return bool(
-        result.get("ok") is True
-        and result.get("exact_contract") is True
-        and result.get("profile") == profile
-        and isinstance(raw_phases, Sequence)
-        and not isinstance(raw_phases, (str, bytes))
-        and tuple(raw_phases) == phases
-        and (expected_service is None or service == expected_service)
-        and result.get("evidence_sha256") == expected_digest
-    )
-
-
-def _application_canary_performance(
-    target: str,
-    result: Mapping[str, object],
-    performance_profile: Mapping[str, object],
-    *,
-    expected_service: str | None = None,
-) -> tuple[Mapping[str, object], float] | None:
-    if not _application_canary_contract_ready(
-        target, result, expected_service=expected_service
-    ):
-        return None
-    performance = result.get("performance")
-    if not isinstance(performance, Mapping):
-        return None
-    metric = f"{target}.native_canary.duration_seconds"
-    try:
-        value = _duration_seconds({"duration_seconds": performance.get("value")})
-    except RuntimeError:
-        return None
-    if (
-        performance.get("metric") != metric
-        or performance.get("unit") != "seconds"
-        or performance.get("value") != value
-        or performance.get("profile_id") != performance_profile.get("id")
-        or performance.get("profile_version") != performance_profile.get("version")
-    ):
-        return None
-    return performance, value
-
-
-def _exact_sha256(value: object) -> bool:
-    return bool(
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _duration_seconds(response: Mapping[str, object]) -> float:
@@ -1811,291 +1416,11 @@ def _performance_binding(resolved: ResolvedSetup) -> Mapping[str, object]:
     }
 
 
-def _performance_binding_matches(
-    value: object, performance_profile: Mapping[str, object]
-) -> bool:
-    if not _performance_binding_valid(value):
-        return False
-    assert isinstance(value, Mapping)
-    host = performance_profile.get("host")
-    plan = performance_profile.get("plan")
-    if not isinstance(host, Mapping) or not isinstance(plan, Mapping):
-        return False
-    memory_bytes = value["memory_bytes"]
-    assert type(memory_bytes) is int
-    return bool(
-        value["selection_sha256"] == plan.get("selection_sha256")
-        and value["application_versions"] == plan.get("application_versions")
-        and value["platform"] == host.get("platform")
-        and value["machine"] == host.get("machine")
-        and memory_bytes >= host.get("minimum_memory_bytes", math.inf)
-        and value["macos_major"] in host.get("macos_major_versions", ())
-    )
-
-
-def _performance_binding_valid(value: object) -> bool:
-    if not isinstance(value, Mapping) or set(value) != {
-        "selection_sha256",
-        "application_versions",
-        "platform",
-        "machine",
-        "memory_bytes",
-        "macos_major",
-        "service",
-    }:
-        return False
-    selection_sha256 = value.get("selection_sha256")
-    memory_bytes = value.get("memory_bytes")
-    macos_major = value.get("macos_major")
-    service = value.get("service")
-    return bool(
-        isinstance(selection_sha256, str)
-        and len(selection_sha256) == 64
-        and all(character in "0123456789abcdef" for character in selection_sha256)
-        and value.get("application_versions") == dict(PHASE1_APPLICATION_VERSIONS)
-        and isinstance(value.get("platform"), str)
-        and bool(value.get("platform"))
-        and isinstance(value.get("machine"), str)
-        and bool(value.get("machine"))
-        and type(memory_bytes) is int
-        and memory_bytes > 0
-        and type(macos_major) is int
-        and macos_major > 0
-        and isinstance(service, str)
-        and bool(service)
-    )
-
-
 def _macos_major(version: str) -> int | None:
     major, _, _ = version.partition(".")
     if not major.isdecimal():
         return None
     return int(major)
-
-
-def _validate_performance_profile(profile: Mapping[str, object]) -> None:
-    if not isinstance(profile.get("id"), str) or not profile["id"]:
-        raise ValueError("performance profile id must be a nonempty string")
-    if type(profile.get("version")) is not int or profile["version"] <= 0:
-        raise ValueError("performance profile version must be a positive integer")
-    if profile.get("status") not in {"provisional", "validated"}:
-        raise ValueError("performance profile status must be provisional or validated")
-    host = profile.get("host")
-    plan = profile.get("plan")
-    metrics = profile.get("metrics")
-    if not isinstance(host, Mapping):
-        raise ValueError("performance profile host must be an object")
-    if not isinstance(plan, Mapping):
-        raise ValueError("performance profile plan must be an object")
-    if not isinstance(metrics, Mapping):
-        raise ValueError("performance profile metrics must be an object")
-    if host.get("platform") != "darwin" or host.get("machine") != "arm64":
-        raise ValueError("performance profile host must be darwin arm64")
-    if (
-        type(host.get("minimum_memory_bytes")) is not int
-        or host["minimum_memory_bytes"] <= 0
-    ):
-        raise ValueError(
-            "performance profile host minimum_memory_bytes must be positive"
-        )
-    macos_versions = host.get("macos_major_versions")
-    if (
-        not isinstance(macos_versions, Sequence)
-        or isinstance(macos_versions, (str, bytes))
-        or not macos_versions
-        or any(type(item) is not int or item <= 0 for item in macos_versions)
-    ):
-        raise ValueError(
-            "performance profile host macos_major_versions must be positive integers"
-        )
-    selection_sha256 = plan.get("selection_sha256")
-    if (
-        not isinstance(selection_sha256, str)
-        or len(selection_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in selection_sha256)
-    ):
-        raise ValueError("performance profile plan requires an exact selection sha256")
-    application_versions = plan.get("application_versions")
-    if not isinstance(application_versions, Mapping) or any(
-        not isinstance(name, str)
-        or not name
-        or not isinstance(version, str)
-        or not version
-        for name, version in (
-            application_versions.items()
-            if isinstance(application_versions, Mapping)
-            else ()
-        )
-    ):
-        raise ValueError(
-            "performance profile plan application_versions must be nonempty strings"
-        )
-    for metric in (
-        "codex.native_canary.duration_seconds",
-        "hindsight.native_canary.duration_seconds",
-    ):
-        band = metrics.get(metric)
-        if not isinstance(band, Mapping):
-            raise ValueError(f"performance profile requires metric {metric}")
-        expected = band.get("expected")
-        if not isinstance(expected, Mapping):
-            raise ValueError(f"performance profile metric {metric} requires expected")
-        maximum = expected.get("maximum")
-        if (
-            type(maximum) not in {int, float}
-            or not math.isfinite(maximum)
-            or maximum < 0
-        ):
-            raise ValueError(
-                f"performance profile metric {metric} maximum must be nonnegative"
-            )
-
-
-def _performance_band(
-    resolved: ResolvedSetup,
-    metric: str,
-    value: float,
-    performance_profile: Mapping[str, object],
-) -> str:
-    if performance_profile.get("status") != "validated":
-        return Readiness.UNVERIFIED.value
-    host = performance_profile.get("host")
-    plan = performance_profile.get("plan")
-    metrics = performance_profile.get("metrics")
-    assert isinstance(host, Mapping)
-    assert isinstance(plan, Mapping)
-    assert isinstance(metrics, Mapping)
-    if (
-        resolved.preflight.platform != host["platform"]
-        or resolved.preflight.machine != host["machine"]
-        or resolved.preflight.memory_bytes < host["minimum_memory_bytes"]
-        or _macos_major(resolved.preflight.os_version)
-        not in host.get("macos_major_versions", ())
-        or plan.get("application_versions") != dict(PHASE1_APPLICATION_VERSIONS)
-        or plan.get("selection_sha256")
-        != _performance_plan_fingerprint(resolved.selection)
-    ):
-        return Readiness.UNVERIFIED.value
-    return _profile_metric_band(metric, value, performance_profile)
-
-
-def _profile_metric_band(
-    metric: str, value: float, performance_profile: Mapping[str, object]
-) -> str:
-    metrics = performance_profile.get("metrics")
-    if not isinstance(metrics, Mapping):
-        return Readiness.UNVERIFIED.value
-    raw_band = metrics.get(metric)
-    if not isinstance(raw_band, Mapping):
-        return Readiness.UNVERIFIED.value
-    expected = raw_band.get("expected")
-    if not isinstance(expected, Mapping):
-        return Readiness.UNVERIFIED.value
-    maximum = expected.get("maximum")
-    if type(maximum) not in {int, float}:
-        return Readiness.UNVERIFIED.value
-    if value <= float(maximum):
-        return "expected"
-    return Readiness.DEGRADED.value
-
-
-def _evidenced_canary_band(
-    resolved: ResolvedSetup,
-    target: str,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-) -> str | None:
-    try:
-        payload = json.loads(evidence.detail)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-    result = payload.get("result")
-    if not isinstance(result, Mapping):
-        return None
-    validated = _application_canary_performance(
-        target,
-        result,
-        performance_profile,
-        expected_service=resolved.selection.service_name,
-    )
-    if validated is None:
-        return None
-    performance, value = validated
-    metric = f"{target}.native_canary.duration_seconds"
-    band = _performance_band(resolved, metric, value, performance_profile)
-    if performance.get("band") != band:
-        return None
-    return band
-
-
-def _evidenced_canary_readiness(
-    resolved: ResolvedSetup,
-    target: str,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-) -> str:
-    band = _evidenced_canary_band(resolved, target, evidence, performance_profile)
-    if band == "expected":
-        return Readiness.READY.value
-    if band == Readiness.DEGRADED.value:
-        return Readiness.DEGRADED.value
-    return Readiness.UNVERIFIED.value
-
-
-def _terminal_setup_evidence_valid(
-    resolved: ResolvedSetup,
-    evidence: SetupEvidence,
-    performance_profile: Mapping[str, object],
-) -> bool:
-    if evidence.state not in {StepState.COMPLETE, StepState.SKIPPED}:
-        return False
-    if evidence.step_id.startswith("application.canary."):
-        if evidence.state is StepState.SKIPPED:
-            return _skipped_evidence_authorized(resolved, evidence)
-        target = evidence.step_id.removeprefix("application.canary.")
-        return (
-            _evidenced_canary_band(resolved, target, evidence, performance_profile)
-            is not None
-        )
-    if evidence.state is StepState.SKIPPED:
-        return False
-    if not _resumable_material_valid(resolved, evidence):
-        return False
-    if evidence.step_id == "verify.request":
-        return _verification_ready(evidence)
-    return True
-
-
-def _skipped_evidence_authorized(
-    resolved: ResolvedSetup, evidence: SetupEvidence
-) -> bool:
-    return any(
-        step.id == evidence.step_id
-        and step.fingerprint == evidence.fingerprint
-        and step.state is StepState.SKIPPED
-        for step in resolved.steps
-    )
-
-
-def _reusable_setup_evidence(
-    resolved: ResolvedSetup,
-    evidence: Sequence[SetupEvidence],
-    performance_profile: Mapping[str, object],
-) -> tuple[SetupEvidence, ...]:
-    return tuple(
-        item
-        for item in evidence
-        if (
-            item.state is not StepState.SKIPPED
-            or _skipped_evidence_authorized(resolved, item)
-        )
-        and (
-            item.state is not StepState.COMPLETE
-            or _terminal_setup_evidence_valid(resolved, item, performance_profile)
-        )
-    )
 
 
 def _no_validated_fit(error: NoValidatedFitError) -> Mapping[str, object]:
