@@ -70,11 +70,11 @@ Both servers share:
 Neither server exposes a native stats or metrics endpoint, so `systools`
 cannot simply scrape an aggregate-stats URL. The collectible dimensions are:
 
-- **Per-request token counts** — from the `usage` object in completion
-  responses (`prompt_tokens`, `completion_tokens`, `total_tokens`,
-  `cached_tokens`). Capturing these requires the supervisor to act as a
-  reverse proxy (intercept responses) or to instrument at the client call
-  site; the servers do not report aggregate usage.
+- **Per-request token counts for non-streaming responses** — from the `usage`
+  object (`prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `cached_tokens`). Do not assume a streamed response includes usage; collect
+  it only when the stream explicitly provides it or through separate proxy or
+  client instrumentation. The servers do not report aggregate usage.
 - **Process-level stats** — RSS memory, CPU% — from `psutil` on the server
   PID, not from the HTTP API.
 - **Request latency** (TTFT, total) — the supervisor must time requests
