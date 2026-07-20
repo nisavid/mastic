@@ -43,15 +43,27 @@ _Avoid_: version range, release pin
 
 **Release Intent**:
 The portable choice to track the current release of a selected Release Channel
-or, by explicit exception, preserve one exact release.
+or explicitly select one exact release.
 _Avoid_: resolved version, dependency pin
 
 **Current Release Resolution**:
-Time-bounded Plan evidence that maps current Release Intent to one exact release
-using the selected Release Channel's authority. An exact Release Intent bypasses
-current-release lookup, verifies that exact release through its selected owner
-and channel, and makes no currency claim.
+Time-bounded Plan evidence that proves the selected Release Channel's
+authority mapped current Release Intent to one exact release at an observed
+time. It makes no compatibility or validation claim. An exact Release Intent
+bypasses current-release lookup, verifies that exact release through its
+selected owner and channel, and makes no Currency Claim.
 _Avoid_: desired version, permanent pin, validation fixture
+
+**Currency Claim**:
+The time-bounded statement that an exact release was the latest release
+reported by one selected Release Channel's authority at an observed time.
+_Avoid_: latest version, validated release
+
+**Attestation Issuer**:
+A validation-profile-authorized signer that seals current-release observations
+for offline verification when no profile-trusted upstream signature covers the
+complete Currency Claim.
+_Avoid_: Installation Owner, release authority, closure builder
 
 **Application Configuration Target**:
 One independently selected and evidenced configuration scope for an External
@@ -67,7 +79,8 @@ _Avoid_: touched keys, written fields, whole configuration
 
 **Validated Plan**:
 A Plan whose exact host and component combination satisfies an accepted
-validation profile and carries its stated guarantees.
+validation profile and carries its stated guarantees. Its Release Intent and
+Currency Claim are evaluated separately.
 _Avoid_: supported mode, expert plan
 
 **Exploratory Plan**:
