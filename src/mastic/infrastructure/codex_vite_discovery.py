@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,7 +26,8 @@ _MAX_METADATA_BYTES = 1_048_576
 _MAX_PACKAGE_FILES = 20_000
 _MAX_PACKAGE_BYTES = 768 * 1024 * 1024
 _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
-_UNEXPECTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_ALLOWED_OUTPUT_CONTROLS = frozenset("\t\n\r")
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _VITE_INSTALL_ID = re.compile(
     r"#[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -400,25 +402,35 @@ class CodexViteDiscovery:
         if result.returncode != 0:
             raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_UNRESOLVED)
         output = _ANSI_SGR.sub("", result.stdout)
-        if _UNEXPECTED_CONTROL.search(output) is not None:
+        if any(
+            character not in _ALLOWED_OUTPUT_CONTROLS
+            and unicodedata.category(character) in _CONTROL_CATEGORIES
+            for character in output
+        ):
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
             )
         lines = [line.strip() for line in output.splitlines() if line.strip()]
-        executable = next((Path(line) for line in lines if line.startswith("/")), None)
+        executables = [Path(line) for line in lines if line.startswith("/")]
         labels: dict[str, str] = {}
         for line in lines:
             match = re.fullmatch(r"([A-Za-z]+):\s+(.+)", line)
             if match is not None:
-                labels[match.group(1).lower()] = match.group(2).strip()
+                label = match.group(1).lower()
+                if label in labels:
+                    raise CodexViteDiscoveryError(
+                        CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+                    )
+                labels[label] = match.group(2).strip()
         if (
-            executable is None
+            len(executables) != 1
             or not _nonempty(labels.get("package"))
             or not _nonempty(labels.get("node"))
         ):
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
             )
+        executable = executables[0]
         try:
             canonical = executable.resolve(strict=True)
         except OSError as error:

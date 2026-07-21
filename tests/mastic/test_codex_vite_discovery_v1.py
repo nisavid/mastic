@@ -302,6 +302,68 @@ class CodexViteDiscoveryTests(unittest.TestCase):
             self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
             self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
 
+    def test_duplicate_vite_owner_labels_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            command = (str(fixture.vp_bin / "vp"), "env", "which", "codex")
+            result = fixture.runner.results[command]
+            fixture.runner.results[command] = replace(
+                result,
+                stdout=result.stdout.replace(
+                    "  Package:    @openai/codex",
+                    "  Package:    attacker-controlled\n  Package:    @openai/codex",
+                ),
+            )
+
+            with self.assertRaises(CodexViteDiscoveryError) as invalid:
+                fixture.discover()
+
+            self.assertEqual(invalid.exception.reason_code, "owner_metadata_invalid")
+
+    def test_multiple_vite_executable_records_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            command = (str(fixture.vp_bin / "vp"), "env", "which", "codex")
+            result = fixture.runner.results[command]
+            executable = str(fixture.package_bin.resolve())
+            fixture.runner.results[command] = replace(
+                result,
+                stdout=result.stdout.replace(
+                    executable,
+                    f"{executable}\n/attacker-controlled/codex",
+                ),
+            )
+
+            with self.assertRaises(CodexViteDiscoveryError) as invalid:
+                fixture.discover()
+
+            self.assertEqual(invalid.exception.reason_code, "owner_metadata_invalid")
+
+    def test_non_sgr_vite_output_controls_are_rejected(self) -> None:
+        for control in ("\x00", "\x85", "\u2028"):
+            with self.subTest(control=ascii(control)):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = ViteFixture(Path(temporary), source="npm")
+                    command = (
+                        str(fixture.vp_bin / "vp"),
+                        "env",
+                        "which",
+                        "codex",
+                    )
+                    result = fixture.runner.results[command]
+                    fixture.runner.results[command] = replace(
+                        result,
+                        stdout=result.stdout.replace("VITE+ -", f"VITE+{control} -"),
+                    )
+
+                    with self.assertRaises(CodexViteDiscoveryError) as invalid:
+                        fixture.discover()
+
+                    self.assertEqual(
+                        invalid.exception.reason_code,
+                        "owner_metadata_invalid",
+                    )
+
     def test_vite_native_metadata_selects_vite_lifecycle_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ViteFixture(Path(temporary), source="vp")
