@@ -28,7 +28,8 @@ After the closure digest and its complete internal manifest pass, bootstrap
 removes only `com.apple.quarantine` from its private extraction tree before it
 executes bundled tools. This permits verified offline artifacts transferred by
 AirDrop to run without changing quarantine metadata in the caller-owned artifact
-directory or removing unrelated extended attributes.
+directory or removing unrelated extended attributes. Bootstrap aborts with an
+actionable error if `/usr/bin/xattr` is unavailable or quarantine removal fails.
 
 ## LaunchAgent
 

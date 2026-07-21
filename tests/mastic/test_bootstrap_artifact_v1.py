@@ -411,6 +411,71 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 self._get_xattr(closure, "com.apple.quarantine"), quarantine
             )
 
+    def test_failed_closure_verification_does_not_remove_quarantine(self) -> None:
+        with self._artifact() as (root, _artifact, release):
+            quarantine = b"0281;6a5fa391;;"
+            closure_root = root / "closure"
+            manifest = closure_root / "application-targets-v1/manifest.json"
+            nested_artifact = (
+                closure_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
+            )
+            self._set_xattr(manifest, "com.apple.quarantine", quarantine)
+            self._set_xattr(nested_artifact, "com.apple.quarantine", quarantine)
+            nested_artifact.write_bytes(b"tampered after the internal manifest")
+
+            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+            subprocess.run(
+                ["/usr/bin/tar", "-czf", str(closure), "-C", str(closure_root), "."],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+            artifact = root / "invalid-closure-bootstrap.zsh"
+            subprocess.run(
+                [
+                    "zsh",
+                    str(BUILDER),
+                    str(release / "mastic-0.1.0-py3-none-any.whl"),
+                    str(closure),
+                    str(artifact),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            self._tool(tools / "rm", "exit 0")
+            temporary = root / "temporary"
+            temporary.mkdir()
+            with patch.dict(os.environ, {"TMPDIR": str(temporary)}):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=root / "home"
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("closure digest mismatches", completed.stderr)
+            work_directories = list(temporary.glob("mastic-bootstrap.*"))
+            self.assertEqual(len(work_directories), 1)
+            failed_closure = work_directories[0] / "closure"
+            self.assertIsNotNone(
+                self._get_xattr(
+                    failed_closure / "application-targets-v1/manifest.json",
+                    "com.apple.quarantine",
+                )
+            )
+            self.assertIsNotNone(
+                self._get_xattr(
+                    failed_closure
+                    / "application-targets-v1/artifacts/hindsight-darwin-arm64",
+                    "com.apple.quarantine",
+                )
+            )
+
     def test_install_honors_explicit_mastic_data_directory(self) -> None:
         with self._artifact() as (root, artifact, release):
             tools = root / "tools"
