@@ -35,7 +35,11 @@ _APPLICATION_TARGET_NAMES = frozenset({"codex", "hindsight"})
 
 class ControlClient(Protocol):
     def execute(
-        self, operation: str, parameters: Mapping[str, object] | None = None
+        self,
+        operation: str,
+        parameters: Mapping[str, object] | None = None,
+        *,
+        operation_id: str | None = None,
     ): ...
 
     def cancel(self, operation_id: str): ...
@@ -92,7 +96,19 @@ class RemoteOperationPort:
                 )
                 response = self._client.cancel(operation_id)
             else:
-                response = self._client.execute(operation, parameters)
+                operation_id = parameters.get("operation_id")
+                if isinstance(operation_id, str) and operation_id:
+                    response = self._client.execute(
+                        operation,
+                        {
+                            key: value
+                            for key, value in parameters.items()
+                            if key != "operation_id"
+                        },
+                        operation_id=operation_id,
+                    )
+                else:
+                    response = self._client.execute(operation, parameters)
         except ControlClientError as error:
             raise ApplicationError(
                 error.code,

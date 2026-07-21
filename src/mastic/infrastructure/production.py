@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -31,6 +32,12 @@ from mastic.infrastructure.composition import (
     compose_application,
 )
 from mastic.infrastructure.application_supply import ApplicationSupply
+from mastic.infrastructure.codex_owner_reconciliation import (
+    DaemonCodexOwnerReconciliation,
+    LocalCodexOwnerReconciliation,
+    SetupApplicationReconciliation,
+    build_codex_dependencies,
+)
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.control_client import UnixControlClient
 from mastic.infrastructure.daemon_service import DaemonOperationRouter, DaemonService
@@ -59,6 +66,12 @@ from mastic.infrastructure.operation_ports import (
     SupervisorOperationPort,
 )
 from mastic.infrastructure.paths_v1 import MasticPaths, resolve_paths
+from mastic.infrastructure.owner_reconciliation_store import OwnerReconciliationStore
+from mastic.infrastructure.planning_record_authority import (
+    LocalGrantReceiptIssuer,
+    LocalGrantReceiptVerifier,
+)
+from mastic.infrastructure.planning_record_repository import PlanningRecordRepository
 from mastic.infrastructure.production_host import (
     GatewayVerificationPort,
     LazyUvRunner,
@@ -619,6 +632,41 @@ def _compose_local_locked(
     hub_supply = ModelSupply(HuggingFaceHubClient())
     config_store = ConfigStore(paths.config_file, validate_config)
     state_store = OperationalStateStore(paths.state_db)
+    reconciliation_store = OwnerReconciliationStore(
+        state_store, staging_root=paths.owner_upgrade_stage_dir
+    )
+    planning = PlanningRecordRepository(
+        state_store, LocalGrantReceiptVerifier(paths.planning_grant_key)
+    )
+
+    def reconciliation_clock() -> datetime:
+        return datetime.now(UTC)
+
+    (
+        codex_discovery,
+        codex_current,
+        codex_closures,
+        _codex_artifact_verifier,
+        codex_lifecycle,
+        _codex_owner_commands,
+    ) = build_codex_dependencies(
+        home=resolved_home,
+        stage_root=paths.owner_upgrade_stage_dir,
+        state=state_store,
+        clock=reconciliation_clock,
+    )
+    codex_reconciliation = LocalCodexOwnerReconciliation(
+        discovery=codex_discovery,
+        current=codex_current,
+        closure_materializer=codex_closures,
+        lifecycle=codex_lifecycle,
+        store=reconciliation_store,
+        planning=planning,
+        issuer=LocalGrantReceiptIssuer(paths.planning_grant_key),
+        remote=activating_remote,
+        uid=os.getuid(),
+        clock=reconciliation_clock,
+    )
     intelligence = ModelIntelligence(
         HuggingFaceModelRepository(), PsutilMachineInventory()
     )
@@ -643,7 +691,7 @@ def _compose_local_locked(
     )
     config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
-    applications = ApplicationSupply(
+    legacy_applications = ApplicationSupply(
         resolved_home,
         paths.data_dir / "bootstrap-artifacts" / "application-targets-v1",
         paths.state_dir,
@@ -652,6 +700,9 @@ def _compose_local_locked(
         application_tool_dir=paths.data_dir / "application-tools",
         application_bin_dir=paths.data_dir / "application-bin",
         transition=setup_transition,
+    )
+    applications = SetupApplicationReconciliation(
+        legacy_applications, codex_reconciliation
     )
     setup_evidence = OperationalSetupEvidenceStore(state_store)
     setup_plans = OperationalSetupPlanStore(state_store)
@@ -692,6 +743,7 @@ def _compose_local_locked(
             remote, launchd, paths.control_socket, state_store, config_store
         ),
         setup=setup,
+        applications=codex_reconciliation,
         application_targets=application_targets,
         config_store=config_store,
         state_store=state_store,
@@ -782,6 +834,44 @@ def _compose_daemon_locked(*, paths: MasticPaths, resolved_home: Path) -> Daemon
     credential.load_or_create()
     config_store = ConfigStore(paths.config_file, validate_config)
     state_store = OperationalStateStore(paths.state_db)
+    reconciliation_store = OwnerReconciliationStore(
+        state_store, staging_root=paths.owner_upgrade_stage_dir
+    )
+    planning = PlanningRecordRepository(
+        state_store, LocalGrantReceiptVerifier(paths.planning_grant_key)
+    )
+
+    def reconciliation_clock() -> datetime:
+        return datetime.now(UTC)
+
+    (
+        codex_discovery,
+        codex_current,
+        codex_closures,
+        codex_artifact_verifier,
+        codex_lifecycle,
+        codex_owner_commands,
+    ) = build_codex_dependencies(
+        home=resolved_home,
+        stage_root=paths.owner_upgrade_stage_dir,
+        state=state_store,
+        clock=reconciliation_clock,
+    )
+    codex_reconciliation = DaemonCodexOwnerReconciliation(
+        discovery=codex_discovery,
+        current=codex_current,
+        lifecycle=codex_lifecycle,
+        artifact_verifier=codex_artifact_verifier,
+        store=reconciliation_store,
+        planning=planning,
+        owner_commands=codex_owner_commands,
+        closure_releaser=codex_closures,
+        uid=os.getuid(),
+        transition=lambda identity: state_store.resource_transition(
+            "external_application_installation", identity
+        ),
+        clock=reconciliation_clock,
+    )
     catalogue = RuntimeCatalogue.load_builtin()
     runtime_manager = RuntimeManager(
         catalogue,
@@ -896,6 +986,7 @@ def _compose_daemon_locked(*, paths: MasticPaths, resolved_home: Path) -> Daemon
         return DaemonOperationRouter(
             runtime=runtime,
             model=model,
+            applications=codex_reconciliation,
             supervisor=supervisor_port,
             state=state_store,
             request_stop=request_stop,

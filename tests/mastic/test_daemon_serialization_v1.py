@@ -66,6 +66,29 @@ class _TrackedOwner:
 
 
 class DaemonPhysicalSerializationTests(unittest.TestCase):
+    def test_application_mutation_routes_through_the_injected_physical_owner(
+        self,
+    ) -> None:
+        tracker = _PhysicalTracker()
+        with tempfile.TemporaryDirectory() as directory:
+            owner = _TrackedOwner(tracker)
+            router = DaemonOperationRouter(
+                runtime=owner,
+                model=owner,
+                applications=owner,
+                supervisor=owner,
+                state=OperationalStateStore(Path(directory) / "state.sqlite3"),
+            )
+
+            result = router.execute(
+                "application.upgrade",
+                {"application": "codex"},
+                operation_id="codex-plan-17",
+            )
+
+            self.assertEqual(tracker.calls, ["application.upgrade"])
+            self.assertEqual(result["operation_id"], "codex-plan-17")
+
     def test_stop_drains_admitted_cross_family_mutations_without_overlap(self) -> None:
         tracker = _PhysicalTracker()
         with tempfile.TemporaryDirectory() as directory:
@@ -73,6 +96,7 @@ class DaemonPhysicalSerializationTests(unittest.TestCase):
             router = DaemonOperationRouter(
                 runtime=owner,
                 model=owner,
+                applications=owner,
                 supervisor=owner,
                 state=OperationalStateStore(Path(directory) / "state.sqlite3"),
                 physical_drain_timeout=2,
@@ -173,6 +197,7 @@ class DaemonPhysicalSerializationProtocolTests(unittest.IsolatedAsyncioTestCase)
             router = DaemonOperationRouter(
                 runtime=owner,
                 model=owner,
+                applications=owner,
                 supervisor=owner,
                 state=OperationalStateStore(root / "state.sqlite3"),
             )

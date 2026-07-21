@@ -105,6 +105,7 @@ _LOCAL_MUTATIONS = frozenset(
     }
 )
 _APPLICATION_TARGET_NAMES = frozenset({"codex", "hindsight"})
+_APPLICATION_NAMES = frozenset({"codex"})
 
 
 class LocalOperationBackend:
@@ -123,6 +124,7 @@ class LocalOperationBackend:
         logs: LogReader,
         metrics: MetricsSource,
         setup: OperationPort,
+        applications: OperationPort,
         application_targets: OperationPort,
         config_path: str | Path,
         gateway_credential_path: str | Path | None = None,
@@ -139,6 +141,7 @@ class LocalOperationBackend:
         self._logs = logs
         self._metrics = metrics
         self._setup = setup
+        self._applications = applications
         self._application_targets = application_targets
         self._config_path = Path(config_path)
         self._gateway_credential_path = (
@@ -165,12 +168,15 @@ class LocalOperationBackend:
             preview_method = getattr(self._setup, "preview", None)
         elif request.name == "remove":
             preview_method = getattr(self._setup, "preview_removal", None)
+        elif request.name == "application.upgrade":
+            preview_method = getattr(self._applications, "preview", None)
         if callable(preview_method):
-            resolved = (
-                preview_method()
-                if request.name == "remove"
-                else preview_method(request.parameters)
-            )
+            if request.name == "remove":
+                resolved = preview_method()
+            elif request.name == "application.upgrade":
+                resolved = preview_method(request.name, request.parameters)
+            else:
+                resolved = preview_method(request.parameters)
             preview = {
                 "schema_version": 1,
                 "operation": request.name,
@@ -190,6 +196,7 @@ class LocalOperationBackend:
         requires_supervisor = (
             request.name
             in (_SUPERVISOR_MUTATIONS | _RUNTIME_MUTATIONS | _MODEL_LONG_MUTATIONS)
+            or request.name == "application.upgrade"
             or request.name == "service.remove"
         )
         return PreparedOperation(
@@ -348,6 +355,14 @@ class LocalOperationBackend:
                 {str(item["id"]) for item in self._state_store.operations()},
                 "Operation",
             )
+        elif name.startswith("application."):
+            application = str(request.parameters.get("application", ""))
+            if application not in _APPLICATION_NAMES:
+                raise ApplicationError(
+                    "invalid_parameter",
+                    f"unsupported application: {application!r}",
+                    next_actions=(f"mastic {name.replace('.', ' ')} --help",),
+                )
         elif name == "application-target.test":
             _resource(
                 request, config.application_targets, "Application Configuration Target"
@@ -388,6 +403,14 @@ class LocalOperationBackend:
             return self._service_query(request, config)
         if name.startswith("operation."):
             return self._operation_query(request)
+        if name == "application.inspect":
+            value = self._applications.execute(name, request.parameters)
+            return _result(
+                name,
+                resource=_plain(value),
+                evidence=["application-owner"],
+                next_actions=list(value.get("next_actions", [])),
+            )
         if name.startswith("application-target."):
             return self._application_target_query(request, config)
         if name.startswith("config."):
@@ -1197,6 +1220,8 @@ class LocalOperationBackend:
             value = self._runtime_supply.execute(name, parameters)
         elif name in _MODEL_LONG_MUTATIONS:
             value = self._execute_model_mutation(name, parameters)
+        elif name == "application.upgrade":
+            value = self._applications.execute(name, parameters)
         elif name in {"application-target.configure", "application-target.remove"}:
             value = self._application_targets.execute(name, parameters)
         elif name in _LOCAL_MUTATIONS:

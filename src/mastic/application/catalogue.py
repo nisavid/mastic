@@ -101,6 +101,7 @@ _TREE: Mapping[str, tuple[str, ...]] = {
         "check",
     ),
     "operation": ("list", "inspect"),
+    "application": ("inspect", "upgrade"),
     "application-target": ("list", "inspect", "configure", "test", "remove"),
     "config": (
         "path",
@@ -147,6 +148,7 @@ _QUERIES = frozenset(
         "service.check",
         "operation.list",
         "operation.inspect",
+        "application.inspect",
         "application-target.list",
         "application-target.inspect",
         "application-target.test",
@@ -277,6 +279,8 @@ def _summary(name: str) -> str:
         "service.check": "Inspect one service's recorded desired, run, and Gateway route state.",
         "operation.list": "List durable physical operations and their current status.",
         "operation.inspect": "Inspect one durable operation and its recorded events.",
+        "application.inspect": "Inspect an externally owned application's installation and currentness without changing it.",
+        "application.upgrade": "Upgrade an application through its detected owner to the selected channel's current release.",
         "application-target.list": "List MASTIC-owned Application Configuration Targets.",
         "application-target.inspect": "Inspect one owned Application Configuration Target and its sampling configuration.",
         "application-target.configure": "Configure Codex or Hindsight as one Application Configuration Target.",
@@ -339,6 +343,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         "model": "Model repository, installation, alias, or exact revision; discover values with `mastic model search` or `model list`.",
         "service": "Inference Service name; discover values with `mastic service list`.",
         "operation": "Durable operation ID; discover values with `mastic operation list`.",
+        "application": "Externally owned application name.",
         "application_target": "Application Configuration Target name; discover values with `mastic application-target list`.",
     }
     if name == "setup":
@@ -420,6 +425,11 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
                 value_type="json",
             ),
             _option(
+                "preserve_outdated_codex",
+                "Explicitly keep an existing outdated Vite-owned Codex release instead of completing the default current-release upgrade path.",
+                value_type="tristate_boolean",
+            ),
+            _option(
                 "context_window",
                 "Application target and inference context window.",
                 value_type="integer",
@@ -432,6 +442,14 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
         )
     if name == "remove":
         return ()
+    if name.startswith("application."):
+        return (
+            _argument(
+                "application",
+                resource_help["application"],
+                accepted=("codex",),
+            ),
+        )
     if name == "model.inspect":
         return (
             _argument(

@@ -49,6 +49,7 @@ class DaemonOperationRouter:
         model: OperationOwner,
         supervisor: OperationOwner,
         state: OperationalStateStore,
+        applications: OperationOwner | None = None,
         request_stop: Callable[[], None] | None = None,
         gateway_host: str = "127.0.0.1",
         gateway_port: int = 8766,
@@ -59,6 +60,7 @@ class DaemonOperationRouter:
             raise ValueError("physical operation drain timeout must be positive")
         self._runtime = runtime
         self._model = model
+        self._applications = applications
         self._supervisor = supervisor
         self._state = state
         self._request_stop = request_stop or (lambda: None)
@@ -89,6 +91,15 @@ class DaemonOperationRouter:
         if operation.startswith("model."):
             return self._guarded_physical(
                 self._model, operation, parameters, operation_id
+            )
+        if operation.startswith("application."):
+            if self._applications is None:
+                raise ApplicationError(
+                    "operation_unavailable",
+                    f"{operation} has no configured application owner",
+                )
+            return self._guarded_physical(
+                self._applications, operation, parameters, operation_id
             )
         if operation.startswith(("supervisor.", "gateway.", "service.")):
             value = (
