@@ -302,6 +302,24 @@ class CodexViteDiscoveryTests(unittest.TestCase):
             self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
             self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
 
+    def test_colon_delimited_sgr_metadata_resolves_the_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            command = (str(fixture.vp_bin / "vp"), "env", "which", "codex")
+            result = fixture.runner.results[command]
+            fixture.runner.results[command] = replace(
+                result,
+                stdout=result.stdout.replace(
+                    "@openai/codex",
+                    "\x1b[38:2::64:128:255m@openai/codex\x1b[0m",
+                ),
+            )
+
+            observed = fixture.discover()
+
+            self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
+            self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
+
     def test_duplicate_vite_owner_labels_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ViteFixture(Path(temporary), source="npm")

@@ -25,7 +25,7 @@ from mastic.domain.external_applications import InstallationObservation
 _MAX_METADATA_BYTES = 1_048_576
 _MAX_PACKAGE_FILES = 20_000
 _MAX_PACKAGE_BYTES = 768 * 1024 * 1024
-_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;:]*m")
 _ALLOWED_OUTPUT_CONTROLS = frozenset("\t\n\r")
 _CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _VITE_INSTALL_ID = re.compile(
