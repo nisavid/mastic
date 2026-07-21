@@ -416,8 +416,24 @@ class CodexViteDiscovery:
                 CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
             )
         runtime_bin = self._vp_home / "js_runtime" / "node" / node_version / "bin"
+        owner_bin = self._vp_home / "bin"
         try:
-            node_metadata = (runtime_bin / "node").stat()
+            owner_path_components = (
+                self._vp_home,
+                owner_bin,
+                self._vp_home / "js_runtime",
+                self._vp_home / "js_runtime" / "node",
+                self._vp_home / "js_runtime" / "node" / node_version,
+                runtime_bin,
+            )
+            if any(
+                not stat.S_ISDIR(component.lstat().st_mode)
+                for component in owner_path_components
+            ):
+                raise CodexViteDiscoveryError(
+                    CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+                )
+            node_metadata = (runtime_bin / "node").lstat()
         except OSError as error:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
@@ -431,11 +447,9 @@ class CodexViteDiscovery:
             )
         return (
             runtime_bin,
-            self._vp_home / "bin",
+            owner_bin,
             Path("/usr/bin"),
             Path("/bin"),
-            Path("/usr/sbin"),
-            Path("/sbin"),
         )
 
     def _vite_which(self, *, executable_path: Sequence[Path]) -> _ViteWhich:
@@ -553,9 +567,14 @@ class CodexViteDiscovery:
         return raw, str(version), executable
 
     def _runtime_version(self, active: Path, *, executable_path: Sequence[Path]) -> str:
-        result = self._runner.run(
-            (str(active), "--version"), executable_path=executable_path
-        )
+        try:
+            result = self._runner.run(
+                (str(active), "--version"), executable_path=executable_path
+            )
+        except CodexViteDiscoveryError as error:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            ) from error
         if result.returncode != 0:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
