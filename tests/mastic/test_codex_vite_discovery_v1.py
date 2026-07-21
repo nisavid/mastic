@@ -1,5 +1,6 @@
 import json
 import stat
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -15,6 +16,9 @@ from mastic.infrastructure.codex_vite_discovery import (
     CodexViteDiscoveryError,
     CommandResult,
 )
+from mastic.infrastructure.codex_owner_reconciliation import (
+    SubprocessDiscoveryRunner,
+)
 
 
 NOW = datetime(2026, 7, 20, 18, 30, tzinfo=UTC)
@@ -26,7 +30,12 @@ class FakeRunner:
         self.results = results
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, argv: Sequence[str]) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        executable_path: Sequence[Path] = (),
+    ) -> CommandResult:
         key = tuple(argv)
         self.calls.append(key)
         if key not in self.results:
@@ -46,8 +55,13 @@ class MutatingRunner(FakeRunner):
         self._mutate_on = mutate_on
         self._mutation = mutation
 
-    def run(self, argv: Sequence[str]) -> CommandResult:
-        result = super().run(argv)
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        executable_path: Sequence[Path] = (),
+    ) -> CommandResult:
+        result = super().run(argv, executable_path=executable_path)
         if tuple(argv) == self._mutate_on:
             self._mutation()
         return result
@@ -125,6 +139,9 @@ class ViteFixture:
 
         node_bin = self.vp_home / "js_runtime" / "node" / self.node_version / "bin"
         node_bin.mkdir(parents=True)
+        node = node_bin / "node"
+        node.write_text("#!/bin/sh\nexit 0\n")
+        node.chmod(0o755)
         node_codex = node_bin / "codex"
         node_codex.symlink_to(self.package_bin)
         self.active = self.vp_bin / "codex"
@@ -276,6 +293,70 @@ class CodexViteDiscoveryTests(unittest.TestCase):
             self.assertEqual(observed.reachable_invocations, (str(fixture.active),))
             self.assertTrue(observed.installed_artifact_digest.startswith("sha256:"))
             self.assertTrue(observed.owner_installation_identity.startswith("sha256:"))
+
+    def test_owner_runtime_path_reaches_vite_plus_env_node_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            node_bin = (
+                fixture.vp_home / "js_runtime" / "node" / fixture.node_version / "bin"
+            )
+            node = node_bin / "node"
+            doctor = fixture.command_results(source="npm")[
+                (str(fixture.active), "doctor", "--json")
+            ].stdout
+            node.write_text(
+                f"""#!{sys.executable}
+import sys
+
+if sys.argv[2:] == ["--version"]:
+    print("codex-cli {fixture.version}")
+elif sys.argv[2:] == ["doctor", "--json"]:
+    print({doctor!r})
+else:
+    raise SystemExit(2)
+"""
+            )
+            node.chmod(0o755)
+            ambient_bin = fixture.root / "ambient-bin"
+            ambient_bin.mkdir()
+            (fixture.vp_bin / "vp").write_text(
+                f"""#!{sys.executable}
+print("VITE+ - The Unified Toolchain for the Web")
+print()
+print({str(fixture.package_bin.resolve())!r})
+print("  Package:    @openai/codex")
+print("  Source:     npm")
+print("  Node:       {fixture.node_version}")
+"""
+            )
+            (fixture.vp_bin / "npm").write_text(
+                f"""#!{sys.executable}
+print({str(fixture.npm_root)!r})
+"""
+            )
+            runner = SubprocessDiscoveryRunner(
+                {
+                    "HOME": str(fixture.root),
+                    "PATH": str(ambient_bin),
+                }
+            )
+            discovery = CodexViteDiscovery(
+                vp_home=fixture.vp_home,
+                path=fixture.path,
+                runner=runner,
+                observed_at=lambda: NOW,
+                platform="darwin",
+                architecture="arm64",
+            )
+
+            observed = discovery.discover(
+                selected_installation_identity=("application-installation:codex:vite"),
+                selected_release_channel="stable",
+            )
+
+            self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
+            self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
+            self.assertEqual(observed.installed_release, "0.144.5")
 
     def test_ansi_styled_vite_metadata_resolves_the_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -550,6 +631,42 @@ class CodexViteDiscoveryTests(unittest.TestCase):
                 fixture.discover()
             self.assertEqual(
                 mismatch.exception.reason_code, "installed_version_mismatch"
+            )
+
+    def test_failed_runtime_probe_is_not_a_version_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary))
+            fixture.runner.results[(str(fixture.active), "--version")] = CommandResult(
+                127, "", "node unavailable"
+            )
+
+            with self.assertRaises(CodexViteDiscoveryError) as unavailable:
+                fixture.discover()
+
+            self.assertEqual(
+                unavailable.exception.reason_code, "owner_runtime_unavailable"
+            )
+
+    def test_missing_owner_runtime_does_not_fall_back_to_another_node(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary))
+            (
+                fixture.vp_home
+                / "js_runtime"
+                / "node"
+                / fixture.node_version
+                / "bin"
+                / "node"
+            ).unlink()
+            fallback = fixture.vp_bin / "node"
+            fallback.write_text("#!/bin/sh\nexit 0\n")
+            fallback.chmod(0o755)
+
+            with self.assertRaises(CodexViteDiscoveryError) as unavailable:
+                fixture.discover()
+
+            self.assertEqual(
+                unavailable.exception.reason_code, "owner_runtime_unavailable"
             )
 
     def test_malformed_doctor_contract_fails_closed(self) -> None:

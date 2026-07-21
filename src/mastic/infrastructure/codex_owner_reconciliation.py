@@ -1,4 +1,4 @@
-"""Production orchestration for authenticated Vite-owned Codex reconciliation."""
+"""Production orchestration for authenticated Vite+-managed Codex reconciliation."""
 
 from __future__ import annotations
 
@@ -167,7 +167,19 @@ class SubprocessDiscoveryRunner:
         }
         self._timeout = timeout_seconds
 
-    def run(self, argv: Sequence[str]) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        executable_path: Sequence[Path] = (),
+    ) -> CommandResult:
+        environment = dict(self._environment)
+        if executable_path:
+            if any(
+                not path.is_absolute() or "\0" in str(path) for path in executable_path
+            ):
+                raise CodexViteDiscoveryError("owner_command_environment_invalid")
+            environment["PATH"] = os.pathsep.join(map(str, executable_path))
         try:
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
                 result = subprocess.run(
@@ -176,7 +188,7 @@ class SubprocessDiscoveryRunner:
                     stdout=stdout,
                     stderr=stderr,
                     shell=False,
-                    env=self._environment,
+                    env=environment,
                     timeout=self._timeout,
                 )
                 rendered = tuple(
@@ -404,7 +416,7 @@ class LocalCodexOwnerReconciliation:
         except CodexViteDiscoveryError as error:
             raise ApplicationError(
                 "codex_owner_unresolved",
-                "A supported Vite-owned Codex installation could not be resolved.",
+                "A supported Vite+-managed Codex installation could not be resolved.",
                 details={"reason_code": error.reason_code},
             ) from error
         except Exception as error:
@@ -724,7 +736,7 @@ class DaemonCodexOwnerReconciliation:
 
 
 class SetupApplicationReconciliation:
-    """Keep setup on current Vite-owned Codex while delegating other supplies."""
+    """Keep setup on current Vite+-managed Codex while delegating other supplies."""
 
     def __init__(
         self,

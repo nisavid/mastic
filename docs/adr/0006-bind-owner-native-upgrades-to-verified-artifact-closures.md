@@ -36,8 +36,8 @@ before starting the owner command. The request carries the exact owner-native
 installation identity, owner runtime identity, stable state fingerprint,
 preview, action, and closure.
 
-The Installation Owner performs the mutation. A Vite-owned Codex installation
-uses the matching Vite owner path and exact observed Node runtime. Its command
+The Installation Owner performs the mutation. A Vite+-managed Codex installation
+uses the matching Vite+ owner path and exact observed Node runtime. Its command
 receives only a sanitized environment and the private reviewed archive. The
 first online installation may consult the official npm registry for dependency
 resolution, but completion requires the installed wrapper and platform payload

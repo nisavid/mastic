@@ -426,7 +426,7 @@ def _parameters(name: str) -> tuple[Parameter, ...]:
             ),
             _option(
                 "preserve_outdated_codex",
-                "Explicitly keep an existing outdated Vite-owned Codex release instead of completing the default current-release upgrade path.",
+                "Explicitly keep an existing outdated Vite+-managed Codex release instead of completing the default current-release upgrade path.",
                 value_type="tristate_boolean",
             ),
             _option(

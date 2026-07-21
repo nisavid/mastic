@@ -1,4 +1,4 @@
-"""Exact, artifact-verified mutation for Vite-owned Codex installations."""
+"""Exact, artifact-verified mutation for Vite+-managed Codex installations."""
 
 from __future__ import annotations
 
@@ -237,7 +237,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> bool:
 
 
 class CodexViteOwnerLifecycle:
-    """Preserve the discovered Vite owner and verify its installed byte closure."""
+    """Preserve the discovered Vite+ owner and verify its installed byte closure."""
 
     def __init__(
         self,
@@ -462,7 +462,7 @@ class CodexViteOwnerLifecycle:
             )
             action_kind = "vite-plus-global-install-verified-closure"
         else:
-            raise ValueError("unsupported Codex Vite owner")
+            raise ValueError("unsupported Codex Vite+ owner")
         return OwnerUpgradeAction(
             owner_identity=owner_identity,
             action_kind=action_kind,
@@ -477,7 +477,7 @@ class CodexViteOwnerLifecycle:
 def _node_runtime(value: str) -> str:
     match = _NODE_RUNTIME.fullmatch(value)
     if match is None:
-        raise ValueError("Codex Vite owner requires an exact Node runtime")
+        raise ValueError("Codex Vite+ owner requires an exact Node runtime")
     return match.group(1)
 
 
