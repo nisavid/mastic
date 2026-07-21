@@ -277,6 +277,31 @@ class CodexViteDiscoveryTests(unittest.TestCase):
             self.assertTrue(observed.installed_artifact_digest.startswith("sha256:"))
             self.assertTrue(observed.owner_installation_identity.startswith("sha256:"))
 
+    def test_ansi_styled_vite_metadata_resolves_the_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            command = (str(fixture.vp_bin / "vp"), "env", "which", "codex")
+            fixture.runner.results[command] = CommandResult(
+                0,
+                "\n".join(
+                    (
+                        "\x1b[1mVITE+ - The Unified Toolchain for the Web\x1b[0m",
+                        "",
+                        str(fixture.package_bin.resolve()),
+                        "  \x1b[2mPackage:  \x1b[0m  \x1b[94m@openai/codex\x1b[39m",
+                        "  \x1b[2mSource:   \x1b[0m  \x1b[94mnpm\x1b[39m",
+                        "  \x1b[2mNode:     \x1b[0m  \x1b[92m24.18.0\x1b[39m",
+                    )
+                )
+                + "\n",
+                "",
+            )
+
+            observed = fixture.discover()
+
+            self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
+            self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
+
     def test_vite_native_metadata_selects_vite_lifecycle_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ViteFixture(Path(temporary), source="vp")
