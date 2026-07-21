@@ -215,7 +215,12 @@ class SetupOperationPortTests(unittest.TestCase):
             {
                 "application.install": {
                     "applications": {
-                        "codex": {"version": "0.144.1", "provenance": "adopted"},
+                        "codex": {
+                            "version": "0.150.0",
+                            "release_intent": "current",
+                            "release_channel": "npm:latest",
+                            "provenance": "reconciled",
+                        },
                         "hindsight": {
                             "version": "0.8.4",
                             "provenance": "installed",

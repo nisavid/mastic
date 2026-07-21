@@ -25,6 +25,7 @@ from mastic.application.setup import (
     MutationExecutionError,
     MutationStep,
     NoValidatedFitError,
+    PHASE1_APPLICATION_REQUIREMENTS,
     PHASE1_APPLICATION_VERSIONS,
     PHASE1_PERFORMANCE_PROFILE_ID,
     PHASE1_PERFORMANCE_PROFILE_VERSION,
@@ -735,6 +736,11 @@ class SetupOperationPort:
                 "application.install",
                 {
                     "application_targets": selection.application_targets,
+                    **(
+                        {"preserve_outdated_codex": True}
+                        if selection.preserve_outdated_codex
+                        else {}
+                    ),
                     "offline": resolved.offline,
                     "confirmed": True,
                 },
@@ -912,6 +918,7 @@ def _selection(
                 "gateway_endpoint",
                 "application_targets",
                 "application_target_options",
+                "preserve_outdated_codex",
                 "context_window",
             }
         }
@@ -990,6 +997,9 @@ def _selection(
         ),
         application_targets=application_targets,
         application_target_options=application_target_options,  # type: ignore[arg-type]
+        preserve_outdated_codex=_optional_bool(
+            overrides.get("preserve_outdated_codex", baseline.preserve_outdated_codex)
+        ),
         context_window=_optional_int(
             overrides.get("context_window", baseline.context_window)
         ),
@@ -1015,6 +1025,7 @@ def _has_selection(parameters: Mapping[str, object]) -> bool:
             "gateway_endpoint",
             "application_targets",
             "application_target_options",
+            "preserve_outdated_codex",
             "context_window",
         }
         for key in parameters
@@ -1081,8 +1092,31 @@ def _validate_application_install_result(
         raise RuntimeError("application installer returned no exact application set")
     for target in selection.application_targets:
         item = installed.get(target)
-        expected_version = PHASE1_APPLICATION_VERSIONS[target]
-        if not isinstance(item, Mapping) or item.get("version") != expected_version:
+        expected_version = PHASE1_APPLICATION_REQUIREMENTS[target]
+        current_requirement = expected_version.startswith("current:")
+        current_matches = (
+            isinstance(item, Mapping)
+            and item.get("release_intent") == "current"
+            and item.get("release_channel") == expected_version.removeprefix("current:")
+            and isinstance(item.get("version"), str)
+            and bool(item.get("version"))
+        )
+        explicitly_preserved = (
+            target == "codex"
+            and selection.preserve_outdated_codex
+            and isinstance(item, Mapping)
+            and item.get("release_intent") == "exact"
+            and item.get("preserved_outdated") is True
+            and isinstance(item.get("version"), str)
+            and bool(item.get("version"))
+        )
+        if (
+            not isinstance(item, Mapping)
+            or (
+                current_requirement and not current_matches and not explicitly_preserved
+            )
+            or (not current_requirement and item.get("version") != expected_version)
+        ):
             raise RuntimeError(
                 f"application installer did not return exact {target} {expected_version}"
             )
@@ -2139,6 +2173,11 @@ def _selection_value(selection: ExactSetupSelection) -> Mapping[str, object]:
         "gateway_endpoint": selection.gateway_endpoint,
         "application_targets": selection.application_targets,
         "application_target_options": selection.application_target_options,
+        **(
+            {"preserve_outdated_codex": True}
+            if selection.preserve_outdated_codex
+            else {}
+        ),
         "context_window": selection.context_window,
     }
 
@@ -2166,6 +2205,12 @@ def _optional_int(value: object) -> int | None:
         raise ApplicationError(
             "invalid_parameter", "context_window must be a positive integer"
         )
+    return value
+
+
+def _optional_bool(value: object) -> bool:
+    if type(value) is not bool:
+        raise ApplicationError("invalid_parameter", "expected a boolean")
     return value
 
 

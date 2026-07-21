@@ -28,11 +28,14 @@ from mastic.domain.resources import ActivationPolicy, ResourceName
 
 
 # Bump whenever setup must recycle masticd to load a changed control/schema contract.
-SUPERVISOR_SETUP_PROTOCOL = 2
+SUPERVISOR_SETUP_PROTOCOL = 3
 PHASE1_PERFORMANCE_PROFILE_ID = "phase1-qwen36-optiq-apple-silicon"
 PHASE1_PERFORMANCE_PROFILE_VERSION = 1
 PHASE1_APPLICATION_VERSIONS = MappingProxyType(
     {"codex": "0.144.1", "hindsight": "0.8.4"}
+)
+PHASE1_APPLICATION_REQUIREMENTS = MappingProxyType(
+    {"codex": "current:npm:latest", "hindsight": "0.8.4"}
 )
 
 
@@ -134,6 +137,7 @@ class ExactSetupSelection:
     application_target_options: Mapping[str, Mapping[str, object]] = field(
         default_factory=dict
     )
+    preserve_outdated_codex: bool = False
     context_window: int | None = None
 
     def __post_init__(self) -> None:
@@ -187,6 +191,12 @@ class ExactSetupSelection:
             raise ValueError("activation must be manual or supervisor") from error
         if type(self.pinned) is not bool:
             raise ValueError("pinned must be boolean")
+        if type(self.preserve_outdated_codex) is not bool:
+            raise ValueError("preserve_outdated_codex must be boolean")
+        if self.preserve_outdated_codex and "codex" not in self.application_targets:
+            raise ValueError(
+                "preserve_outdated_codex requires the Codex Application Configuration Target"
+            )
         unknown_application_targets = sorted(
             set(self.application_targets) - {"codex", "hindsight"}
         )
@@ -958,8 +968,13 @@ class SetupResolver:
                 "Install or adopt exact official applications",
                 {
                     "application_targets": selection.application_targets,
+                    **(
+                        {"preserve_outdated_codex": True}
+                        if selection.preserve_outdated_codex
+                        else {}
+                    ),
                     "versions": {
-                        target: PHASE1_APPLICATION_VERSIONS[target]
+                        target: PHASE1_APPLICATION_REQUIREMENTS[target]
                         for target in selection.application_targets
                     },
                     "artifact_manifest": "application-targets-v1/manifest.json",

@@ -29,6 +29,7 @@ complete arguments and options of one operation.
 | `mastic model` | Searches, inspects, installs, verifies, and trusts exact Model Revisions. |
 | `mastic service` | Creates and controls named Inference Services. |
 | `mastic operation` | Inspects durable physical operations and their events. |
+| `mastic application` | Inspects and explicitly upgrades externally owned applications without changing their owner. |
 | `mastic application-target` | Configures, inspects, and runs bounded native Codex and Hindsight checks. |
 | `mastic config` | Inspects, edits, validates, diffs, and restores desired configuration. |
 
@@ -96,6 +97,29 @@ invalid.
 A standalone `application-target test` returns native exact-contract evidence
 on demand but does not advance the durable setup outcome. Confirmed setup owns
 that evidence through its resumable canary steps.
+
+## External Application commands
+
+| Command | Behavior |
+| --- | --- |
+| `mastic application inspect codex` | Discovers the active Vite-owned Codex installation, resolves the selected npm channel's current release, and reports whether an owner-native upgrade is available without mutating the host. |
+| `mastic application upgrade codex` | Prepares and retains exact release and artifact evidence, asks the authenticated local user to confirm it, and delegates only the authorized retained identity to `masticd`. |
+
+Codex upgrades preserve the detected Vite owner. MASTIC does not install a
+shadow executable, switch owners, or downgrade an installation through this
+path. A retained upgrade is rejected if its installation, owner, current
+resolution, artifact closure, action, Approval, Assessment, or current Plan no
+longer validates.
+
+When setup finds an outdated Vite-owned Codex installation, it stops before
+application configuration and directs the user to review `mastic application
+upgrade codex`. Rerun setup after that explicitly confirmed upgrade. Setup does
+not grant an exact owner upgrade from its channel-level preview.
+
+`mastic setup --preserve-outdated-codex` is the explicit alternative: it keeps
+the detected Vite-owned Codex release, records that exact preserved outcome in
+the setup evidence, and continues without making a currentness claim. It is not
+the default and does not authorize a downgrade.
 
 ## Exit behavior
 

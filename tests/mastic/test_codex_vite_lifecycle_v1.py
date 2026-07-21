@@ -19,6 +19,7 @@ from mastic.infrastructure.codex_vite_lifecycle import (
     OwnerUpgradeExecutionError,
     SubprocessExactCommandRunner,
 )
+from mastic.infrastructure.owner_command_tracker import OwnerCommandGroupActiveError
 
 
 NOW = datetime(2026, 7, 20, 21, 30, tzinfo=UTC)
@@ -371,6 +372,140 @@ class FakeProcess:
 
 
 class SubprocessExactCommandRunnerTests(unittest.TestCase):
+    def test_runner_persists_started_and_finished_process_identity(self):
+        process = FakeProcess()
+        tracker = unittest.mock.Mock()
+        marker = object()
+        tracker.record_prepared.return_value = marker
+        calls = []
+
+        def popen(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return process
+
+        returncode = SubprocessExactCommandRunner(
+            popen=popen,
+            tracker=tracker,
+        ).run(
+            ("/absolute/tool", "arg"),
+            cwd=Path("/private/tmp/stage"),
+            environment={"PATH": "/usr/bin"},
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(returncode, 0)
+        launcher_argv = calls[0][0]
+        self.assertNotEqual(launcher_argv, ("/absolute/tool", "arg"))
+        self.assertEqual(
+            launcher_argv[1:3],
+            ("-m", "mastic.infrastructure.owner_command_helper"),
+        )
+        tracker.record_prepared.assert_called_once_with(
+            process.pid,
+            ("/absolute/tool", "arg"),
+            cwd=Path("/private/tmp/stage"),
+            launcher_argv=launcher_argv,
+        )
+        tracker.record_finished.assert_called_once_with(marker)
+
+    def test_tracking_failure_terminates_spawned_process_group(self):
+        process = FakeProcess()
+        tracker = unittest.mock.Mock()
+        tracker.record_prepared.side_effect = OSError("state unavailable")
+
+        with (
+            patch("mastic.infrastructure.codex_vite_lifecycle.os.killpg") as killpg,
+            self.assertRaises(OwnerUpgradeExecutionError) as raised,
+        ):
+            SubprocessExactCommandRunner(
+                popen=lambda *_args, **_kwargs: process,
+                tracker=tracker,
+            ).run(
+                ("/absolute/tool",),
+                cwd=Path("/private/tmp/stage"),
+                environment={"PATH": "/usr/bin"},
+                timeout_seconds=30,
+            )
+
+        killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        self.assertEqual(process.wait_calls, [5.0])
+        self.assertEqual(raised.exception.reason_code, "owner_command_tracking_failed")
+
+    def test_exact_command_is_released_only_after_durable_prepare(self):
+        process = FakeProcess()
+        tracker = unittest.mock.Mock()
+        tracker.record_prepared.side_effect = lambda *_args, **_kwargs: (
+            events.append("prepared") or object()
+        )
+        events = []
+
+        def popen(*_args, **_kwargs):
+            events.append("helper_spawned")
+            return process
+
+        def write(_fd, payload):
+            events.append("released")
+            return len(payload)
+
+        with patch(
+            "mastic.infrastructure.codex_vite_lifecycle.os.write", side_effect=write
+        ):
+            SubprocessExactCommandRunner(popen=popen, tracker=tracker).run(
+                ("/absolute/tool",),
+                cwd=Path("/private/tmp/stage"),
+                environment={"PATH": "/usr/bin"},
+                timeout_seconds=30,
+            )
+
+        self.assertEqual(events, ["helper_spawned", "prepared", "released"])
+
+    def test_release_failure_terminates_prepared_helper(self):
+        process = FakeProcess()
+        tracker = unittest.mock.Mock()
+        tracker.record_prepared.return_value = object()
+
+        with (
+            patch("mastic.infrastructure.codex_vite_lifecycle.os.write") as write,
+            patch("mastic.infrastructure.codex_vite_lifecycle.os.killpg") as killpg,
+            self.assertRaises(OwnerUpgradeExecutionError) as raised,
+        ):
+            write.side_effect = BrokenPipeError
+            SubprocessExactCommandRunner(
+                popen=lambda *_args, **_kwargs: process,
+                tracker=tracker,
+            ).run(
+                ("/absolute/tool",),
+                cwd=Path("/private/tmp/stage"),
+                environment={"PATH": "/usr/bin"},
+                timeout_seconds=30,
+            )
+
+        killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        self.assertEqual(raised.exception.reason_code, "owner_command_tracking_failed")
+
+    def test_surviving_process_group_prevents_completion(self):
+        process = FakeProcess()
+        tracker = unittest.mock.Mock()
+        marker = object()
+        tracker.record_prepared.return_value = marker
+        tracker.record_finished.side_effect = OwnerCommandGroupActiveError(
+            "child remains live"
+        )
+
+        with self.assertRaises(OwnerUpgradeExecutionError) as raised:
+            SubprocessExactCommandRunner(
+                popen=lambda *_args, **_kwargs: process,
+                tracker=tracker,
+            ).run(
+                ("/absolute/tool",),
+                cwd=Path("/private/tmp/stage"),
+                environment={"PATH": "/usr/bin"},
+                timeout_seconds=30,
+            )
+
+        tracker.record_finished.assert_called_once_with(marker)
+        self.assertEqual(raised.exception.reason_code, "owner_command_tracking_failed")
+
     def test_runner_uses_no_shell_no_output_and_a_new_process_group(self):
         process = FakeProcess()
         calls = []
@@ -413,6 +548,31 @@ class SubprocessExactCommandRunnerTests(unittest.TestCase):
 
         killpg.assert_called_once_with(process.pid, signal.SIGKILL)
         self.assertEqual(process.wait_calls, [0.1, 5.0])
+        self.assertEqual(raised.exception.reason_code, "owner_command_timed_out")
+
+    def test_timeout_remains_primary_when_completion_tracking_fails(self):
+        process = FakeProcess(timeout=True)
+        tracker = unittest.mock.Mock()
+        marker = object()
+        tracker.record_prepared.return_value = marker
+        tracker.record_finished.side_effect = OSError("state unavailable")
+        runner = SubprocessExactCommandRunner(
+            popen=lambda *_args, **_kwargs: process,
+            tracker=tracker,
+        )
+
+        with (
+            patch("mastic.infrastructure.codex_vite_lifecycle.os.killpg"),
+            self.assertRaises(OwnerUpgradeExecutionError) as raised,
+        ):
+            runner.run(
+                ("/absolute/tool",),
+                cwd=Path("/private/tmp/stage"),
+                environment={"PATH": "/usr/bin"},
+                timeout_seconds=0.1,
+            )
+
+        tracker.record_finished.assert_called_once_with(marker)
         self.assertEqual(raised.exception.reason_code, "owner_command_timed_out")
 
 

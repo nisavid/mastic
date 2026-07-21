@@ -417,6 +417,29 @@ class OperationPortTests(unittest.TestCase):
         self.assertEqual(result["operation_id"], "durable-op-9")
         self.assertEqual(result["control_operation_id"], "op-1")
 
+    def test_remote_port_propagates_an_explicit_durable_operation_identity(
+        self,
+    ) -> None:
+        class IdentityClient(FakeControlClient):
+            def execute(self, operation, parameters=None, *, operation_id=None):
+                self.calls.append(
+                    ("execute", operation, dict(parameters or {}), operation_id)
+                )
+                return SimpleNamespace(
+                    result={"state": "current"},
+                    operation_id=operation_id,
+                    progress=(),
+                )
+
+        client = IdentityClient()
+        result = RemoteOperationPort(client).execute(
+            "application.upgrade",
+            {"application": "codex", "operation_id": "planning-record-17"},
+        )
+
+        self.assertEqual(client.calls[-1][-1], "planning-record-17")
+        self.assertEqual(result["control_operation_id"], "planning-record-17")
+
     def test_remote_errors_are_stable_application_errors(self) -> None:
         client = FakeControlClient()
         client.error = SupervisorUnavailableError(

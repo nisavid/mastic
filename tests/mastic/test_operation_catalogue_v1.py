@@ -73,6 +73,8 @@ class OperationCatalogueTests(unittest.TestCase):
             "service.check",
             "operation.list",
             "operation.inspect",
+            "application.inspect",
+            "application.upgrade",
             "application-target.list",
             "application-target.inspect",
             "application-target.configure",
@@ -129,6 +131,20 @@ class OperationCatalogueTests(unittest.TestCase):
         self.assertIn("exact revision", install.summary.lower())
         self.assertTrue(install.examples)
         self.assertIn("json", install.output_modes)
+
+        upgrade = self.catalogue["application.upgrade"]
+        self.assertTrue(upgrade.confirmation)
+        self.assertIs(upgrade.supervisor, SupervisorRequirement.REQUIRED)
+        self.assertEqual(upgrade.parameters[0].name, "application")
+        self.assertEqual(upgrade.parameters[0].accepted, ("codex",))
+
+    def test_application_inspection_is_read_only_and_owner_generic(self) -> None:
+        inspection = self.catalogue["application.inspect"]
+
+        self.assertIs(inspection.kind, OperationKind.QUERY)
+        self.assertIs(inspection.supervisor, SupervisorRequirement.NEVER_START)
+        self.assertEqual(inspection.parameters[0].name, "application")
+        self.assertEqual(inspection.parameters[0].accepted, ("codex",))
 
     def test_summaries_explain_user_visible_effects(self) -> None:
         self.assertEqual(

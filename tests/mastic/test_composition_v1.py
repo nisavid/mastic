@@ -55,6 +55,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=port,
                 setup=port,
+                applications=port,
                 application_targets=port,
             )
 
@@ -78,6 +79,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=port,
                 setup=port,
+                applications=port,
                 application_targets=port,
                 logs=logs,
                 metrics=metrics,
@@ -102,6 +104,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=port,
                 setup=port,
+                applications=port,
                 application_targets=port,
             )
 
@@ -133,6 +136,7 @@ class CompositionTests(unittest.TestCase):
                 model_supply=_ModelSupply(),
                 supervisor=_Port(),
                 setup=_Port(),
+                applications=_Port(),
                 application_targets=_Port(),
             )
 

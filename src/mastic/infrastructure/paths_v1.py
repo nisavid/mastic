@@ -38,6 +38,10 @@ class MasticPaths:
         return self.state_dir / "planning-grant.key"
 
     @property
+    def owner_upgrade_stage_dir(self) -> Path:
+        return self.data_dir / "owner-upgrade-stage"
+
+    @property
     def runtime_dir(self) -> Path:
         return self.data_dir / "runtimes"
 
@@ -47,6 +51,7 @@ class MasticPaths:
             self.state_dir,
             self.data_dir,
             self.runtime_dir,
+            self.owner_upgrade_stage_dir,
             self.log_dir,
         ):
             _prepare_private_directory(path)

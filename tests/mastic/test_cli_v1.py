@@ -74,6 +74,7 @@ class CliV1Tests(unittest.TestCase):
         self.assertIn("runtime", result.output)
         self.assertIn("model", result.output)
         self.assertIn("service", result.output)
+        self.assertIn("application", result.output)
         self.assertIn("application-target", result.output)
         self.assertNotIn("client", result.output)
 
@@ -123,6 +124,26 @@ class CliV1Tests(unittest.TestCase):
             "application-target.list",
         )
         self.assertNotEqual(prohibited.exit_code, 0)
+
+    def test_application_operations_dispatch_the_generic_application_identity(
+        self,
+    ) -> None:
+        inspected = self.runner.invoke(
+            self.app, ["application", "inspect", "codex", "--json"]
+        )
+        upgraded = self.runner.invoke(
+            self.app, ["application", "upgrade", "codex", "--yes", "--json"]
+        )
+
+        self.assertEqual(inspected.exit_code, 0, inspected.output)
+        self.assertEqual(upgraded.exit_code, 0, upgraded.output)
+        self.assertEqual(self.dispatcher.requests[-2].name, "application.inspect")
+        self.assertEqual(
+            dict(self.dispatcher.requests[-2].parameters), {"application": "codex"}
+        )
+        self.assertEqual(self.dispatcher.previews[-1].name, "application.upgrade")
+        self.assertEqual(self.dispatcher.requests[-1].name, "application.upgrade")
+        self.assertTrue(self.dispatcher.requests[-1].parameters["confirmed"])
 
     def test_every_catalogue_operation_has_a_cli_help_surface(self) -> None:
         for name in build_operation_catalogue():

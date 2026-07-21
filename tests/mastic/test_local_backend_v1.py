@@ -137,6 +137,15 @@ class _SetupPort(_Port):
         return {"state": "complete", "removed": True}
 
 
+class _ApplicationsPort(_Port):
+    def preview(self, operation, parameters):
+        return {
+            "application": parameters["application"],
+            "state": "upgrade_prepared",
+            "preview_fingerprint": "sha256:" + "a" * 64,
+        }
+
+
 class _Telemetry:
     def __init__(self, items=()):
         self.calls = []
@@ -250,6 +259,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             logs=ports.get("logs", _NeverCalled()),
             metrics=ports.get("metrics", _NeverCalled()),
             setup=ports.get("setup", _NeverCalled()),
+            applications=ports.get("applications", _NeverCalled()),
             application_targets=ports.get("application_targets", _NeverCalled()),
             config_path=config_path,
             model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
@@ -274,6 +284,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_NeverCalled(),
                 metrics=_NeverCalled(),
                 setup=_NeverCalled(),
+                applications=_NeverCalled(),
                 application_targets=_NeverCalled(),
                 config_path=config_path,
             )
@@ -292,6 +303,59 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertEqual(result["readiness"], "pending")
             self.assertEqual(result["application_target_readiness"], {})
             self.assertIn("mastic supervisor start", result["next_actions"])
+
+    def test_application_inspection_uses_injected_owner_without_supervisor(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            applications = _Port(
+                {
+                    "application": "codex",
+                    "installed_version": "0.144.5",
+                    "current_version": "0.145.0",
+                }
+            )
+            backend, _state = self._backend(
+                Path(directory), config=_EMPTY_CONFIG, applications=applications
+            )
+
+            prepared = backend.prepare(
+                OperationRequest("application.inspect", {"application": "codex"})
+            )
+            result = prepared.execute()
+
+            self.assertFalse(prepared.requires_supervisor)
+            self.assertEqual(
+                applications.calls,
+                [("application.inspect", {"application": "codex"})],
+            )
+            self.assertEqual(result["resource"]["current_version"], "0.145.0")
+
+    def test_application_upgrade_is_confirmation_bound_and_daemon_owned(self) -> None:
+        with TemporaryDirectory() as directory:
+            applications = _Port({"application": "codex", "state": "current"})
+            backend, _state = self._backend(
+                Path(directory), config=_EMPTY_CONFIG, applications=applications
+            )
+            request = OperationRequest("application.upgrade", {"application": "codex"})
+
+            preview = backend.prepare(request)
+            fingerprint = preview.events[-1]["preview_fingerprint"]
+            prepared = backend.prepare(
+                OperationRequest(
+                    "application.upgrade",
+                    {
+                        "application": "codex",
+                        "confirmed": True,
+                        "preview_fingerprint": fingerprint,
+                    },
+                )
+            )
+            result = prepared.execute()
+
+            self.assertTrue(prepared.requires_supervisor)
+            self.assertEqual(applications.calls[0][0], "application.upgrade")
+            self.assertEqual(result["resource"]["state"], "current")
 
     def test_status_and_check_share_durable_setup_outcome(self) -> None:
         with TemporaryDirectory() as directory:
@@ -482,6 +546,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_NeverCalled(),
                 metrics=_NeverCalled(),
                 setup=_NeverCalled(),
+                applications=_NeverCalled(),
                 application_targets=_NeverCalled(),
                 config_path=config_path,
             )
@@ -1523,6 +1588,7 @@ class LocalOperationBackendTests(unittest.TestCase):
                 logs=_Telemetry(),
                 metrics=_Telemetry(),
                 setup=_Port(),
+                applications=_Port(),
                 application_targets=_Port(),
             )
             state.put_operation({"id": "job-1", "state": "running"})
@@ -1561,12 +1627,14 @@ class LocalOperationBackendTests(unittest.TestCase):
             "service.stop",
             "service.restart",
             "service.remove",
+            "application.upgrade",
         }
         with TemporaryDirectory() as directory:
             backend, state = self._backend(
                 Path(directory),
                 model_supply=_ModelSupply(),
                 setup=_SetupPort(),
+                applications=_ApplicationsPort(),
             )
             state.put_operation({"id": "job-1", "state": "running"})
             for name, operation in build_operation_catalogue().items():
@@ -1634,6 +1702,8 @@ class LocalOperationBackendTests(unittest.TestCase):
             return {"resource": "coding"}
         if name.startswith("operation."):
             return {"resource": "job-1"}
+        if name.startswith("application."):
+            return {"application": "codex"}
         if name.startswith("application-target."):
             return {"application_target": "codex"}
         if name == "config.diff":

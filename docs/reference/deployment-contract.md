@@ -153,9 +153,18 @@ and is never exposed on a network interface.
 Authenticated local Plan Approval receipts use `planning-grant.key` in the
 same effective state directory. MASTIC atomically publishes that key as an
 exact 32-byte, user-owned, regular file with mode `0600` under a user-owned
-directory with mode `0700`. Daemon composition receives the receipt issuer;
-the Planning Record Repository receives only the verifier and revalidates every
-stored Approval when it is read.
+directory with mode `0700`. Local command composition receives the receipt
+issuer for explicit user confirmation. Daemon composition receives only the
+verifier and revalidates every stored Approval when it is read; `masticd`
+cannot mint an Approval.
+
+Prepared owner reconciliations retain their exact observation, current
+resolution, verified artifact closure, owner action, preview, and Planning
+Record identities in product state. `masticd` rehydrates that retained record,
+revalidates its authenticated current Plan, rediscovers the selected owner, and
+re-resolves the selected channel immediately before mutation. The retained
+closure also lets an interrupted retry prove an already-installed target
+without repeating the owner command.
 
 The first authoritative Planning Record consumer admits only evidence-free,
 partial Plan Assessments with exact unobserved target and summary projections.

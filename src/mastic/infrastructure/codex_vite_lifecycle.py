@@ -6,6 +6,8 @@ import os
 import re
 import signal
 import subprocess
+import sys
+import json
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -24,6 +26,7 @@ from mastic.domain.external_applications import (
     ExternalApplicationInstallation,
     InstallationObservation,
 )
+from mastic.infrastructure.owner_command_tracker import OwnerCommandTracker
 
 
 _NODE_RUNTIME = re.compile(r"node:([0-9]+\.[0-9]+\.[0-9]+)\Z")
@@ -44,6 +47,7 @@ _ALLOWED_ENVIRONMENT = frozenset(
         "XDG_CACHE_HOME",
     }
 )
+_MAX_OWNER_COMMAND_CONTROL_BYTES = 64 * 1024
 
 
 class OwnerUpgradeExecutionError(OwnerUpgradeCommandError):
@@ -88,8 +92,10 @@ class SubprocessExactCommandRunner:
         self,
         *,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        tracker: OwnerCommandTracker | None = None,
     ) -> None:
         self._popen = popen
+        self._tracker = tracker
 
     def run(
         self,
@@ -109,36 +115,125 @@ class SubprocessExactCommandRunner:
             or timeout_seconds <= 0
         ):
             raise ValueError("owner command timeout must be positive")
-        try:
-            process = self._popen(
+        marker = None
+        process: subprocess.Popen[bytes] | None = None
+        if self._tracker is None:
+            process = self._spawn(
                 exact_argv,
+                cwd=cwd,
+                environment=exact_environment,
+            )
+        else:
+            release_payload = _owner_command_control_payload(exact_argv)
+            control_read, control_write = os.pipe()
+            launcher_argv = (
+                sys.executable,
+                "-m",
+                "mastic.infrastructure.owner_command_helper",
+                str(control_read),
+            )
+            try:
+                process = self._spawn(
+                    launcher_argv,
+                    cwd=cwd,
+                    environment=exact_environment,
+                    pass_fds=(control_read,),
+                )
+                marker = self._tracker.record_prepared(
+                    process.pid,
+                    exact_argv,
+                    cwd=cwd,
+                    launcher_argv=launcher_argv,
+                )
+                _release_owner_command(control_write, release_payload)
+            except OwnerUpgradeExecutionError:
+                raise
+            except Exception as error:
+                if process is not None:
+                    _terminate_process_group(process)
+                raise OwnerUpgradeExecutionError(
+                    "owner_command_tracking_failed"
+                ) from error
+            finally:
+                os.close(control_read)
+                os.close(control_write)
+        if process is None:
+            raise OwnerUpgradeExecutionError("owner_command_unavailable")
+        try:
+            returncode = int(process.wait(timeout=float(timeout_seconds)))
+        except subprocess.TimeoutExpired as error:
+            reaped = _terminate_process_group(process)
+            if reaped and marker is not None:
+                try:
+                    self._tracker.record_finished(marker)
+                except Exception:
+                    # The timeout remains authoritative; retained tracking state
+                    # makes the next attempt re-observe convergence fail-closed.
+                    pass
+            raise OwnerUpgradeExecutionError("owner_command_timed_out") from error
+        except OSError as error:
+            raise OwnerUpgradeExecutionError("owner_command_unavailable") from error
+        if marker is not None:
+            try:
+                self._tracker.record_finished(marker)
+            except Exception as error:
+                raise OwnerUpgradeExecutionError(
+                    "owner_command_tracking_failed"
+                ) from error
+        return returncode
+
+    def _spawn(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.Popen[bytes]:
+        try:
+            return self._popen(
+                argv,
                 shell=False,
                 cwd=cwd,
-                env=exact_environment,
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+                pass_fds=pass_fds,
             )
         except OSError as error:
             raise OwnerUpgradeExecutionError("owner_command_unavailable") from error
-        try:
-            return int(process.wait(timeout=float(timeout_seconds)))
-        except subprocess.TimeoutExpired as error:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                # The timed-out process group may have exited before termination.
-                pass
-            try:
-                process.wait(timeout=5.0)
-            except (OSError, subprocess.TimeoutExpired):
-                # Preserve the original timeout when post-kill reaping cannot finish.
-                pass
-            raise OwnerUpgradeExecutionError("owner_command_timed_out") from error
-        except OSError as error:
-            raise OwnerUpgradeExecutionError("owner_command_unavailable") from error
+
+
+def _owner_command_control_payload(argv: Sequence[str]) -> bytes:
+    payload = json.dumps(tuple(argv), separators=(",", ":")).encode("utf-8")
+    if len(payload) > _MAX_OWNER_COMMAND_CONTROL_BYTES:
+        raise ValueError("owner command release payload exceeds configured bound")
+    return payload
+
+
+def _release_owner_command(control_fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(control_fd, payload[offset:])
+        if written <= 0:
+            raise OSError("owner command release pipe closed")
+        offset += written
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        # The process group may have exited before termination.
+        pass
+    try:
+        process.wait(timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 class CodexViteOwnerLifecycle:
