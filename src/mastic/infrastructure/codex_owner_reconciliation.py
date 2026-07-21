@@ -176,7 +176,8 @@ class SubprocessDiscoveryRunner:
         environment = dict(self._environment)
         if executable_path:
             if any(
-                not path.is_absolute() or "\0" in str(path) for path in executable_path
+                not path.is_absolute() or "\0" in str(path) or os.pathsep in str(path)
+                for path in executable_path
             ):
                 raise CodexViteDiscoveryError("owner_command_environment_invalid")
             environment["PATH"] = os.pathsep.join(map(str, executable_path))
