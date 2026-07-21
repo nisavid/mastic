@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -319,6 +320,12 @@ else:
             node.chmod(0o755)
             ambient_bin = fixture.root / "ambient-bin"
             ambient_bin.mkdir()
+            ambient_node = ambient_bin / "node"
+            ambient_node.write_text(
+                f"#!{sys.executable}\nprint('codex-cli 0.0.0')\n",
+                encoding="utf-8",
+            )
+            ambient_node.chmod(0o755)
             (fixture.vp_bin / "vp").write_text(
                 f"""#!{sys.executable}
 print("VITE+ - The Unified Toolchain for the Web")
@@ -357,6 +364,20 @@ print({str(fixture.npm_root)!r})
             self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
             self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
             self.assertEqual(observed.installed_release, "0.144.5")
+
+    def test_owner_runtime_path_rejects_path_separator_in_an_entry(self) -> None:
+        runner = SubprocessDiscoveryRunner({"HOME": tempfile.gettempdir()})
+        invalid_entry = Path(tempfile.gettempdir()) / (
+            f"owner-runtime{os.pathsep}injected"
+        )
+
+        with self.assertRaisesRegex(
+            CodexViteDiscoveryError, "owner_command_environment_invalid"
+        ):
+            runner.run(
+                ("/usr/bin/true",),
+                executable_path=(invalid_entry,),
+            )
 
     def test_ansi_styled_vite_metadata_resolves_the_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
