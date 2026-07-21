@@ -128,6 +128,33 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 completed.stderr,
             )
 
+    def test_empty_artifact_directory_fails_before_network_access(self) -> None:
+        with self._artifact() as (root, artifact, _release):
+            tools = root / "tools"
+            tools.mkdir()
+            curl_log = root / "curl.log"
+            self._host_tools(tools, machine="arm64", version="15.7")
+            self._tool(
+                tools / "curl",
+                f"print -r -- invoked >{curl_log}\nexit 99",
+            )
+
+            completed = self._run(
+                artifact,
+                tools,
+                "--artifact-dir",
+                "",
+                "--yes",
+                home=root / "home",
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "--artifact-dir requires a non-empty value",
+                completed.stderr,
+            )
+            self.assertFalse(curl_log.exists())
+
     def test_dry_run_validates_supported_host_without_network_or_mutation(self) -> None:
         with self._artifact() as (root, artifact, _release):
             tools = root / "tools"

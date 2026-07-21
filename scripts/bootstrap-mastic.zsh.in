@@ -317,7 +317,10 @@ main() {
       -n|--dry-run) dry_run=1 ;;
       -y|--yes) accept_defaults=1 ;;
       --artifact-dir)
-        (( $# >= 2 )) || fail '--artifact-dir requires a value'
+        if (( $# < 2 )) || [[ -z $2 ]]; then
+          fail '--artifact-dir requires a non-empty value'
+          return 1
+        fi
         artifact_dir=$2
         shift
         ;;
