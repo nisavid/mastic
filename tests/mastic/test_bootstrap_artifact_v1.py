@@ -341,6 +341,76 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(cached_targets.parent.stat().st_mode), 0o700)
             self.assertEqual(list(temporary.iterdir()), [])
 
+    def test_verified_closure_quarantine_is_removed_without_erasing_other_metadata(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            quarantine = b"0281;6a5fa391;;"
+            preserved = b"\x00preserve-me\n"
+            closure_root = root / "closure"
+            manifest = closure_root / "application-targets-v1/manifest.json"
+            nested_artifact = (
+                closure_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
+            )
+            self._set_xattr(manifest, "com.apple.quarantine", quarantine)
+            self._set_xattr(nested_artifact, "com.apple.quarantine", quarantine)
+            self._set_xattr(manifest, "io.nisavid.mastic.test", preserved)
+            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+            subprocess.run(
+                ["/usr/bin/tar", "-czf", str(closure), "-C", str(closure_root), "."],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+            subprocess.run(
+                [
+                    "zsh",
+                    str(BUILDER),
+                    str(release / "mastic-0.1.0-py3-none-any.whl"),
+                    str(closure),
+                    str(artifact),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+            self._set_xattr(closure, "com.apple.quarantine", quarantine)
+            closure_bytes = closure.read_bytes()
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+
+            completed = self._run(
+                artifact, tools, "--artifact-dir", str(release), home=home
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            persisted_manifest = (
+                home
+                / ".local/share/mastic/bootstrap-artifacts/application-targets-v1/manifest.json"
+            )
+            self.assertIsNone(
+                self._get_xattr(persisted_manifest, "com.apple.quarantine")
+            )
+            self.assertEqual(
+                self._get_xattr(persisted_manifest, "io.nisavid.mastic.test"),
+                preserved,
+            )
+            persisted_artifact = (
+                home
+                / ".local/share/mastic/bootstrap-artifacts/application-targets-v1/artifacts/hindsight-darwin-arm64"
+            )
+            self.assertIsNone(
+                self._get_xattr(persisted_artifact, "com.apple.quarantine")
+            )
+            self.assertEqual(closure.read_bytes(), closure_bytes)
+            self.assertEqual(
+                self._get_xattr(closure, "com.apple.quarantine"), quarantine
+            )
+
     def test_install_honors_explicit_mastic_data_directory(self) -> None:
         with self._artifact() as (root, artifact, release):
             tools = root / "tools"
@@ -604,6 +674,24 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
     def _tool(self, path: Path, body: str) -> None:
         path.write_text(f"#!/usr/bin/env zsh\n{body}\n", encoding="utf-8")
         path.chmod(0o755)
+
+    def _set_xattr(self, path: Path, name: str, value: bytes) -> None:
+        subprocess.run(
+            ["/usr/bin/xattr", "-w", "-x", name, value.hex(), str(path)],
+            check=True,
+            capture_output=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+
+    def _get_xattr(self, path: Path, name: str) -> bytes | None:
+        completed = subprocess.run(
+            ["/usr/bin/xattr", "-p", "-x", name, str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT,
+        )
+        return bytes.fromhex(completed.stdout) if completed.returncode == 0 else None
 
 
 class _ArtifactFixture:

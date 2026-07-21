@@ -123,6 +123,14 @@ verify_closure() {
   [[ -x "$root/python/bin/python3.11" ]] || fail 'verified closure Python 3.11 is not executable'
 }
 
+clear_verified_quarantine() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local root=$1 xattr=/usr/bin/xattr
+  [[ -x $xattr ]] || fail 'xattr is required to trust the verified release closure.'
+  "$xattr" -dr com.apple.quarantine "$root" || fail 'could not clear quarantine from the verified release closure'
+}
+
 validate_archive_members() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
@@ -383,6 +391,7 @@ main() {
   mkdir "$root"
   tar -xzf "$closure" -C "$root"
   verify_closure "$root"
+  clear_verified_quarantine "$root"
 
   uv_source="$root/uv"
   uv_destination="$mastic_data_dir/bootstrap-uv"

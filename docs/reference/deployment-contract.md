@@ -24,6 +24,12 @@ with the exact closure for offline installation. Do not install separate MLX
 runtimes globally for mastic: `mastic runtime install` owns isolated exact Runtime
 Installations.
 
+After the closure digest and its complete internal manifest pass, bootstrap
+removes only `com.apple.quarantine` from its private extraction tree before it
+executes bundled tools. This permits verified offline artifacts transferred by
+AirDrop to run without changing quarantine metadata in the caller-owned artifact
+directory or removing unrelated extended attributes.
+
 ## LaunchAgent
 
 - Label: `io.nisavid.masticd`
