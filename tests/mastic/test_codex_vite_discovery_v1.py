@@ -29,6 +29,7 @@ INSTALL_ID = "#123e4567-e89b-42d3-a456-426614174000"
 class FakeRunner:
     def __init__(self, results: dict[tuple[str, ...], CommandResult]) -> None:
         self.results = results
+        self.errors: dict[tuple[str, ...], CodexViteDiscoveryError] = {}
         self.calls: list[tuple[str, ...]] = []
 
     def run(
@@ -39,6 +40,8 @@ class FakeRunner:
     ) -> CommandResult:
         key = tuple(argv)
         self.calls.append(key)
+        if key in self.errors:
+            raise self.errors[key]
         if key not in self.results:
             raise AssertionError(f"unexpected command: {key}")
         return self.results[key]
@@ -309,7 +312,16 @@ class CodexViteDiscoveryTests(unittest.TestCase):
                 f"""#!{sys.executable}
 import sys
 
-if sys.argv[2:] == ["--version"]:
+if sys.argv[2:] == ["env", "which", "codex"]:
+    print("VITE+ - The Unified Toolchain for the Web")
+    print()
+    print({str(fixture.package_bin.resolve())!r})
+    print("  Package:    @openai/codex")
+    print("  Source:     npm")
+    print("  Node:       {fixture.node_version}")
+elif sys.argv[2:] == ["root", "-g"]:
+    print({str(fixture.npm_root)!r})
+elif sys.argv[2:] == ["--version"]:
     print("codex-cli {fixture.version}")
 elif sys.argv[2:] == ["doctor", "--json"]:
     print({doctor!r})
@@ -326,21 +338,8 @@ else:
                 encoding="utf-8",
             )
             ambient_node.chmod(0o755)
-            (fixture.vp_bin / "vp").write_text(
-                f"""#!{sys.executable}
-print("VITE+ - The Unified Toolchain for the Web")
-print()
-print({str(fixture.package_bin.resolve())!r})
-print("  Package:    @openai/codex")
-print("  Source:     npm")
-print("  Node:       {fixture.node_version}")
-"""
-            )
-            (fixture.vp_bin / "npm").write_text(
-                f"""#!{sys.executable}
-print({str(fixture.npm_root)!r})
-"""
-            )
+            (fixture.vp_bin / "vp").write_text("#!/usr/bin/env node\n")
+            (fixture.vp_bin / "npm").write_text("#!/usr/bin/env node\n")
             runner = SubprocessDiscoveryRunner(
                 {
                     "HOME": str(fixture.root),
@@ -378,6 +377,55 @@ print({str(fixture.npm_root)!r})
                 ("/usr/bin/true",),
                 executable_path=(invalid_entry,),
             )
+
+    def test_owner_runtime_rejects_node_symlink_to_external_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            node = (
+                fixture.vp_home
+                / "js_runtime"
+                / "node"
+                / fixture.node_version
+                / "bin"
+                / "node"
+            )
+            external_node = fixture.root / "external-node"
+            external_node.write_text("#!/bin/sh\nexit 0\n")
+            external_node.chmod(0o755)
+            node.unlink()
+            node.symlink_to(external_node)
+
+            with self.assertRaisesRegex(
+                CodexViteDiscoveryError, "owner_runtime_unavailable"
+            ):
+                fixture.discover()
+
+    def test_owner_runtime_rejects_symlinked_path_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            runtime_bin = (
+                fixture.vp_home / "js_runtime" / "node" / fixture.node_version / "bin"
+            )
+            external_bin = fixture.root / "external-bin"
+            runtime_bin.rename(external_bin)
+            runtime_bin.symlink_to(external_bin, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                CodexViteDiscoveryError, "owner_runtime_unavailable"
+            ):
+                fixture.discover()
+
+    def test_owner_runtime_rejects_symlinked_vite_plus_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            external_bin = fixture.root / "external-vite-plus-bin"
+            fixture.vp_bin.rename(external_bin)
+            fixture.vp_bin.symlink_to(external_bin, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                CodexViteDiscoveryError, "owner_runtime_unavailable"
+            ):
+                fixture.discover()
 
     def test_ansi_styled_vite_metadata_resolves_the_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -659,6 +707,20 @@ print({str(fixture.npm_root)!r})
             fixture = ViteFixture(Path(temporary))
             fixture.runner.results[(str(fixture.active), "--version")] = CommandResult(
                 127, "", "node unavailable"
+            )
+
+            with self.assertRaises(CodexViteDiscoveryError) as unavailable:
+                fixture.discover()
+
+            self.assertEqual(
+                unavailable.exception.reason_code, "owner_runtime_unavailable"
+            )
+
+    def test_runtime_runner_failure_is_not_a_version_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary))
+            fixture.runner.errors[(str(fixture.active), "--version")] = (
+                CodexViteDiscoveryError("owner_command_unavailable")
             )
 
             with self.assertRaises(CodexViteDiscoveryError) as unavailable:
