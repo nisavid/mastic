@@ -41,7 +41,12 @@ class CommandResult:
 
 
 class CommandRunner(Protocol):
-    def run(self, argv: Sequence[str]) -> CommandResult: ...
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        executable_path: Sequence[Path] = (),
+    ) -> CommandResult: ...
 
 
 class CodexViteDiscoveryFailure(StrEnum):
@@ -50,6 +55,7 @@ class CodexViteDiscoveryFailure(StrEnum):
     OWNER_METADATA_INVALID = "owner_metadata_invalid"
     PACKAGE_IDENTITY_MISMATCH = "package_identity_mismatch"
     INSTALLED_VERSION_MISMATCH = "installed_version_mismatch"
+    OWNER_RUNTIME_UNAVAILABLE = "owner_runtime_unavailable"
     ACTIVE_INVOCATION_MISMATCH = "active_invocation_mismatch"
     REACHABLE_INVOCATION_CONFLICT = "reachable_invocation_conflict"
     OWNER_UPDATE_TARGET_MISMATCH = "owner_update_target_mismatch"
@@ -92,7 +98,7 @@ class CodexViteDiscovery:
         architecture: str,
     ) -> None:
         if platform != "darwin" or architecture != "arm64":
-            raise ValueError("Codex Vite discovery supports darwin/arm64")
+            raise ValueError("Codex Vite+ discovery supports darwin/arm64")
         self._vp_home = Path(vp_home)
         self._path = tuple(Path(item) for item in path)
         self._runner = runner
@@ -123,7 +129,8 @@ class CodexViteDiscovery:
             )
 
         initial_owner = self._load_owner_state()
-        vite_which = self._vite_which()
+        owner_executable_path = self._owner_executable_path(initial_owner.node_version)
+        vite_which = self._vite_which(executable_path=owner_executable_path)
         if vite_which.executable != active_target:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.ACTIVE_INVOCATION_MISMATCH
@@ -136,7 +143,7 @@ class CodexViteDiscovery:
         if initial_owner.source == "npm":
             if vite_which.source != "npm" or vite_which.package != "@openai/codex":
                 raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
-            package_root = self._npm_package_root()
+            package_root = self._npm_package_root(executable_path=owner_executable_path)
             owner_identity = "vite-plus/npm-global"
         else:
             if (
@@ -172,13 +179,19 @@ class CodexViteDiscovery:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.INSTALLED_VERSION_MISMATCH
             )
-        runtime_version = self._runtime_version(active_path)
+        runtime_version = self._runtime_version(
+            active_path, executable_path=owner_executable_path
+        )
         if runtime_version != package_version:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.INSTALLED_VERSION_MISMATCH
             )
         self._validate_doctor(
-            active_path, package_version, package_root, owner_identity
+            active_path,
+            package_version,
+            package_root,
+            owner_identity,
+            executable_path=owner_executable_path,
         )
 
         try:
@@ -242,7 +255,9 @@ class CodexViteDiscovery:
         if observation.owner_identity == "vite-plus/npm-global":
             if state.source != "npm":
                 raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
-            primary = self._npm_package_root()
+            primary = self._npm_package_root(
+                executable_path=self._owner_executable_path(state.node_version)
+            )
             identity_root = primary
             trusted_base = None
         elif observation.owner_identity == "vite-plus/global-package":
@@ -395,9 +410,38 @@ class CodexViteDiscovery:
             package_root=package_root,
         )
 
-    def _vite_which(self) -> _ViteWhich:
+    def _owner_executable_path(self, node_version: str) -> tuple[Path, ...]:
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", node_version) is None:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            )
+        runtime_bin = self._vp_home / "js_runtime" / "node" / node_version / "bin"
+        try:
+            node_metadata = (runtime_bin / "node").stat()
+        except OSError as error:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            ) from error
+        if (
+            not stat.S_ISREG(node_metadata.st_mode)
+            or node_metadata.st_mode & 0o111 == 0
+        ):
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            )
+        return (
+            runtime_bin,
+            self._vp_home / "bin",
+            Path("/usr/bin"),
+            Path("/bin"),
+            Path("/usr/sbin"),
+            Path("/sbin"),
+        )
+
+    def _vite_which(self, *, executable_path: Sequence[Path]) -> _ViteWhich:
         result = self._runner.run(
-            (str(self._vp_home / "bin" / "vp"), "env", "which", "codex")
+            (str(self._vp_home / "bin" / "vp"), "env", "which", "codex"),
+            executable_path=executable_path,
         )
         if result.returncode != 0:
             raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_UNRESOLVED)
@@ -444,8 +488,11 @@ class CodexViteDiscovery:
             node_version=labels["node"],
         )
 
-    def _npm_package_root(self) -> Path:
-        result = self._runner.run((str(self._vp_home / "bin" / "npm"), "root", "-g"))
+    def _npm_package_root(self, *, executable_path: Sequence[Path]) -> Path:
+        result = self._runner.run(
+            (str(self._vp_home / "bin" / "npm"), "root", "-g"),
+            executable_path=executable_path,
+        )
         if result.returncode != 0:
             raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_UNRESOLVED)
         lines = result.stdout.splitlines()
@@ -505,19 +552,34 @@ class CodexViteDiscovery:
             ) from error
         return raw, str(version), executable
 
-    def _runtime_version(self, active: Path) -> str:
-        result = self._runner.run((str(active), "--version"))
-        match = re.fullmatch(r"codex-cli ([^\s]+)\n?", result.stdout)
-        if result.returncode != 0 or match is None:
+    def _runtime_version(self, active: Path, *, executable_path: Sequence[Path]) -> str:
+        result = self._runner.run(
+            (str(active), "--version"), executable_path=executable_path
+        )
+        if result.returncode != 0:
             raise CodexViteDiscoveryError(
-                CodexViteDiscoveryFailure.INSTALLED_VERSION_MISMATCH
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            )
+        match = re.fullmatch(r"codex-cli ([^\s]+)\n?", result.stdout)
+        if match is None:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
             )
         return match.group(1)
 
     def _validate_doctor(
-        self, active: Path, version: str, package_root: Path, owner_identity: str
+        self,
+        active: Path,
+        version: str,
+        package_root: Path,
+        owner_identity: str,
+        *,
+        executable_path: Sequence[Path],
     ) -> None:
-        result = self._runner.run((str(active), "doctor", "--json"))
+        result = self._runner.run(
+            (str(active), "doctor", "--json"),
+            executable_path=executable_path,
+        )
         if result.returncode != 0:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.DOCTOR_CONTRACT_UNAVAILABLE

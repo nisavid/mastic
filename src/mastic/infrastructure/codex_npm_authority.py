@@ -1,4 +1,4 @@
-"""Npm release authority and artifact verification for Vite-owned Codex."""
+"""Npm release authority and artifact verification for Vite+-managed Codex."""
 
 from __future__ import annotations
 

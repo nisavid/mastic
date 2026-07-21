@@ -102,22 +102,22 @@ that evidence through its resumable canary steps.
 
 | Command | Behavior |
 | --- | --- |
-| `mastic application inspect codex` | Discovers the active Vite-owned Codex installation, resolves the selected npm channel's current release, and reports whether an owner-native upgrade is available without mutating the host. |
+| `mastic application inspect codex` | Discovers the active Vite+-managed Codex installation, resolves the selected npm channel's current release, and reports whether an owner-native upgrade is available without mutating the host. |
 | `mastic application upgrade codex` | Prepares and retains exact release and artifact evidence, asks the authenticated local user to confirm it, and delegates only the authorized retained identity to `masticd`. |
 
-Codex upgrades preserve the detected Vite owner. MASTIC does not install a
+Codex upgrades preserve the detected Vite+ owner. MASTIC does not install a
 shadow executable, switch owners, or downgrade an installation through this
 path. A retained upgrade is rejected if its installation, owner, current
 resolution, artifact closure, action, Approval, Assessment, or current Plan no
 longer validates.
 
-When setup finds an outdated Vite-owned Codex installation, it stops before
+When setup finds an outdated Vite+-managed Codex installation, it stops before
 application configuration and directs the user to review `mastic application
 upgrade codex`. Rerun setup after that explicitly confirmed upgrade. Setup does
 not grant an exact owner upgrade from its channel-level preview.
 
 `mastic setup --preserve-outdated-codex` is the explicit alternative: it keeps
-the detected Vite-owned Codex release, records that exact preserved outcome in
+the detected Vite+-managed Codex release, records that exact preserved outcome in
 the setup evidence, and continues without making a currentness claim. It is not
 the default and does not authorize a downgrade.
 
