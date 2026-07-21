@@ -158,6 +158,12 @@ def resolve_current_release(
         expires_at = after.observed_at + maximum_age
         if after.valid_until is not None:
             expires_at = min(expires_at, after.valid_until)
+        if expires_at <= resolved_at:
+            raise CurrentReleaseResolutionError(
+                CurrentReleaseResolutionFailure.AUTHORITY_INVALID_RESPONSE,
+                installation.installation_identity,
+                "release authority observation is too stale",
+            )
         return CurrentReleaseResolution(
             installation_identity=installation.installation_identity,
             installation_observation_fingerprint=observation.fingerprint,

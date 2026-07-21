@@ -251,6 +251,25 @@ class CurrentReleaseResolutionTests(unittest.TestCase):
 
         self.assertEqual(result.expires_at, valid_until)
 
+    def test_stale_authority_observation_cannot_produce_expired_resolution(
+        self,
+    ) -> None:
+        stale = authority_release("0.144.6", observed_at=NOW - timedelta(minutes=30))
+
+        with self.assertRaises(CurrentReleaseResolutionError) as raised:
+            resolve_current_release(
+                installation(),
+                observation(),
+                authority=SequenceAuthority([stale, stale]),
+                materializer=RecordingMaterializer(),
+                maximum_age=timedelta(minutes=30),
+                resolver_policy_identity="current-online:v1",
+                validation_profile_identity="phase1-codex-current:v1",
+                clock=lambda: NOW,
+            )
+
+        self.assertEqual(raised.exception.reason_code, "authority_invalid_response")
+
     def test_forward_authority_timestamp_fails_with_structured_error(self) -> None:
         first = authority_release("0.144.6", observed_at=NOW)
         second = authority_release("0.144.6", observed_at=NOW + timedelta(seconds=2))
