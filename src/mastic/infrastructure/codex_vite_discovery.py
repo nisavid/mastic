@@ -24,6 +24,8 @@ from mastic.domain.external_applications import InstallationObservation
 _MAX_METADATA_BYTES = 1_048_576
 _MAX_PACKAGE_FILES = 20_000
 _MAX_PACKAGE_BYTES = 768 * 1024 * 1024
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+_UNEXPECTED_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _VITE_INSTALL_ID = re.compile(
     r"#[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -397,7 +399,12 @@ class CodexViteDiscovery:
         )
         if result.returncode != 0:
             raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_UNRESOLVED)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        output = _ANSI_SGR.sub("", result.stdout)
+        if _UNEXPECTED_CONTROL.search(output) is not None:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            )
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
         executable = next((Path(line) for line in lines if line.startswith("/")), None)
         labels: dict[str, str] = {}
         for line in lines:
