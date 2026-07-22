@@ -94,6 +94,11 @@ class OwnerReconciliationTests(unittest.TestCase):
 
     def test_authorization_persists_exact_authenticated_current_plan(self) -> None:
         now = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
+        instants = iter((now, now + timedelta(seconds=1), now + timedelta(seconds=2)))
+
+        def clock() -> datetime:
+            return next(instants)
+
         selected = ExternalApplicationInstallation(
             application_identity="external-application:codex",
             installation_identity="application-installation:codex:vite",
@@ -167,7 +172,7 @@ class OwnerReconciliationTests(unittest.TestCase):
                 state, LocalGrantReceiptVerifier(root / "grant.key", expected_uid=501)
             )
             issuer = LocalGrantReceiptIssuer(
-                root / "grant.key", expected_uid=501, clock=lambda: now
+                root / "grant.key", expected_uid=501, clock=clock
             )
 
             authorized, trusted = authorize_owner_reconciliation(
@@ -177,7 +182,7 @@ class OwnerReconciliationTests(unittest.TestCase):
                 repository=repository,
                 issuer=issuer,
                 uid=501,
-                clock=lambda: now + timedelta(seconds=1),
+                clock=clock,
             )
 
             plan = repository.plan(authorized.plan_identity)
@@ -186,6 +191,9 @@ class OwnerReconciliationTests(unittest.TestCase):
             self.assertIsNotNone(plan)
             self.assertIsNotNone(approval)
             self.assertIsNotNone(assessment)
+            self.assertEqual(plan.created_at, "2026-07-21T08:00:00Z")
+            self.assertEqual(approval.granted_at, "2026-07-21T08:00:01Z")
+            self.assertEqual(assessment.evaluated_at, "2026-07-21T08:00:02Z")
             self.assertEqual(
                 plan.owner_upgrade_mutation.request.preview_fingerprint,
                 preview.fingerprint,
@@ -196,6 +204,41 @@ class OwnerReconciliationTests(unittest.TestCase):
             )
             self.assertIsInstance(trusted, TrustedPlanningPolicy)
             self.assertTrue(trusted.accepts(assessment))
+
+    def test_authorization_rejects_invalid_assessment_clock_without_records(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
+        instants = iter((now, now.replace(tzinfo=None)))
+
+        def clock() -> datetime:
+            return next(instants)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepared = _prepared(root / "prepared")
+            state = OperationalStateStore(root / "state.sqlite3")
+            repository = PlanningRecordRepository(
+                state, LocalGrantReceiptVerifier(root / "grant.key", expected_uid=501)
+            )
+            issuer = LocalGrantReceiptIssuer(
+                root / "grant.key",
+                expected_uid=501,
+                clock=lambda: now + timedelta(seconds=1),
+            )
+
+            with self.assertRaisesRegex(ValueError, "clock must be timezone-aware"):
+                authorize_owner_reconciliation(
+                    prepared.selected,
+                    prepared.preview,
+                    prepared.closure,
+                    repository=repository,
+                    issuer=issuer,
+                    uid=501,
+                    clock=clock,
+                )
+
+            self.assertEqual(state.snapshots(), ())
 
     def test_local_confirmation_mints_authority_and_delegates_only_retained_identity(
         self,
