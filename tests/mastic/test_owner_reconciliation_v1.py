@@ -240,6 +240,52 @@ class OwnerReconciliationTests(unittest.TestCase):
 
             self.assertEqual(state.snapshots(), ())
 
+    def test_authorization_rejects_unordered_timestamps_without_records(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
+        cases = (
+            (
+                "reconciliation clock moves backward",
+                (now, now - timedelta(seconds=1)),
+                now,
+            ),
+            (
+                "approval clock is ahead",
+                (now, now + timedelta(seconds=1)),
+                now + timedelta(seconds=2),
+            ),
+        )
+
+        for name, reconciliation_instants, approval_instant in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                prepared = _prepared(root / "prepared")
+                state = OperationalStateStore(root / "state.sqlite3")
+                repository = PlanningRecordRepository(
+                    state,
+                    LocalGrantReceiptVerifier(root / "grant.key", expected_uid=501),
+                )
+                issuer = LocalGrantReceiptIssuer(
+                    root / "grant.key",
+                    expected_uid=501,
+                    clock=lambda: approval_instant,
+                )
+                instants = iter(reconciliation_instants)
+
+                with self.assertRaisesRegex(ValueError, "timestamps must be ordered"):
+                    authorize_owner_reconciliation(
+                        prepared.selected,
+                        prepared.preview,
+                        prepared.closure,
+                        repository=repository,
+                        issuer=issuer,
+                        uid=501,
+                        clock=lambda: next(instants),
+                    )
+
+                self.assertEqual(state.snapshots(), ())
+
     def test_local_confirmation_mints_authority_and_delegates_only_retained_identity(
         self,
     ) -> None:

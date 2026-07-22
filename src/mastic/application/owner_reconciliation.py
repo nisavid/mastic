@@ -14,6 +14,7 @@ from mastic.application.external_application_lifecycle import (
 from mastic.domain.application_lifecycle import ReleaseTransitionKind
 from mastic.domain.canonical import canonical_fingerprint, canonical_timestamp
 from mastic.domain.external_applications import ExternalApplicationInstallation
+from mastic.domain.planning_records import datetime_instant, parse_canonical_time
 from mastic.infrastructure.planning_owner_upgrade_authorization import (
     TrustedPlanningPolicy,
 )
@@ -92,8 +93,7 @@ def authorize_owner_reconciliation(
         )
 
     created_at = clock()
-    if created_at.tzinfo is None or created_at.utcoffset() is None:
-        raise ValueError("owner reconciliation clock must be timezone-aware")
+    created_instant = datetime_instant(created_at, "owner reconciliation clock")
     scope = _scope(uid, selected)
     policy = _policy(uid)
     selection = _policy_selection(uid, scope, policy)
@@ -112,8 +112,12 @@ def authorize_owner_reconciliation(
         )
     )
     evaluated_at = clock()
-    if evaluated_at.tzinfo is None or evaluated_at.utcoffset() is None:
-        raise ValueError("owner reconciliation clock must be timezone-aware")
+    evaluated_instant = datetime_instant(evaluated_at, "owner reconciliation clock")
+    approval_instant = parse_canonical_time(
+        approval.granted_at, "owner reconciliation approval grant time"
+    )
+    if not created_instant <= approval_instant <= evaluated_instant:
+        raise ValueError("owner reconciliation timestamps must be ordered")
     plan = repository.put_plan(plan_record)
     repository.put_approval(approval.to_mapping())
     assessment_record = _assessment(
