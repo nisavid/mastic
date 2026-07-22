@@ -847,8 +847,7 @@ def build_codex_dependencies(
     """Compose trusted host and npm adapters without granting planning authority."""
 
     vp_home = home / ".vite-plus"
-    base_environment = dict(os.environ)
-    base_environment["HOME"] = str(home)
+    base_environment = {"HOME": str(home), "TMPDIR": str(stage_root)}
     discovery = CodexViteDiscovery(
         vp_home=vp_home,
         path=(

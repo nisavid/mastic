@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -5,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import patch
 
 from mastic.application.external_application_lifecycle import (
     OwnerUpgradeAction,
@@ -34,6 +36,7 @@ from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.codex_owner_reconciliation import (
     DaemonCodexOwnerReconciliation,
     LocalCodexOwnerReconciliation,
+    build_codex_dependencies,
 )
 from mastic.infrastructure.owner_reconciliation_store import (
     OwnerReconciliationStore,
@@ -50,6 +53,65 @@ SHA_D = "sha256:" + "d" * 64
 
 
 class OwnerReconciliationTests(unittest.TestCase):
+    def test_production_owner_authorization_survives_process_environment_drift(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 21, 8, 0, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            prepared = _prepared(root / "prepared")
+            state = OperationalStateStore(root / "state.sqlite3")
+            shell_environment = {
+                "HOME": str(home),
+                "LANG": "en_US.UTF-8",
+                "LOGNAME": "ivan",
+                "TMPDIR": str(root / "shell-tmp"),
+                "USER": "ivan",
+            }
+            launchd_environment = {
+                "HOME": str(home),
+                "TMPDIR": str(root / "launchd-tmp"),
+            }
+
+            with patch.dict(os.environ, shell_environment, clear=True):
+                shell_lifecycle = build_codex_dependencies(
+                    home=home,
+                    stage_root=root / "stage",
+                    state=state,
+                    clock=lambda: now,
+                )[4]
+            with patch.dict(os.environ, launchd_environment, clear=True):
+                launchd_lifecycle = build_codex_dependencies(
+                    home=home,
+                    stage_root=root / "stage",
+                    state=state,
+                    clock=lambda: now,
+                )[4]
+
+            active_invocation = str(home / ".vite-plus/bin/codex")
+            observation = replace(
+                prepared.observation,
+                active_invocation=active_invocation,
+                reachable_invocations=(active_invocation,),
+            )
+            shell_action = shell_lifecycle.preview_action(observation, prepared.closure)
+            preview = replace(prepared.preview, action=shell_action)
+
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in shell_action.environment
+                    if key in shell_environment
+                },
+                {"HOME": str(home), "TMPDIR": str(root / "stage")},
+            )
+            self.assertTrue(
+                launchd_lifecycle.verify_authorization_material(
+                    prepared.selected, preview, prepared.closure
+                )
+            )
+
     def test_release_transition_never_treats_same_or_older_as_upgrade(self) -> None:
         self.assertIs(
             classify_release_transition("0.144.5", "0.150.0"),
