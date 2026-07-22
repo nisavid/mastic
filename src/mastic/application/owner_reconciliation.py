@@ -91,18 +91,17 @@ def authorize_owner_reconciliation(
             "owner reconciliation is not an exact owner-preserving upgrade"
         )
 
-    evaluated_at = clock()
-    if evaluated_at.tzinfo is None or evaluated_at.utcoffset() is None:
+    created_at = clock()
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("owner reconciliation clock must be timezone-aware")
     scope = _scope(uid, selected)
     policy = _policy(uid)
     selection = _policy_selection(uid, scope, policy)
     trusted = trusted_owner_reconciliation_policy(uid, selected)
-    plan_record = _plan(selected, preview, artifact_closure, scope, evaluated_at)
-    plan = repository.put_plan(plan_record)
+    plan_record = _plan(selected, preview, artifact_closure, scope, created_at)
     approval = issuer.issue(
         PlanApprovalDraft(
-            plan_identity=plan.plan_identity,
+            plan_identity=str(plan_record["plan_identity"]),
             plan_purpose=_PURPOSE,
             policy_fingerprint=str(policy["fingerprint"]),
             evidence_set_fingerprint=_EVIDENCE_SET,
@@ -112,6 +111,10 @@ def authorize_owner_reconciliation(
             valid_for=timedelta(hours=1),
         )
     )
+    evaluated_at = clock()
+    if evaluated_at.tzinfo is None or evaluated_at.utcoffset() is None:
+        raise ValueError("owner reconciliation clock must be timezone-aware")
+    plan = repository.put_plan(plan_record)
     repository.put_approval(approval.to_mapping())
     assessment_record = _assessment(
         plan.to_mapping(), approval.to_mapping(), selection, policy, evaluated_at
