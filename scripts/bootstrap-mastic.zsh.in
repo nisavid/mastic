@@ -177,11 +177,13 @@ run_fenced_supervisor_command() {
   emulate -L zsh
   setopt no_unset pipe_fail
   local cli=$1 action=$2
+  local -a confirmation
+  [[ $action == stop ]] && confirmation=(--yes)
   if [[ -n $MASTIC_EXPECTED_RECEIPT_SHA256 ]]; then
     MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256=$MASTIC_EXPECTED_RECEIPT_SHA256 \
-      "$cli" supervisor "$action"
+      "$cli" supervisor "$action" $confirmation
   else
-    "$cli" supervisor "$action"
+    "$cli" supervisor "$action" $confirmation
   fi
 }
 
