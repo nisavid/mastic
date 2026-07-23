@@ -33,6 +33,7 @@ _GROUPS = (
     "application-target",
     "config",
 )
+_CLI_GROUP_NAMES = {"application": "app"}
 
 
 def build_cli(
@@ -69,13 +70,14 @@ def build_cli(
 
     groups: dict[str, typer.Typer] = {}
     for group in _GROUPS:
+        cli_group = _CLI_GROUP_NAMES.get(group, group)
         group_app = typer.Typer(
-            name=group,
+            name=cli_group,
             help=_group_help(group),
             no_args_is_help=True,
             rich_markup_mode="rich",
         )
-        app.add_typer(group_app, name=group)
+        app.add_typer(group_app, name=cli_group)
         groups[group] = group_app
 
     cache_app = typer.Typer(
