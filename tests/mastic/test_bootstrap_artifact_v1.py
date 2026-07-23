@@ -46,6 +46,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
 
         self.assertIn("Reinstall over a running Supervisor", workflow)
         self.assertIn("stale-generation-sentinel", workflow)
+        self.assertIn('"$mastic" supervisor stop --yes', workflow)
         self.assertIn("[[ $after_pid != $before_pid ]]", workflow)
         self.assertIn('"$mastic" supervisor restart', workflow)
 
@@ -1569,6 +1570,14 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         old_mastic = home / ".local/bin/mastic"
         self._tool(
             old_mastic,
+            "if [[ $1 == supervisor && $2 == stop && ${3:-} != --yes ]]; then\n"
+            "  print -ru2 -- 'supervisor mutation requires --yes'\n"
+            "  exit 86\n"
+            "fi\n"
+            "if [[ $1 == supervisor && $2 == start && -n ${3:-} ]]; then\n"
+            "  print -ru2 -- 'supervisor start rejects extra arguments'\n"
+            "  exit 85\n"
+            "fi\n"
             'print -r -- "old:$1.$2" >>"$BOOTSTRAP_SUPERVISOR_LOG"\n'
             "if [[ $1 == supervisor && $2 == stop ]]; then\n"
             "  [[ -n ${BOOTSTRAP_OLD_MASTIC_STOP_FAIL:-} ]] && exit 77\n"
@@ -1663,6 +1672,14 @@ class _ArtifactFixture:
             "    print -ru2 -- 'Another installation replaced this MASTIC generation.'\n"
             "    exit 89\n"
             "  fi\n"
+            "fi\n"
+            "if [[ $1 == supervisor && $2 == stop && ${3:-} != --yes ]]; then\n"
+            "  print -ru2 -- 'supervisor mutation requires --yes'\n"
+            "  exit 86\n"
+            "fi\n"
+            "if [[ $1 == supervisor && $2 == start && -n ${3:-} ]]; then\n"
+            "  print -ru2 -- 'supervisor start rejects extra arguments'\n"
+            "  exit 85\n"
             "fi\n"
             'print -r -- "new:$1.$2" >>"${BOOTSTRAP_SUPERVISOR_LOG:-/dev/null}"\n'
             "if [[ $1 == supervisor && $2 == start ]]; then\n"

@@ -154,7 +154,7 @@ jobs:
           mastic_data="$HOME/.local/share/mastic"
           target="gui/${UID}/io.nisavid.masticd"
           cleanup() {
-            "$mastic" supervisor stop >/dev/null 2>&1 || true
+            "$mastic" supervisor stop --yes >/dev/null 2>&1 || true
             launchctl bootout "$target" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
