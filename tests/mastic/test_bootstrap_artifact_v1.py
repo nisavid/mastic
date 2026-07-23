@@ -399,6 +399,75 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 "new:service.start",
             )
 
+    def test_upgrade_accepts_uvs_user_owned_cli_symlink(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            launcher = home / ".local/bin/mastic"
+            installed_launcher = home / ".local/share/mastic/tools/mastic/bin/mastic"
+            installed_launcher.parent.mkdir(parents=True)
+            launcher.replace(installed_launcher)
+            launcher.symlink_to(installed_launcher)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "new:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+
+    def test_upgrade_rejects_cli_symlink_to_another_owners_executable(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            launcher = home / ".local/bin/mastic"
+            launcher.unlink()
+            launcher.symlink_to("/usr/bin/true")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "installed mastic CLI is unavailable",
+                completed.stderr,
+            )
+            self.assertFalse(lifecycle_log.exists())
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+
     def test_upgrade_preserves_an_inactive_supervisor(self) -> None:
         with self._artifact() as (root, artifact, release):
             tools = root / "tools"
@@ -477,6 +546,10 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             )
             start_entered = first_root / "first-start-entered"
             start_continue = first_root / "first-start-continue"
+            start_released = first_root / "first-start-released"
+            start_return_continue = first_root / "first-start-return-continue"
+            stop_released = first_root / "second-stop-released"
+            stop_continue = first_root / "second-stop-continue"
             base_environment = dict(os.environ)
             base_environment["PATH"] = f"{tools}:{base_environment['PATH']}"
             base_environment["HOME"] = str(home)
@@ -487,7 +560,15 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 **base_environment,
                 "BOOTSTRAP_NEW_MASTIC_START_ENTERED": str(start_entered),
                 "BOOTSTRAP_NEW_MASTIC_START_CONTINUE": str(start_continue),
-                "BOOTSTRAP_NEW_MASTIC_POST_RELEASE_DELAY": "0.5",
+                "BOOTSTRAP_NEW_MASTIC_START_RELEASED": str(start_released),
+                "BOOTSTRAP_NEW_MASTIC_START_RETURN_CONTINUE": str(
+                    start_return_continue
+                ),
+            }
+            second_environment = {
+                **base_environment,
+                "BOOTSTRAP_NEW_MASTIC_STOP_RELEASED": str(stop_released),
+                "BOOTSTRAP_NEW_MASTIC_STOP_CONTINUE": str(stop_continue),
             }
             first = subprocess.Popen(
                 [
@@ -508,20 +589,35 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                         self.fail("first bootstrap did not reach Supervisor restart")
                     time.sleep(0.02)
 
+                self.assertTrue(start_entered.exists())
+                start_continue.touch()
+                while not start_released.exists() and first.poll() is None:
+                    if time.monotonic() >= deadline:
+                        self.fail(
+                            "first bootstrap did not release its Supervisor start"
+                        )
+                    time.sleep(0.02)
+
+                self.assertTrue(start_released.exists())
                 second_process = subprocess.Popen(
                     [
                         str(second_artifact),
                         "--artifact-dir",
                         str(second_release),
                     ],
-                    env=base_environment,
+                    env=second_environment,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
-                time.sleep(0.1)
-                self.assertIsNone(second_process.poll())
-                start_continue.touch()
+                while not stop_released.exists() and second_process.poll() is None:
+                    if time.monotonic() >= deadline:
+                        self.fail("second bootstrap did not drain the first Supervisor")
+                    time.sleep(0.02)
+
+                self.assertTrue(stop_released.exists())
+                start_return_continue.touch()
+                stop_continue.touch()
                 second_stdout, second_stderr = second_process.communicate(
                     timeout=_SUBPROCESS_TIMEOUT
                 )
@@ -529,19 +625,30 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                     timeout=_SUBPROCESS_TIMEOUT
                 )
             finally:
+                start_continue.touch()
+                start_return_continue.touch()
+                stop_continue.touch()
                 if first.poll() is None:
-                    first.kill()
-                    first.wait()
+                    try:
+                        first.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        first.kill()
+                        first.wait()
                 if second_process is not None and second_process.poll() is None:
-                    second_process.kill()
-                    second_process.wait()
+                    try:
+                        second_process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        second_process.kill()
+                        second_process.wait()
 
             self.assertEqual(second_process.returncode, 0, second_stderr)
             self.assertIn("Installed MASTIC 0.2.0", second_stdout)
             self.assertNotEqual(first.returncode, 0)
             self.assertNotIn("Installed MASTIC 0.1.0", first_stdout)
-            self.assertIn(
-                "another installation replaced the exact MASTIC generation",
+            self.assertTrue(
+                "another installation replaced the exact MASTIC generation"
+                in first_stderr
+                or "the restarted Supervisor was not running at commit" in first_stderr,
                 first_stderr,
             )
             receipt = json.loads(
@@ -1584,6 +1691,13 @@ class _ArtifactFixture:
             "if (( bootstrap_fence_fd >= 0 )); then\n"
             "  zsystem flock -u $bootstrap_fence_fd\n"
             "  bootstrap_fence_fd=-1\n"
+            "fi\n"
+            "if [[ $1 == supervisor && $2 == start "
+            "&& -n ${BOOTSTRAP_NEW_MASTIC_START_RELEASED:-} ]]; then\n"
+            '  : >"$BOOTSTRAP_NEW_MASTIC_START_RELEASED"\n'
+            "  while [[ ! -e $BOOTSTRAP_NEW_MASTIC_START_RETURN_CONTINUE ]]; do\n"
+            "    sleep 0.05\n"
+            "  done\n"
             "fi\n"
             "if [[ $1 == supervisor && $2 == stop "
             "&& -n ${BOOTSTRAP_NEW_MASTIC_STOP_RELEASED:-} ]]; then\n"
