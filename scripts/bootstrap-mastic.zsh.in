@@ -185,6 +185,15 @@ run_fenced_supervisor_command() {
   fi
 }
 
+installed_cli_is_usable() {
+  emulate -L zsh
+  setopt no_unset
+  local cli=$1 resolved
+  [[ -f $cli && -x $cli ]] || return 1
+  resolved=${cli:A}
+  [[ -f $resolved && ! -L $resolved && -x $resolved && -O $resolved ]]
+}
+
 prepare_supervisor_replacement() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
@@ -196,7 +205,7 @@ prepare_supervisor_replacement() {
     }
     if [[ $observed_state == running ]]; then
       existing_cli="$HOME/.local/bin/mastic"
-      [[ -f $existing_cli && ! -L $existing_cli && -x $existing_cli ]] || {
+      installed_cli_is_usable "$existing_cli" || {
         fail 'the running Supervisor cannot be drained because the installed mastic CLI is unavailable'
         return 1
       }
@@ -246,7 +255,7 @@ restart_replaced_supervisor() {
   setopt err_return no_unset pipe_fail
   (( MASTIC_SUPERVISOR_WAS_RUNNING )) || return 0
   local installed_cli="$HOME/.local/bin/mastic"
-  [[ -f $installed_cli && ! -L $installed_cli && -x $installed_cli ]] || {
+  installed_cli_is_usable "$installed_cli" || {
     fail 'could not restart the running Supervisor because the installed mastic CLI is unavailable'
     return 1
   }
@@ -516,7 +525,7 @@ cleanup_bootstrap_state() {
   fi
   if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && MASTIC_SUPERVISOR_WAS_RUNNING && MASTIC_SUPERVISOR_STOPPED && ! MASTIC_SUPERVISOR_RESTARTED && rollback_ok && observation_ok )); then
     local restored_cli="$HOME/.local/bin/mastic"
-    if [[ ! -f $restored_cli || -L $restored_cli || ! -x $restored_cli ]] \
+    if ! installed_cli_is_usable "$restored_cli" \
       || ! "$restored_cli" supervisor start \
       || ! wait_for_supervisor_state running; then
       print -ru2 -- 'mastic bootstrap: the previous MASTIC release was restored, but its Supervisor could not be restarted; run `mastic supervisor start` before continuing'
