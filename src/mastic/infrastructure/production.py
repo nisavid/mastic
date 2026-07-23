@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import sys
@@ -486,6 +487,7 @@ class _GatewayMutationGuard:
         if operation is not None and operation.kind is OperationKind.MUTATION:
             with self._transition():
                 self._require_product_roots()
+                self._require_bootstrap_generation()
                 self._check(request)
                 return self._dispatcher.execute(request)
         self._check(request)
@@ -522,6 +524,43 @@ class _GatewayMutationGuard:
                 "product_state_removed",
                 "MASTIC product state was removed after this command initialized.",
                 next_actions=("retry the command to reinitialize local state",),
+            )
+
+    def _require_bootstrap_generation(self) -> None:
+        expected = os.environ.get("MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256")
+        if expected is None:
+            return
+        if (
+            self._paths is None
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            raise ApplicationError(
+                "installation_superseded",
+                "The bootstrap generation fence is invalid.",
+                next_actions=("rerun the exact MASTIC bootstrap",),
+            )
+        receipt = (
+            self._paths.data_dir / "bootstrap-artifacts" / "bootstrap-receipt.json"
+        )
+        try:
+            metadata = receipt.lstat()
+            current = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ApplicationError(
+                "installation_superseded",
+                "The installed MASTIC generation could not be verified.",
+                next_actions=("rerun the exact MASTIC bootstrap",),
+            ) from error
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or current != expected
+        ):
+            raise ApplicationError(
+                "installation_superseded",
+                "Another installation replaced this MASTIC generation.",
+                next_actions=("allow the newer bootstrap to finish",),
             )
 
 

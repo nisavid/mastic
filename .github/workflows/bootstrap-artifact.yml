@@ -146,6 +146,71 @@ jobs:
           [[ $("$mastic_data/bootstrap-python/bin/python3.11" --version) == 'Python 3.11.15' ]]
           [[ -f "$mastic_data/bootstrap-artifacts/bootstrap-receipt.json" ]]
 
+      - name: Reinstall over a running Supervisor
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          mastic="$HOME/.local/bin/mastic"
+          mastic_data="$HOME/.local/share/mastic"
+          target="gui/${UID}/io.nisavid.masticd"
+          cleanup() {
+            "$mastic" supervisor stop >/dev/null 2>&1 || true
+            launchctl bootout "$target" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          HOME="$HOME" \
+          MASTIC_DATA_DIR="$mastic_data" \
+          UV_OFFLINE=1 \
+          PIP_NO_INDEX=1 \
+          HTTP_PROXY=http://127.0.0.1:1 \
+          HTTPS_PROXY=http://127.0.0.1:1 \
+          ALL_PROXY=http://127.0.0.1:1 \
+          NO_PROXY='' \
+            dist/bootstrap-mastic.zsh \
+              --artifact-dir "${PWD}/dist" \
+              --yes
+
+          installed_python="$mastic_data/tools/mastic/bin/python"
+          operation_ports=$(
+            "$installed_python" -c \
+              'import mastic.infrastructure.operation_ports as module; print(module.__file__)'
+          )
+          "$installed_python" -c \
+            'from pathlib import Path; import sys; path=Path(sys.argv[1]); source=path.read_text(); old="elif operation == \"supervisor.restart\":\n            value = self._supervisor.restart()"; new="elif operation == \"supervisor.restart\":\n            raise RuntimeError(\"stale-generation-sentinel\")"; assert source.count(old) == 1; path.write_text(source.replace(old, new))' \
+            "$operation_ports"
+
+          "$mastic" supervisor start
+          before_status=$(launchctl print "$target")
+          [[ $before_status =~ 'pid[[:space:]]*=[[:space:]]*([0-9]+)' ]]
+          before_pid=$match[1]
+          if stale_result=$("$mastic" supervisor restart 2>&1); then
+            print -ru2 -- 'fault-injected Supervisor unexpectedly accepted restart'
+            exit 1
+          fi
+          [[ $stale_result == *stale-generation-sentinel* ]]
+
+          HOME="$HOME" \
+          MASTIC_DATA_DIR="$mastic_data" \
+          UV_OFFLINE=1 \
+          PIP_NO_INDEX=1 \
+          HTTP_PROXY=http://127.0.0.1:1 \
+          HTTPS_PROXY=http://127.0.0.1:1 \
+          ALL_PROXY=http://127.0.0.1:1 \
+          NO_PROXY='' \
+            dist/bootstrap-mastic.zsh \
+              --artifact-dir "${PWD}/dist" \
+              --yes
+
+          after_status=$(launchctl print "$target")
+          [[ $after_status =~ 'pid[[:space:]]*=[[:space:]]*([0-9]+)' ]]
+          after_pid=$match[1]
+          [[ $after_pid != $before_pid ]]
+          ! rg -q stale-generation-sentinel "$operation_ports"
+          "$mastic" supervisor restart
+          "$mastic" supervisor status --json >/dev/null
+          "$mastic" gateway status --json >/dev/null
+
   publish:
     name: Attest and publish tagged artifact
     if: startsWith(github.ref, 'refs/tags/v')
