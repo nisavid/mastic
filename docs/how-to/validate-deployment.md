@@ -14,6 +14,17 @@ Use an inactive test stack or a maintenance window. If `mastic status` reports
 a running Supervisor, Gateway, or service that must remain available, stop here
 and reschedule these checks; the lifecycle steps deliberately stop the stack.
 
+An update installed through `bootstrap-mastic.zsh` preserves the live lifecycle
+state: an inactive Supervisor stays inactive, while a running Supervisor is
+drained, unregistered, replaced, and restarted on the new code. Do not continue
+this procedure after a nonzero bootstrap result. If bootstrap reports that it
+restored the previous release but could not restart its Supervisor, run the
+reported recovery command and verify `mastic supervisor status` first. If it
+reports an incomplete rollback, do not start the Supervisor until the installed
+release has been repaired. The same restriction applies when bootstrap reports
+that it retained recovery backups because Supervisor state could not be
+confirmed.
+
 ## Verify the installed control surface
 
 ```sh

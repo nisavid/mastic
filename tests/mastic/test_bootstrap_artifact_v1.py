@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -37,6 +38,16 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 "enable-cache: ${{ github.event_name != 'pull_request' }}",
                 workflow,
             )
+
+    def test_host_contract_reinstalls_over_a_running_supervisor(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "bootstrap-artifact.yml"
+        ).read_text()
+
+        self.assertIn("Reinstall over a running Supervisor", workflow)
+        self.assertIn("stale-generation-sentinel", workflow)
+        self.assertIn("[[ $after_pid != $before_pid ]]", workflow)
+        self.assertIn('"$mastic" supervisor restart', workflow)
 
     def test_closure_builder_bounds_and_retries_all_direct_downloads(self) -> None:
         builder = CLOSURE_BUILDER.read_text()
@@ -340,6 +351,677 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(cached_targets.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(cached_targets.parent.stat().st_mode), 0o700)
             self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_upgrade_recycles_a_running_supervisor_through_both_generations(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            environment = {
+                "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+            }
+
+            with patch.dict(os.environ, environment):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "new:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+
+            follow_up = subprocess.run(
+                [str(home / ".local/bin/mastic"), "service", "start", "probe"],
+                env={**os.environ, **environment},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_SUBPROCESS_TIMEOUT,
+            )
+
+            self.assertEqual(follow_up.returncode, 0, follow_up.stderr)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines()[-1],
+                "new:service.start",
+            )
+
+    def test_upgrade_preserves_an_inactive_supervisor(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=False
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(state.read_text(encoding="utf-8"), "stopped\n")
+            self.assertFalse(lifecycle_log.exists())
+
+    def test_upgrade_holds_the_shared_transition_lock_while_replacing_paths(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=False
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_EXPECT_TRANSITION_LOCK": str(
+                        home / ".local/state/.mastic-locks/setup-removal.lock"
+                    ),
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(lifecycle_log.exists())
+
+    def test_superseded_bootstrap_does_not_report_or_leave_its_daemon_running(
+        self,
+    ) -> None:
+        with (
+            self._artifact(version="0.1.0", tool_marker="new tool 0.1") as (
+                first_root,
+                first_artifact,
+                first_release,
+            ),
+            self._artifact(version="0.2.0", tool_marker="new tool 0.2") as (
+                _second_root,
+                second_artifact,
+                second_release,
+            ),
+        ):
+            tools = first_root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = first_root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            start_entered = first_root / "first-start-entered"
+            start_continue = first_root / "first-start-continue"
+            base_environment = dict(os.environ)
+            base_environment["PATH"] = f"{tools}:{base_environment['PATH']}"
+            base_environment["HOME"] = str(home)
+            base_environment["BOOTSTRAP_SUPERVISOR_STATE"] = str(state)
+            base_environment["BOOTSTRAP_SUPERVISOR_LOG"] = str(lifecycle_log)
+            base_environment.pop("XDG_DATA_HOME", None)
+            first_environment = {
+                **base_environment,
+                "BOOTSTRAP_NEW_MASTIC_START_ENTERED": str(start_entered),
+                "BOOTSTRAP_NEW_MASTIC_START_CONTINUE": str(start_continue),
+                "BOOTSTRAP_NEW_MASTIC_POST_RELEASE_DELAY": "0.5",
+            }
+            first = subprocess.Popen(
+                [
+                    str(first_artifact),
+                    "--artifact-dir",
+                    str(first_release),
+                ],
+                env=first_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            second_process = None
+            try:
+                deadline = time.monotonic() + _SUBPROCESS_TIMEOUT
+                while not start_entered.exists() and first.poll() is None:
+                    if time.monotonic() >= deadline:
+                        self.fail("first bootstrap did not reach Supervisor restart")
+                    time.sleep(0.02)
+
+                second_process = subprocess.Popen(
+                    [
+                        str(second_artifact),
+                        "--artifact-dir",
+                        str(second_release),
+                    ],
+                    env=base_environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                time.sleep(0.1)
+                self.assertIsNone(second_process.poll())
+                start_continue.touch()
+                second_stdout, second_stderr = second_process.communicate(
+                    timeout=_SUBPROCESS_TIMEOUT
+                )
+                first_stdout, first_stderr = first.communicate(
+                    timeout=_SUBPROCESS_TIMEOUT
+                )
+            finally:
+                if first.poll() is None:
+                    first.kill()
+                    first.wait()
+                if second_process is not None and second_process.poll() is None:
+                    second_process.kill()
+                    second_process.wait()
+
+            self.assertEqual(second_process.returncode, 0, second_stderr)
+            self.assertIn("Installed MASTIC 0.2.0", second_stdout)
+            self.assertNotEqual(first.returncode, 0)
+            self.assertNotIn("Installed MASTIC 0.1.0", first_stdout)
+            self.assertIn(
+                "another installation replaced the exact MASTIC generation",
+                first_stderr,
+            )
+            receipt = json.loads(
+                (
+                    home
+                    / ".local/share/mastic/bootstrap-artifacts/bootstrap-receipt.json"
+                ).read_text()
+            )
+            self.assertEqual(receipt["version"], "0.2.0")
+            self.assertEqual(
+                (home / ".local/share/mastic/tools/mastic/release.txt").read_text(),
+                "new tool 0.2",
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+
+    def test_cleanup_does_not_rollback_a_generation_installed_after_stop(
+        self,
+    ) -> None:
+        with (
+            self._artifact(version="0.1.0", tool_marker="new tool 0.1") as (
+                first_root,
+                first_artifact,
+                first_release,
+            ),
+            self._artifact(version="0.2.0", tool_marker="new tool 0.2") as (
+                _second_root,
+                second_artifact,
+                second_release,
+            ),
+        ):
+            tools = first_root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = first_root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            commit_inspection = first_root / "commit-inspection"
+            stop_released = first_root / "stop-released"
+            stop_continue = first_root / "stop-continue"
+            base_environment = dict(os.environ)
+            base_environment["PATH"] = f"{tools}:{base_environment['PATH']}"
+            base_environment["HOME"] = str(home)
+            base_environment["BOOTSTRAP_SUPERVISOR_STATE"] = str(state)
+            base_environment["BOOTSTRAP_SUPERVISOR_LOG"] = str(lifecycle_log)
+            base_environment.pop("XDG_DATA_HOME", None)
+            first_environment = {
+                **base_environment,
+                "BOOTSTRAP_NEW_MASTIC_START_SUCCESS_MARKER": str(commit_inspection),
+                "BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER": str(commit_inspection),
+                "BOOTSTRAP_NEW_MASTIC_STOP_RELEASED": str(stop_released),
+                "BOOTSTRAP_NEW_MASTIC_STOP_CONTINUE": str(stop_continue),
+            }
+            first = subprocess.Popen(
+                [
+                    str(first_artifact),
+                    "--artifact-dir",
+                    str(first_release),
+                ],
+                env=first_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + _SUBPROCESS_TIMEOUT
+                while not stop_released.exists() and first.poll() is None:
+                    if time.monotonic() >= deadline:
+                        self.fail("first bootstrap did not release its cleanup stop")
+                    time.sleep(0.02)
+
+                second = subprocess.run(
+                    [
+                        str(second_artifact),
+                        "--artifact-dir",
+                        str(second_release),
+                    ],
+                    env=base_environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=_SUBPROCESS_TIMEOUT,
+                )
+                stop_continue.touch()
+                first_stdout, first_stderr = first.communicate(
+                    timeout=_SUBPROCESS_TIMEOUT
+                )
+            finally:
+                if first.poll() is None:
+                    first.kill()
+                    first.wait()
+
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertNotEqual(first.returncode, 0)
+            self.assertNotIn("Installed MASTIC 0.1.0", first_stdout)
+            self.assertIn(
+                "another installation replaced the expected MASTIC generation",
+                first_stderr,
+            )
+            receipt = json.loads(
+                (
+                    home
+                    / ".local/share/mastic/bootstrap-artifacts/bootstrap-receipt.json"
+                ).read_text()
+            )
+            self.assertEqual(receipt["version"], "0.2.0")
+            self.assertEqual(
+                (home / ".local/share/mastic/tools/mastic/release.txt").read_text(),
+                "new tool 0.2",
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "stopped\n")
+
+    def test_launchd_inspection_failure_aborts_before_replacing_the_release(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_LAUNCHCTL_PRINT_FAIL": "1",
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("could not inspect the Supervisor", completed.stderr)
+            self.assertNotIn("Installed MASTIC", completed.stdout)
+            self.assertFalse(lifecycle_log.exists())
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
+
+    def test_termination_during_drain_recovers_the_previous_supervisor(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_OLD_MASTIC_TERM_AFTER_STOP": "1",
+                    "BOOTSTRAP_OLD_MASTIC_TERM_MARKER": str(
+                        root / "old-mastic-term-marker"
+                    ),
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertEqual(completed.returncode, 143, completed.stderr)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "old:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
+
+    def test_drain_failure_aborts_before_replacing_the_installed_release(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_OLD_MASTIC_STOP_FAIL": "1",
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "could not be drained before installation",
+                completed.stderr,
+            )
+            self.assertNotIn("Installed MASTIC", completed.stdout)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                ["old:supervisor.stop"],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
+            self.assertEqual(
+                (home / ".local/share/mastic/tools/mastic/release.txt").read_bytes(),
+                b"old tool",
+            )
+
+    def test_unregister_failure_recovers_without_replacing_the_release(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_LAUNCHCTL_BOOTOUT_FAIL": "1",
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "could not be unregistered before installation",
+                completed.stderr,
+            )
+            self.assertNotIn("Installed MASTIC", completed.stdout)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "old:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
+
+    def test_incomplete_rollback_does_not_restart_a_mixed_release(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            self._tool(
+                tools / "rm",
+                '[[ "$*" == *"/tools/mastic"* ]] && exit 98\nexec /bin/rm "$@"',
+            )
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_NEW_MASTIC_START_FAIL": "1",
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "rollback was incomplete; the Supervisor remains stopped",
+                completed.stderr,
+            )
+            self.assertNotIn("old:supervisor.start", lifecycle_log.read_text())
+            self.assertEqual(state.read_text(encoding="utf-8"), "absent\n")
+
+    def test_unknown_state_retains_the_exact_release_and_recovery_backups(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            inspection_failure = root / "launchctl-print-failure"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_NEW_MASTIC_START_FAIL": "1",
+                    "BOOTSTRAP_NEW_MASTIC_START_FAILURE_MARKER": str(
+                        inspection_failure
+                    ),
+                    "BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_MARKER": str(inspection_failure),
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "the exact installed release and recovery backups were retained",
+                completed.stderr,
+            )
+            self.assertNotIn("old:supervisor.start", lifecycle_log.read_text())
+            self.assertEqual(
+                (home / ".local/share/mastic/tools/mastic/release.txt").read_bytes(),
+                b"new tool",
+            )
+            self.assertGreater(
+                len(list((home / ".local").rglob(".*.mastic-backup.*"))),
+                0,
+            )
+
+    def test_commit_inspection_failure_quiesces_before_rollback(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            inspection_failure = root / "commit-inspection-failure"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_NEW_MASTIC_START_SUCCESS_MARKER": str(
+                        inspection_failure
+                    ),
+                    "BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER": str(
+                        inspection_failure
+                    ),
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "could not inspect the restarted Supervisor before commit",
+                completed.stderr,
+            )
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "new:supervisor.start",
+                    "new:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "old:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
+
+    def test_post_restart_lock_failure_retains_new_files_after_quiescing(self) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, _old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+            lock_path = home / ".local/state/.mastic-locks/setup-removal.lock"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_NEW_MASTIC_CORRUPT_LOCK": str(lock_path),
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "transition lock must be a user-owned regular file",
+                completed.stderr,
+            )
+            self.assertIn(
+                "the exact installed release and recovery backups were retained",
+                completed.stderr,
+            )
+            self.assertNotIn("old:supervisor.start", lifecycle_log.read_text())
+            self.assertNotIn("new:supervisor.stop", lifecycle_log.read_text())
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/share/mastic/tools/mastic/release.txt").read_bytes(),
+                b"new tool",
+            )
+
+    def test_restart_failure_rolls_back_and_recovers_the_running_supervisor(
+        self,
+    ) -> None:
+        with self._artifact() as (root, artifact, release):
+            tools = root / "tools"
+            tools.mkdir()
+            self._host_tools(tools, machine="arm64", version="15.7")
+            home = root / "home"
+            state, lifecycle_log, old_launcher = self._supervisor_fixture(
+                home, tools, running=True
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "BOOTSTRAP_NEW_MASTIC_START_FAIL": "1",
+                    "BOOTSTRAP_SUPERVISOR_STATE": str(state),
+                    "BOOTSTRAP_SUPERVISOR_LOG": str(lifecycle_log),
+                },
+            ):
+                completed = self._run(
+                    artifact, tools, "--artifact-dir", str(release), home=home
+                )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("could not restart the running Supervisor", completed.stderr)
+            self.assertNotIn("Installed MASTIC", completed.stdout)
+            self.assertEqual(
+                lifecycle_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "old:supervisor.stop",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "new:supervisor.start",
+                    f"launchctl:bootout:gui/{os.getuid()}/io.nisavid.masticd",
+                    "old:supervisor.start",
+                ],
+            )
+            self.assertEqual(state.read_text(encoding="utf-8"), "running\n")
+            self.assertEqual(
+                (home / ".local/bin/mastic").read_bytes(),
+                old_launcher,
+            )
 
     def test_verified_closure_quarantine_is_removed_without_erasing_other_metadata(
         self,
@@ -704,8 +1386,8 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             parent = home / ".local/share/mastic"
             self.assertEqual(list(parent.glob(".bootstrap-uv.mastic-*")), [])
 
-    def _artifact(self):
-        return _ArtifactFixture()
+    def _artifact(self, *, version: str = "0.1.0", tool_marker: str = "new tool"):
+        return _ArtifactFixture(version=version, tool_marker=tool_marker)
 
     def _run(
         self,
@@ -736,7 +1418,72 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         )
         self._tool(tools / "sw_vers", f"print -r -- {version}")
 
+    def _supervisor_fixture(
+        self, home: Path, tools: Path, *, running: bool
+    ) -> tuple[Path, Path, bytes]:
+        state = home / "supervisor-state"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("running\n" if running else "stopped\n", encoding="utf-8")
+        lifecycle_log = home / "supervisor-lifecycle.log"
+        self._tool(
+            tools / "launchctl",
+            "if [[ $1 == print ]]; then\n"
+            "  [[ -n ${BOOTSTRAP_LAUNCHCTL_PRINT_FAIL:-} ]] && exit 93\n"
+            "  if [[ -n ${BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER:-} "
+            "&& -e $BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER ]]; then\n"
+            "    integer remaining="
+            '$(<"$BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER")\n'
+            "    if (( remaining == 0 )); then\n"
+            '      /bin/rm -f "$BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER"\n'
+            "      exit 93\n"
+            "    fi\n"
+            "    print -r -- $(( remaining - 1 )) "
+            '>"$BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_ONCE_MARKER"\n'
+            "  fi\n"
+            "  [[ -n ${BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_MARKER:-} "
+            "&& -e $BOOTSTRAP_LAUNCHCTL_PRINT_FAIL_MARKER ]] && exit 93\n"
+            '  if [[ $(<"$BOOTSTRAP_SUPERVISOR_STATE") == absent ]]; then\n'
+            "    exit 113\n"
+            '  elif [[ $(<"$BOOTSTRAP_SUPERVISOR_STATE") == running ]]; then\n'
+            "    print -r -- $'state = running\\npid = 123'\n"
+            "  else\n"
+            "    print -r -- 'state = exited'\n"
+            "  fi\n"
+            "  exit 0\n"
+            "elif [[ $1 == bootout ]]; then\n"
+            '  print -r -- "launchctl:bootout:$2" '
+            '>>"$BOOTSTRAP_SUPERVISOR_LOG"\n'
+            "  [[ -n ${BOOTSTRAP_LAUNCHCTL_BOOTOUT_FAIL:-} ]] && exit 92\n"
+            '  print -r -- absent >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 91",
+        )
+        old_mastic = home / ".local/bin/mastic"
+        self._tool(
+            old_mastic,
+            'print -r -- "old:$1.$2" >>"$BOOTSTRAP_SUPERVISOR_LOG"\n'
+            "if [[ $1 == supervisor && $2 == stop ]]; then\n"
+            "  [[ -n ${BOOTSTRAP_OLD_MASTIC_STOP_FAIL:-} ]] && exit 77\n"
+            '  print -r -- stopped >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "  if [[ -n ${BOOTSTRAP_OLD_MASTIC_TERM_AFTER_STOP:-} "
+            "&& ! -e $BOOTSTRAP_OLD_MASTIC_TERM_MARKER ]]; then\n"
+            '    : >"$BOOTSTRAP_OLD_MASTIC_TERM_MARKER"\n'
+            "    kill -TERM $PPID\n"
+            "  fi\n"
+            "elif [[ $1 == supervisor && $2 == start ]]; then\n"
+            '  print -r -- running >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "fi",
+        )
+        old_masticd = home / ".local/bin/masticd"
+        self._tool(old_masticd, "exit 0")
+        old_tool = home / ".local/share/mastic/tools/mastic/release.txt"
+        old_tool.parent.mkdir(parents=True)
+        old_tool.write_bytes(b"old tool")
+        return state, lifecycle_log, old_mastic.read_bytes()
+
     def _tool(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"#!/usr/bin/env zsh\n{body}\n", encoding="utf-8")
         path.chmod(0o755)
 
@@ -760,16 +1507,22 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
 
 
 class _ArtifactFixture:
+    def __init__(self, *, version: str, tool_marker: str) -> None:
+        self._version = version
+        self._tool_marker = tool_marker
+
     def __enter__(self):
         self._temporary = tempfile.TemporaryDirectory()
         root = Path(self._temporary.__enter__())
-        wheel = root / "mastic-0.1.0-py3-none-any.whl"
+        wheel = root / f"mastic-{self._version}-py3-none-any.whl"
         wheel.write_bytes(b"trusted wheel")
         release = root / "release"
         release.mkdir()
         release_wheel = release / wheel.name
         release_wheel.write_bytes(wheel.read_bytes())
-        closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+        closure = (
+            release / f"mastic-bootstrap-closure-{self._version}-macos-arm64.tar.gz"
+        )
         closure_root = root / "closure"
         (closure_root / "uv").mkdir(parents=True)
         (closure_root / "python/bin").mkdir(parents=True)
@@ -782,9 +1535,73 @@ class _ArtifactFixture:
             'print -r -- "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR" '
             '"$*" >"${BOOTSTRAP_UV_LOG:-/dev/null}"\n'
             'mkdir -p -- "$UV_TOOL_DIR/mastic" "$UV_TOOL_BIN_DIR"\n'
-            'print -rn -- "new tool" >"$UV_TOOL_DIR/mastic/release.txt"\n'
-            'print -rn -- "new mastic" >"$UV_TOOL_BIN_DIR/mastic"\n'
+            f'print -rn -- "{self._tool_marker}" '
+            '>"$UV_TOOL_DIR/mastic/release.txt"\n'
+            "cat >\"$UV_TOOL_BIN_DIR/mastic\" <<'MASTIC'\n"
+            "#!/bin/zsh\n"
+            "typeset -gi bootstrap_fence_fd=-1\n"
+            "if [[ -n ${MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256:-} ]]; then\n"
+            "  zmodload zsh/system || exit 90\n"
+            '  bootstrap_fence="$HOME/.local/state/.mastic-locks/setup-removal.lock"\n'
+            "  zsystem flock -t 30 -f bootstrap_fence_fd "
+            '"$bootstrap_fence" || exit 91\n'
+            "  bootstrap_receipt="
+            '"${MASTIC_DATA_DIR:-$HOME/.local/share/mastic}/bootstrap-artifacts/bootstrap-receipt.json"\n'
+            '  bootstrap_actual=$(shasum -a 256 "$bootstrap_receipt") || exit 92\n'
+            "  bootstrap_actual=${bootstrap_actual%% *}\n"
+            "  if [[ $bootstrap_actual != "
+            "$MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256 ]]; then\n"
+            "    zsystem flock -u $bootstrap_fence_fd\n"
+            "    bootstrap_fence_fd=-1\n"
+            "    print -ru2 -- 'Another installation replaced this MASTIC generation.'\n"
+            "    exit 89\n"
+            "  fi\n"
+            "fi\n"
+            'print -r -- "new:$1.$2" >>"${BOOTSTRAP_SUPERVISOR_LOG:-/dev/null}"\n'
+            "if [[ $1 == supervisor && $2 == start ]]; then\n"
+            "  if [[ -n ${BOOTSTRAP_NEW_MASTIC_START_ENTERED:-} ]]; then\n"
+            '    : >"$BOOTSTRAP_NEW_MASTIC_START_ENTERED"\n'
+            "    while [[ ! -e $BOOTSTRAP_NEW_MASTIC_START_CONTINUE ]]; do\n"
+            "      sleep 0.05\n"
+            "    done\n"
+            "  fi\n"
+            "  if [[ -n ${BOOTSTRAP_NEW_MASTIC_START_FAIL:-} ]]; then\n"
+            '    print -r -- stopped >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "    [[ -z ${BOOTSTRAP_NEW_MASTIC_START_FAILURE_MARKER:-} ]] "
+            '|| : >"$BOOTSTRAP_NEW_MASTIC_START_FAILURE_MARKER"\n'
+            "    exit 88\n"
+            "  fi\n"
+            '  print -r -- running >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "  [[ -z ${BOOTSTRAP_NEW_MASTIC_START_SUCCESS_MARKER:-} ]] "
+            '|| print -r -- 1 >"$BOOTSTRAP_NEW_MASTIC_START_SUCCESS_MARKER"\n'
+            "  if [[ -n ${BOOTSTRAP_NEW_MASTIC_CORRUPT_LOCK:-} ]]; then\n"
+            '    /bin/rm -f "$BOOTSTRAP_NEW_MASTIC_CORRUPT_LOCK"\n'
+            '    /bin/ln -s /dev/null "$BOOTSTRAP_NEW_MASTIC_CORRUPT_LOCK"\n'
+            "  fi\n"
+            "elif [[ $1 == supervisor && $2 == stop ]]; then\n"
+            '  print -r -- stopped >"$BOOTSTRAP_SUPERVISOR_STATE"\n'
+            "fi\n"
+            "if (( bootstrap_fence_fd >= 0 )); then\n"
+            "  zsystem flock -u $bootstrap_fence_fd\n"
+            "  bootstrap_fence_fd=-1\n"
+            "fi\n"
+            "if [[ $1 == supervisor && $2 == stop "
+            "&& -n ${BOOTSTRAP_NEW_MASTIC_STOP_RELEASED:-} ]]; then\n"
+            '  : >"$BOOTSTRAP_NEW_MASTIC_STOP_RELEASED"\n'
+            "  while [[ ! -e $BOOTSTRAP_NEW_MASTIC_STOP_CONTINUE ]]; do\n"
+            "    sleep 0.05\n"
+            "  done\n"
+            "fi\n"
+            'sleep "${BOOTSTRAP_NEW_MASTIC_POST_RELEASE_DELAY:-0}"\n'
+            "MASTIC\n"
             'print -rn -- "new masticd" >"$UV_TOOL_BIN_DIR/masticd"\n'
+            'chmod 0755 "$UV_TOOL_BIN_DIR/mastic" "$UV_TOOL_BIN_DIR/masticd"\n'
+            "if [[ -n ${BOOTSTRAP_EXPECT_TRANSITION_LOCK:-} ]]; then\n"
+            "  BOOTSTRAP_LOCK_PATH=$BOOTSTRAP_EXPECT_TRANSITION_LOCK "
+            "zsh -fc 'zmodload zsh/system || exit 2; "
+            "if zsystem flock -t 0.1 -f contender $BOOTSTRAP_LOCK_PATH; "
+            "then exit 1; fi'\n"
+            "fi\n"
             "[[ -n ${BOOTSTRAP_UV_FAIL_AFTER_MUTATION:-} ]] && exit 97\n"
             "if [[ -n ${BOOTSTRAP_UV_TERM_AFTER_MUTATION:-} ]]; then\n"
             "  kill -TERM $PPID\n"

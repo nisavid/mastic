@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import plistlib
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from mastic.application.config_schema import validate_config
+from mastic.application.catalogue import OperationKind
 from mastic.application.dispatch import ApplicationError, OperationRequest
 from mastic.application.setup import (
     SetupEvidence,
@@ -71,6 +73,15 @@ class _Port:
     def execute(self, operation, parameters):
         self.calls.append((operation, dict(parameters)))
         return dict(self.result)
+
+
+class _RequestDispatcher:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def execute(self, request):
+        self.calls.append(request)
+        return {"executed": True}
 
 
 class _Activator:
@@ -833,6 +844,78 @@ route = "coding"
 
         self.assertEqual(guard.execute(request), {"edited": True})
         self.assertEqual(dispatcher.calls, [request])
+
+    def test_bootstrap_generation_fence_rejects_a_superseded_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config",
+                root / "state",
+                root / "data",
+                root / "logs",
+            )
+            paths.prepare()
+            receipt = paths.data_dir / "bootstrap-artifacts" / "bootstrap-receipt.json"
+            receipt.parent.mkdir(parents=True)
+            receipt.write_bytes(b"newer generation")
+            dispatcher = _RequestDispatcher()
+            guard = _GatewayMutationGuard(
+                dispatcher,
+                _Launchd(running=False),
+                catalogue={
+                    "supervisor.start": SimpleNamespace(kind=OperationKind.MUTATION)
+                },
+                paths=paths,
+            )
+            expected = hashlib.sha256(b"older generation").hexdigest()
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {"MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256": expected},
+                ),
+                self.assertRaisesRegex(
+                    ApplicationError,
+                    "Another installation replaced this MASTIC generation",
+                ),
+            ):
+                guard.execute(OperationRequest("supervisor.start", {}))
+
+            self.assertEqual(dispatcher.calls, [])
+
+    def test_bootstrap_generation_fence_allows_the_matching_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config",
+                root / "state",
+                root / "data",
+                root / "logs",
+            )
+            paths.prepare()
+            receipt = paths.data_dir / "bootstrap-artifacts" / "bootstrap-receipt.json"
+            receipt.parent.mkdir(parents=True)
+            receipt.write_bytes(b"matching generation")
+            dispatcher = _RequestDispatcher()
+            guard = _GatewayMutationGuard(
+                dispatcher,
+                _Launchd(running=False),
+                catalogue={
+                    "supervisor.start": SimpleNamespace(kind=OperationKind.MUTATION)
+                },
+                paths=paths,
+            )
+            expected = hashlib.sha256(receipt.read_bytes()).hexdigest()
+            request = OperationRequest("supervisor.start", {})
+
+            with patch.dict(
+                os.environ,
+                {"MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256": expected},
+            ):
+                result = guard.execute(request)
+
+            self.assertEqual(result, {"executed": True})
+            self.assertEqual(dispatcher.calls, [request])
 
     def test_application_target_sampling_defaults_cover_coding_and_memory_operations(
         self,

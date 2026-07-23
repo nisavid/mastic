@@ -14,6 +14,15 @@ typeset -g MASTIC_ACTIVE_SWAP_DESTINATION=''
 typeset -gi MASTIC_ACTIVE_SWAP_PID=0
 typeset -ga MASTIC_COMPLETED_SWAPS=()
 typeset -gi MASTIC_BOOTSTRAP_COMMITTED=0
+typeset -gi MASTIC_SUPERVISOR_WAS_RUNNING=0
+typeset -gi MASTIC_SUPERVISOR_STOPPED=0
+typeset -gi MASTIC_SUPERVISOR_RESTARTED=0
+typeset -gi MASTIC_TRANSITION_LOCK_FD=-1
+typeset -gi MASTIC_INSTALL_COMPLETE=0
+typeset -gi MASTIC_RETAIN_BACKUPS=0
+typeset -gi MASTIC_CLEANUP_DONE=0
+typeset -g MASTIC_EXPECTED_RECEIPT_PATH=''
+typeset -g MASTIC_EXPECTED_RECEIPT_SHA256=''
 
 usage() {
   emulate -L zsh
@@ -57,6 +66,238 @@ verify_sha256() {
   actual=$(shasum -a 256 "$file")
   actual=${actual%% *}
   [[ $actual == $expected ]] || fail "digest verification failed for ${file:t}"
+}
+
+supervisor_state() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  local launchd_output=''
+  integer inspect_status=0
+  launchd_output=$(launchctl print "gui/${UID}/io.nisavid.masticd" 2>/dev/null) || inspect_status=$?
+  if (( inspect_status == 0 )); then
+    if [[ $launchd_output == *'state = running'* ]]; then
+      print -r -- running
+    else
+      print -r -- stopped
+    fi
+  elif (( inspect_status == 113 )); then
+    print -r -- absent
+  else
+    return 1
+  fi
+}
+
+acquire_transition_lock() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  (( MASTIC_TRANSITION_LOCK_FD < 0 )) || return 0
+  local lock_dir="$HOME/.local/state/.mastic-locks"
+  local lock_path="$lock_dir/setup-removal.lock"
+  zmodload zsh/system || {
+    fail 'zsh/system is required to coordinate the installation transition'
+    return 1
+  }
+  mkdir -p -- "$lock_dir"
+  [[ -d $lock_dir && ! -L $lock_dir && -O $lock_dir ]] || {
+    fail "transition lock directory must be user-owned: $lock_dir"
+    return 1
+  }
+  chmod 0700 "$lock_dir"
+  if [[ -e $lock_path || -L $lock_path ]]; then
+    [[ -f $lock_path && ! -L $lock_path && -O $lock_path ]] || {
+      fail "transition lock must be a user-owned regular file: $lock_path"
+      return 1
+    }
+  else
+    (
+      umask 077
+      : >"$lock_path"
+    )
+  fi
+  zsystem flock -t 30 -f MASTIC_TRANSITION_LOCK_FD "$lock_path" || {
+    fail 'timed out waiting for another MASTIC lifecycle transition'
+    return 1
+  }
+  [[ -f $lock_path && ! -L $lock_path && -O $lock_path ]] || {
+    zsystem flock -u $MASTIC_TRANSITION_LOCK_FD || true
+    MASTIC_TRANSITION_LOCK_FD=-1
+    fail "transition lock must remain a user-owned regular file: $lock_path"
+    return 1
+  }
+  chmod 0600 "$lock_path"
+}
+
+release_transition_lock() {
+  emulate -L zsh
+  setopt no_unset
+  (( MASTIC_TRANSITION_LOCK_FD >= 0 )) || return 0
+  integer released_fd=$MASTIC_TRANSITION_LOCK_FD
+  zsystem flock -u $MASTIC_TRANSITION_LOCK_FD || return 1
+  [[ ! -e /dev/fd/$released_fd ]] || {
+    fail 'the installation transition descriptor remained open after release'
+    return 1
+  }
+  MASTIC_TRANSITION_LOCK_FD=-1
+}
+
+unregister_supervisor_job() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  local observed_state
+  observed_state=$(supervisor_state) || return 1
+  [[ $observed_state == absent ]] && return 0
+  launchctl bootout "gui/${UID}/io.nisavid.masticd" >/dev/null || return 1
+  integer started=$SECONDS
+  while (( SECONDS - started < 30 )); do
+    observed_state=$(supervisor_state) || return 1
+    [[ $observed_state == absent ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_supervisor_state() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  local expected=$1 observed_state
+  integer started=$SECONDS
+  while (( SECONDS - started < 30 )); do
+    observed_state=$(supervisor_state) || return 1
+    if [[ $expected == running ]]; then
+      [[ $observed_state == running ]] && return 0
+    elif [[ $observed_state == stopped || $observed_state == absent ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+run_fenced_supervisor_command() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  local cli=$1 action=$2
+  if [[ -n $MASTIC_EXPECTED_RECEIPT_SHA256 ]]; then
+    MASTIC_BOOTSTRAP_EXPECTED_RECEIPT_SHA256=$MASTIC_EXPECTED_RECEIPT_SHA256 \
+      "$cli" supervisor "$action"
+  else
+    "$cli" supervisor "$action"
+  fi
+}
+
+prepare_supervisor_replacement() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  local observed_state existing_cli
+  while true; do
+    observed_state=$(supervisor_state) || {
+      fail 'could not inspect the Supervisor before installation'
+      return 1
+    }
+    if [[ $observed_state == running ]]; then
+      existing_cli="$HOME/.local/bin/mastic"
+      [[ -f $existing_cli && ! -L $existing_cli && -x $existing_cli ]] || {
+        fail 'the running Supervisor cannot be drained because the installed mastic CLI is unavailable'
+        return 1
+      }
+      MASTIC_SUPERVISOR_WAS_RUNNING=1
+      MASTIC_SUPERVISOR_STOPPED=1
+      print -r -- 'Draining the running Supervisor before replacing MASTIC.'
+      if ! run_fenced_supervisor_command "$existing_cli" stop; then
+        observed_state=$(supervisor_state) || observed_state=''
+        [[ $observed_state == running ]] && MASTIC_SUPERVISOR_RESTARTED=1
+        fail 'the running Supervisor could not be drained before installation'
+        return 1
+      fi
+      wait_for_supervisor_state stopped || {
+        fail 'the running Supervisor did not exit after its drain completed'
+        return 1
+      }
+    fi
+    acquire_transition_lock
+    observed_state=$(supervisor_state) || {
+      release_transition_lock || true
+      fail 'could not inspect the Supervisor while holding the installation transition'
+      return 1
+    }
+    installed_generation_matches || {
+      fail 'another installation replaced the expected MASTIC generation during transition'
+      return 1
+    }
+    if [[ $observed_state == running ]]; then
+      release_transition_lock || {
+        fail 'could not release the installation transition for Supervisor drain'
+        return 1
+      }
+      continue
+    fi
+    if (( MASTIC_SUPERVISOR_WAS_RUNNING )); then
+      unregister_supervisor_job || {
+        fail 'the stopped Supervisor could not be unregistered before installation'
+        return 1
+      }
+    fi
+    return 0
+  done
+}
+
+restart_replaced_supervisor() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  (( MASTIC_SUPERVISOR_WAS_RUNNING )) || return 0
+  local installed_cli="$HOME/.local/bin/mastic"
+  [[ -f $installed_cli && ! -L $installed_cli && -x $installed_cli ]] || {
+    fail 'could not restart the running Supervisor because the installed mastic CLI is unavailable'
+    return 1
+  }
+  print -r -- 'Restarting the Supervisor with the installed MASTIC release.'
+  run_fenced_supervisor_command "$installed_cli" start || {
+    fail 'could not restart the running Supervisor with the installed MASTIC release'
+    return 1
+  }
+  wait_for_supervisor_state running || {
+    fail 'the restarted Supervisor did not reach the running state'
+    return 1
+  }
+  MASTIC_SUPERVISOR_RESTARTED=1
+}
+
+installed_generation_matches() {
+  emulate -L zsh
+  setopt no_unset pipe_fail
+  [[ -n $MASTIC_EXPECTED_RECEIPT_PATH && -n $MASTIC_EXPECTED_RECEIPT_SHA256 ]] || return 0
+  [[ -f $MASTIC_EXPECTED_RECEIPT_PATH && ! -L $MASTIC_EXPECTED_RECEIPT_PATH ]] || return 1
+  local actual
+  actual=$(shasum -a 256 "$MASTIC_EXPECTED_RECEIPT_PATH") || return 1
+  actual=${actual%% *}
+  [[ $actual == $MASTIC_EXPECTED_RECEIPT_SHA256 ]]
+}
+
+verify_installed_generation() {
+  emulate -L zsh
+  setopt err_return no_unset pipe_fail
+  [[ -n $MASTIC_EXPECTED_RECEIPT_PATH && -n $MASTIC_EXPECTED_RECEIPT_SHA256 ]] || {
+    fail 'the installed generation receipt was not recorded'
+    return 1
+  }
+  if ! verify_sha256 "$MASTIC_EXPECTED_RECEIPT_PATH" "$MASTIC_EXPECTED_RECEIPT_SHA256"; then
+    MASTIC_RETAIN_BACKUPS=1
+    MASTIC_SUPERVISOR_RESTARTED=0
+    release_transition_lock || true
+    fail 'another installation replaced the exact MASTIC generation before commit'
+    return 1
+  fi
+  if (( MASTIC_SUPERVISOR_WAS_RUNNING )); then
+    local observed_state
+    observed_state=$(supervisor_state) || {
+      fail 'could not inspect the restarted Supervisor before commit'
+      return 1
+    }
+    [[ $observed_state == running ]] || {
+      fail 'the restarted Supervisor was not running at commit'
+      return 1
+    }
+  fi
 }
 
 verify_closure() {
@@ -158,29 +399,83 @@ validate_archive_members() {
 cleanup_bootstrap_state() {
   emulate -L zsh
   setopt no_unset
+  (( MASTIC_CLEANUP_DONE )) && return 0
+  MASTIC_CLEANUP_DONE=1
   local destination=$MASTIC_ACTIVE_SWAP_DESTINATION stage=$MASTIC_ACTIVE_SWAP_STAGE
   local backup=$MASTIC_ACTIVE_SWAP_BACKUP
-  integer index active_recorded=0
+  integer index active_recorded=0 rollback_ok=1 observation_ok=1
   if (( MASTIC_ACTIVE_SWAP_PID > 0 )); then
     kill -TERM $MASTIC_ACTIVE_SWAP_PID 2>/dev/null || true
     wait $MASTIC_ACTIVE_SWAP_PID 2>/dev/null || true
     MASTIC_ACTIVE_SWAP_PID=0
   fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ${#MASTIC_COMPLETED_SWAPS} > 0 )); then
+    if (( MASTIC_TRANSITION_LOCK_FD < 0 )) && ! acquire_transition_lock; then
+      print -ru2 -- 'mastic bootstrap: the installation transition could not be acquired for generation-safe recovery'
+      observation_ok=0
+      MASTIC_RETAIN_BACKUPS=1
+    elif ! installed_generation_matches; then
+      print -ru2 -- 'mastic bootstrap: a newer installation owns the active MASTIC generation; its files and Supervisor were left untouched'
+      MASTIC_RETAIN_BACKUPS=1
+    fi
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && ${#MASTIC_COMPLETED_SWAPS} > 0 && ! MASTIC_SUPERVISOR_RESTARTED && MASTIC_TRANSITION_LOCK_FD >= 0 )); then
+    local recovery_state
+    if ! recovery_state=$(supervisor_state); then
+      print -ru2 -- 'mastic bootstrap: the Supervisor state could not be confirmed for generation-safe recovery'
+      observation_ok=0
+      MASTIC_RETAIN_BACKUPS=1
+    elif [[ $recovery_state == running ]]; then
+      release_transition_lock || {
+        observation_ok=0
+        MASTIC_RETAIN_BACKUPS=1
+      }
+    elif (( MASTIC_SUPERVISOR_WAS_RUNNING )) && ! unregister_supervisor_job; then
+      print -ru2 -- 'mastic bootstrap: the stopped Supervisor could not be unregistered for recovery'
+      observation_ok=0
+      MASTIC_RETAIN_BACKUPS=1
+    fi
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && ${#MASTIC_COMPLETED_SWAPS} > 0 && MASTIC_SUPERVISOR_RESTARTED )); then
+    if ! release_transition_lock; then
+      print -ru2 -- 'mastic bootstrap: the installation transition could not be released before recovery'
+      observation_ok=0
+      MASTIC_RETAIN_BACKUPS=1
+    fi
+    MASTIC_SUPERVISOR_RESTARTED=0
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && MASTIC_TRANSITION_LOCK_FD < 0 && (${#MASTIC_COMPLETED_SWAPS} > 0 || (MASTIC_SUPERVISOR_WAS_RUNNING && ! MASTIC_SUPERVISOR_RESTARTED)) )); then
+    if ! prepare_supervisor_replacement; then
+      print -ru2 -- 'mastic bootstrap: the Supervisor could not be made quiescent for recovery'
+      observation_ok=0
+      if (( ${#MASTIC_COMPLETED_SWAPS} > 0 )); then
+        print -ru2 -- 'mastic bootstrap: the installed paths and prior-release backups were retained because rollback is unsafe'
+        MASTIC_RETAIN_BACKUPS=1
+      fi
+    fi
+  fi
   index=${#MASTIC_COMPLETED_SWAPS}
   if (( index >= 2 )) && [[ -n $destination && $MASTIC_COMPLETED_SWAPS[$(( index - 1 ))] == $destination && $MASTIC_COMPLETED_SWAPS[$index] == $backup ]]; then
     active_recorded=1
   fi
-  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! active_recorded )) && [[ -n $destination ]]; then
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && ! active_recorded )) && [[ -n $destination ]]; then
     if [[ -n $backup && ( -e $backup || -L $backup ) ]]; then
+      integer destination_cleared=1
       if [[ -e $destination || -L $destination ]]; then
-        rm -rf -- "$destination" || print -ru2 -- "mastic bootstrap: could not remove interrupted destination: $destination"
+        if ! rm -rf -- "$destination"; then
+          print -ru2 -- "mastic bootstrap: could not remove interrupted destination: $destination"
+          destination_cleared=0
+          rollback_ok=0
+        fi
       fi
-      if ! /bin/mv "$backup" "$destination"; then
+      if (( destination_cleared )) && ! /bin/mv "$backup" "$destination"; then
         print -ru2 -- "mastic bootstrap: could not restore interrupted destination: $destination"
+        rollback_ok=0
       fi
     elif [[ -n $stage && ! -e $stage && ! -L $stage && ( -e $destination || -L $destination ) ]]; then
       if ! rm -rf -- "$destination"; then
         print -ru2 -- "mastic bootstrap: could not remove interrupted destination: $destination"
+        rollback_ok=0
       fi
     fi
   fi
@@ -191,22 +486,52 @@ cleanup_bootstrap_state() {
   while (( index >= 2 )); do
     destination=$MASTIC_COMPLETED_SWAPS[$(( index - 1 ))]
     backup=$MASTIC_COMPLETED_SWAPS[$index]
-    if (( MASTIC_BOOTSTRAP_COMMITTED )); then
+    if (( MASTIC_RETAIN_BACKUPS )); then
+      :
+    elif (( MASTIC_BOOTSTRAP_COMMITTED )); then
       if [[ -e $backup || -L $backup ]]; then
         rm -rf -- "$backup" || print -ru2 -- "mastic bootstrap: could not remove committed backup: $backup"
       fi
     else
+      integer destination_cleared=1
       if [[ -e $destination || -L $destination ]]; then
-        rm -rf -- "$destination" || print -ru2 -- "mastic bootstrap: could not remove failed destination: $destination"
+        if ! rm -rf -- "$destination"; then
+          print -ru2 -- "mastic bootstrap: could not remove failed destination: $destination"
+          destination_cleared=0
+          rollback_ok=0
+        fi
       fi
-      if [[ -e $backup || -L $backup ]]; then
+      if (( destination_cleared )) && [[ -e $backup || -L $backup ]]; then
         if ! /bin/mv "$backup" "$destination"; then
           print -ru2 -- "mastic bootstrap: could not restore failed destination: $destination"
+          rollback_ok=0
         fi
       fi
     fi
     (( index -= 2 ))
   done
+  if ! release_transition_lock; then
+    print -ru2 -- 'mastic bootstrap: the installation transition lock could not be released during recovery'
+    observation_ok=0
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! MASTIC_RETAIN_BACKUPS && MASTIC_SUPERVISOR_WAS_RUNNING && MASTIC_SUPERVISOR_STOPPED && ! MASTIC_SUPERVISOR_RESTARTED && rollback_ok && observation_ok )); then
+    local restored_cli="$HOME/.local/bin/mastic"
+    if [[ ! -f $restored_cli || -L $restored_cli || ! -x $restored_cli ]] \
+      || ! "$restored_cli" supervisor start \
+      || ! wait_for_supervisor_state running; then
+      print -ru2 -- 'mastic bootstrap: the previous MASTIC release was restored, but its Supervisor could not be restarted; run `mastic supervisor start` before continuing'
+    fi
+  fi
+  if (( ! MASTIC_BOOTSTRAP_COMMITTED && ! rollback_ok && MASTIC_SUPERVISOR_WAS_RUNNING )); then
+    print -ru2 -- 'mastic bootstrap: rollback was incomplete; the Supervisor remains stopped to avoid running a mixed release'
+  fi
+  if (( MASTIC_RETAIN_BACKUPS )); then
+    if (( MASTIC_INSTALL_COMPLETE )); then
+      print -ru2 -- 'mastic bootstrap: the exact installed release and recovery backups were retained; verify Supervisor state before retrying'
+    else
+      print -ru2 -- 'mastic bootstrap: partially installed paths and recovery backups were retained; do not start the Supervisor until the installation is repaired'
+    fi
+  fi
   MASTIC_ACTIVE_SWAP_DESTINATION=''
   MASTIC_ACTIVE_SWAP_STAGE=''
   MASTIC_ACTIVE_SWAP_BACKUP=''
@@ -392,6 +717,7 @@ main() {
   tar -xzf "$closure" -C "$root"
   verify_closure "$root"
   clear_verified_quarantine "$root"
+  prepare_supervisor_replacement
 
   uv_source="$root/uv"
   uv_destination="$mastic_data_dir/bootstrap-uv"
@@ -407,9 +733,12 @@ main() {
   application_manifest_digest=${application_manifest_digest%% *}
   receipt="$artifacts_parent/bootstrap-receipt.json"
   receipt_stage="${receipt}.mastic-bootstrap.$$"
-  print -r -- "{\"schema_version\":1,\"closure_sha256\":\"${MASTIC_CLOSURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
+  print -r -- "{\"schema_version\":1,\"version\":\"${MASTIC_VERSION}\",\"wheel_sha256\":\"${MASTIC_WHEEL_SHA256}\",\"closure_sha256\":\"${MASTIC_CLOSURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
   chmod 0600 "$receipt_stage"
   replace_file "$receipt_stage" "$receipt"
+  MASTIC_EXPECTED_RECEIPT_PATH=$receipt
+  MASTIC_EXPECTED_RECEIPT_SHA256=$(shasum -a 256 "$receipt")
+  MASTIC_EXPECTED_RECEIPT_SHA256=${MASTIC_EXPECTED_RECEIPT_SHA256%% *}
 
   wheel="$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl"
   record_mutable_target "$mastic_data_dir/tools/mastic"
@@ -432,6 +761,11 @@ main() {
   wait $MASTIC_ACTIVE_SWAP_PID || install_status=$?
   MASTIC_ACTIVE_SWAP_PID=0
   (( install_status == 0 )) || fail 'exact MASTIC tool installation failed'
+  MASTIC_INSTALL_COMPLETE=1
+  release_transition_lock || fail 'could not release the installation transition after installation'
+  restart_replaced_supervisor
+  acquire_transition_lock
+  verify_installed_generation
   MASTIC_BOOTSTRAP_COMMITTED=1
 
   print -r -- "Installed MASTIC ${MASTIC_VERSION}."

@@ -31,6 +31,27 @@ AirDrop to run without changing quarantine metadata in the caller-owned artifact
 directory or removing unrelated extended attributes. Bootstrap aborts with an
 actionable error if `/usr/bin/xattr` is unavailable or quarantine removal fails.
 
+Before replacing an installed release, bootstrap reads the live launchd state.
+An inactive Supervisor remains inactive. A running Supervisor first drains its
+Service Runs and Gateway through the installed CLI, exits, and is unregistered
+so launchd cannot retain its previous program definition. After the exact tool
+replacement, the new CLI registers the current definition, starts the
+Supervisor, and reconciles the Gateway and services according to their
+activation policies. Bootstrap aborts before replacement when launchd cannot
+confirm whether the Supervisor is running. Replacement holds the same
+cross-process lifecycle-transition lock as public MASTIC mutations, so a
+concurrent start cannot cross the generation swap.
+
+Bootstrap reports success only after that active-state transition completes. A
+failed drain or unregister aborts before replacement. A failed installation or
+new-generation start rolls back the prior release and attempts to restore its
+previously running Supervisor. The command still exits nonzero after successful
+recovery. If recovery also fails, stop and follow its recovery message before
+running a Supervisor-required command. Bootstrap does not restart the
+Supervisor after an incomplete filesystem rollback. If recovery cannot confirm
+a quiescent Supervisor after replacement, it retains both the installed paths
+and their prior-release backups for explicit repair.
+
 ## LaunchAgent
 
 - Label: `io.nisavid.masticd`
