@@ -336,7 +336,7 @@ class LocalCodexOwnerReconciliation:
             "status": transition.value,
             "safe_owner_action_available": transition is ReleaseTransitionKind.UPGRADE,
             "next_actions": (
-                ["mastic application upgrade codex"]
+                ["mastic app upgrade codex"]
                 if transition is ReleaseTransitionKind.UPGRADE
                 else []
             ),
@@ -784,7 +784,7 @@ class SetupApplicationReconciliation:
                         "owner": inspection.get("owner"),
                     },
                     next_actions=(
-                        "mastic application upgrade codex",
+                        "mastic app upgrade codex",
                         "rerun mastic setup",
                         "rerun setup with --preserve-outdated-codex",
                     ),

@@ -101,7 +101,7 @@ class CodexMigrationDryRunTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "codex_upgrade_required")
         self.assertEqual(legacy.targets, [])
         self.assertEqual(codex.executions, 0)
-        self.assertIn("mastic application upgrade codex", raised.exception.next_actions)
+        self.assertIn("mastic app upgrade codex", raised.exception.next_actions)
 
     def test_setup_can_explicitly_preserve_outdated_vite_codex(self) -> None:
         legacy = LegacySupply()

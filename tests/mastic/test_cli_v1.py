@@ -66,17 +66,19 @@ class CliV1Tests(unittest.TestCase):
 
     def test_root_help_exposes_resource_groups_and_guided_setup(self) -> None:
         result = self.runner.invoke(self.app, ["--help"])
+        output = strip_ansi(result.output)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("setup", result.output)
-        self.assertIn("remove", result.output)
-        self.assertIn("supervisor", result.output)
-        self.assertIn("runtime", result.output)
-        self.assertIn("model", result.output)
-        self.assertIn("service", result.output)
-        self.assertIn("application", result.output)
-        self.assertIn("application-target", result.output)
-        self.assertNotIn("client", result.output)
+        self.assertIn("setup", output)
+        self.assertIn("remove", output)
+        self.assertIn("supervisor", output)
+        self.assertIn("runtime", output)
+        self.assertIn("model", output)
+        self.assertIn("service", output)
+        self.assertIn("\n│ app ", output)
+        self.assertNotIn("\n│ application ", output)
+        self.assertIn("application-target", output)
+        self.assertNotIn("client", output)
 
     def test_required_integer_parameters_are_enforced_before_dispatch(self) -> None:
         catalogue = dict(build_operation_catalogue())
@@ -125,14 +127,25 @@ class CliV1Tests(unittest.TestCase):
         )
         self.assertNotEqual(prohibited.exit_code, 0)
 
+    def test_app_is_the_only_external_application_command_group(self) -> None:
+        canonical = self.runner.invoke(self.app, ["app", "--help"])
+        prohibited = self.runner.invoke(self.app, ["application", "--help"])
+
+        self.assertEqual(canonical.exit_code, 0, canonical.output)
+        self.assertIn("inspect", canonical.output)
+        self.assertIn("upgrade", canonical.output)
+        self.assertEqual(prohibited.exit_code, 2)
+        self.assertIn(
+            "No such command 'application'",
+            strip_ansi(prohibited.output),
+        )
+
     def test_application_operations_dispatch_the_generic_application_identity(
         self,
     ) -> None:
-        inspected = self.runner.invoke(
-            self.app, ["application", "inspect", "codex", "--json"]
-        )
+        inspected = self.runner.invoke(self.app, ["app", "inspect", "codex", "--json"])
         upgraded = self.runner.invoke(
-            self.app, ["application", "upgrade", "codex", "--yes", "--json"]
+            self.app, ["app", "upgrade", "codex", "--yes", "--json"]
         )
 
         self.assertEqual(inspected.exit_code, 0, inspected.output)
@@ -148,7 +161,12 @@ class CliV1Tests(unittest.TestCase):
     def test_every_catalogue_operation_has_a_cli_help_surface(self) -> None:
         for name in build_operation_catalogue():
             with self.subTest(operation=name):
-                result = self.runner.invoke(self.app, [*name.split("."), "--help"])
+                group, *command = name.split(".")
+                cli_group = "app" if group == "application" else group
+                result = self.runner.invoke(
+                    self.app,
+                    [cli_group, *command, "--help"],
+                )
                 self.assertEqual(result.exit_code, 0, result.output)
 
     def test_status_help_is_machine_overview_not_ambiguous_server_argument(
