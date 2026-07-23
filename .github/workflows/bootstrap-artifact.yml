@@ -206,7 +206,7 @@ jobs:
           [[ $after_status =~ 'pid[[:space:]]*=[[:space:]]*([0-9]+)' ]]
           after_pid=$match[1]
           [[ $after_pid != $before_pid ]]
-          ! rg -q stale-generation-sentinel "$operation_ports"
+          ! /usr/bin/grep -q stale-generation-sentinel "$operation_ports"
           "$mastic" supervisor restart
           "$mastic" supervisor status --json >/dev/null
           "$mastic" gateway status --json >/dev/null

@@ -47,6 +47,10 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         self.assertIn("Reinstall over a running Supervisor", workflow)
         self.assertIn("stale-generation-sentinel", workflow)
         self.assertIn('"$mastic" supervisor stop --yes', workflow)
+        self.assertIn(
+            '! /usr/bin/grep -q stale-generation-sentinel "$operation_ports"',
+            workflow,
+        )
         self.assertIn("[[ $after_pid != $before_pid ]]", workflow)
         self.assertIn('"$mastic" supervisor restart', workflow)
 
