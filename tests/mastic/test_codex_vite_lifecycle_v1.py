@@ -98,8 +98,14 @@ class Discovery:
 
 class Verifier:
     def __init__(
-        self, *, staged_error=None, staged_error_on_call=None, installed_error=None
+        self,
+        *,
+        prepare_error=None,
+        staged_error=None,
+        staged_error_on_call=None,
+        installed_error=None,
     ):
+        self.prepare_error = prepare_error
         self.staged_error = staged_error
         self.staged_error_on_call = staged_error_on_call
         self.installed_error = installed_error
@@ -107,6 +113,8 @@ class Verifier:
 
     def prepare(self, selected, owner_runtime_identity):
         self.calls.append(("prepare", selected, owner_runtime_identity))
+        if self.prepare_error:
+            raise self.prepare_error
 
     def verify_staged(self, selected):
         self.calls.append(("staged", selected))
@@ -269,6 +277,56 @@ class CodexViteOwnerLifecycleTests(unittest.TestCase):
             selected.apply_exact(request(selected, observed, closure()))
 
         self.assertEqual(commands.calls, [])
+
+    def test_preparation_refusal_retains_its_typed_reason(self):
+        verifier = Verifier(
+            prepare_error=OwnerUpgradeCommandError("artifact_cache_prepare_failed")
+        )
+        selected, observed, _d, _v, commands = lifecycle(verifier=verifier)
+
+        with self.assertRaises(OwnerUpgradeNotAttemptedError) as raised:
+            selected.apply_exact(request(selected, observed, closure()))
+
+        self.assertEqual(raised.exception.reason_code, "artifact_cache_prepare_failed")
+        self.assertEqual(commands.calls, [])
+
+    def test_staged_refusal_retains_its_typed_reason(self):
+        verifier = Verifier(
+            staged_error=OwnerUpgradeCommandError("staged_payload_changed"),
+            staged_error_on_call=1,
+        )
+        selected, observed, _d, _v, commands = lifecycle(verifier=verifier)
+
+        with self.assertRaises(OwnerUpgradeNotAttemptedError) as raised:
+            selected.apply_exact(request(selected, observed, closure()))
+
+        self.assertEqual(raised.exception.reason_code, "staged_payload_changed")
+        self.assertEqual(commands.calls, [])
+
+    def test_unknown_refusal_uses_its_originating_phase(self):
+        for verifier, expected_reason in (
+            (
+                Verifier(prepare_error=OwnerUpgradeCommandError("private detail")),
+                "artifact_preparation_failed",
+            ),
+            (
+                Verifier(
+                    staged_error=OwnerUpgradeCommandError("private detail"),
+                    staged_error_on_call=1,
+                ),
+                "staged_artifact_changed",
+            ),
+        ):
+            with self.subTest(expected_reason=expected_reason):
+                selected, observed, _d, _v, commands = lifecycle(verifier=verifier)
+
+                with self.assertRaises(OwnerUpgradeNotAttemptedError) as raised:
+                    selected.apply_exact(request(selected, observed, closure()))
+
+                self.assertEqual(raised.exception.reason_code, expected_reason)
+                self.assertNotIn("private", repr(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertEqual(commands.calls, [])
 
     def test_tampered_action_or_invalid_version_spawns_no_command(self):
         selected, observed, _d, _v, commands = lifecycle()

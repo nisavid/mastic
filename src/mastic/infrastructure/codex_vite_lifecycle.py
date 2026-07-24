@@ -17,6 +17,7 @@ from mastic.application.external_application_lifecycle import (
     OwnerUpgradeAction,
     OwnerUpgradeCommandError,
     OwnerUpgradeExecutionEvidence,
+    OwnerUpgradeNotAttemptedFailure,
     OwnerUpgradeNotAttemptedError,
     OwnerUpgradeRequest,
     OwnerUpgradePreview,
@@ -52,10 +53,6 @@ _MAX_OWNER_COMMAND_CONTROL_BYTES = 64 * 1024
 
 class OwnerUpgradeExecutionError(OwnerUpgradeCommandError):
     """Content-free operational failure from a Codex owner mutation."""
-
-    def __init__(self, reason_code: str) -> None:
-        super().__init__(reason_code)
-        self.reason_code = reason_code
 
 
 class ExactCommandRunner(Protocol):
@@ -342,9 +339,20 @@ class CodexViteOwnerLifecycle:
                 request.artifact_closure,
                 request.expected_owner_runtime_identity,
             )
+        except OwnerUpgradeCommandError as error:
+            reason = _not_attempted_failure(
+                error,
+                fallback=OwnerUpgradeNotAttemptedFailure.ARTIFACT_PREPARATION_FAILED,
+            )
+            raise OwnerUpgradeNotAttemptedError(reason) from None
+        try:
             self._artifact_verifier.verify_staged(request.artifact_closure)
         except OwnerUpgradeCommandError as error:
-            raise OwnerUpgradeNotAttemptedError("staged_artifact_changed") from error
+            reason = _not_attempted_failure(
+                error,
+                fallback=OwnerUpgradeNotAttemptedFailure.STAGED_ARTIFACT_CHANGED,
+            )
+            raise OwnerUpgradeNotAttemptedError(reason) from None
         try:
             current = self._discovery.discover(
                 selected_installation_identity=request.installation_identity,
@@ -479,6 +487,17 @@ def _node_runtime(value: str) -> str:
     if match is None:
         raise ValueError("Codex Vite+ owner requires an exact Node runtime")
     return match.group(1)
+
+
+def _not_attempted_failure(
+    error: OwnerUpgradeCommandError,
+    *,
+    fallback: OwnerUpgradeNotAttemptedFailure,
+) -> OwnerUpgradeNotAttemptedFailure:
+    try:
+        return OwnerUpgradeNotAttemptedFailure(error.reason_code)
+    except ValueError:
+        return fallback
 
 
 def _verified_target_matches(
