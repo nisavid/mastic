@@ -46,6 +46,12 @@ _OFFICIAL_METADATA = {
         ("--version",),
         "hindsight 0.8.4",
     ),
+    "hindsight-api": (
+        "https://pypi.org/project/hindsight-api/0.8.4/",
+        "uv-tool-offline",
+        ("python-metadata", "hindsight-api"),
+        "0.8.4",
+    ),
 }
 
 
@@ -616,7 +622,7 @@ class ApplicationSupply:
                 "application_artifacts_missing",
                 "Exact application artifacts are incomplete or invalid: "
                 + "; ".join(sorted(set(errors))),
-                next_actions=("restore the attested MASTIC bootstrap artifact cache",),
+                next_actions=("restore the verified application artifact cache",),
             )
         return verified
 
@@ -1043,21 +1049,7 @@ def _parse_artifact(value: object) -> _Artifact:
         )
         != metadata
     ):
-        raise ValueError(
-            f"artifact {identity} does not match official release metadata"
-        )
-    if identity == "hindsight-api" and (
-        str(value["install_kind"]) != "uv-tool-offline"
-        or tuple(probe) != ("python-metadata", "hindsight-api")
-        or str(value["probe_output"]) != "0.8.4"
-        or not str(value["source_url"]).startswith(
-            "https://github.com/nisavid/mastic/releases/download/v"
-        )
-        or not str(value["source_url"]).endswith("/" + filename)
-    ):
-        raise ValueError(
-            "artifact hindsight-api does not match official bundle metadata"
-        )
+        raise ValueError(f"artifact {identity} does not match expected source metadata")
     return _Artifact(
         identity,
         str(value["version"]),

@@ -74,30 +74,22 @@ Review a recommended setup preview:
 mastic setup --profile recommended
 ```
 
-Answer `n` at confirmation when following the source-preview path. A source
-install alone does not contain the attested Python, application artifacts, and
-offline dependency closure required for confirmed setup on a clean host.
+Answer `n` at confirmation when following the source-preview path.
 
 Follow [Preview your first local inference service](docs/tutorials/first-preview.md)
 for the complete guided walkthrough.
 
-### Set up a clean host from release artifacts
+### Release boundary
 
-This path installs the exact MASTIC closure and proceeds to confirmed setup.
-Obtain `bootstrap-mastic.zsh` and its closure from the same trusted release
-artifact set, then run:
+MASTIC release assets contain MASTIC: the Python wheel and source distribution,
+plus their integrity and provenance metadata. They do not redistribute Python,
+uv, Codex, Hindsight, or other dependencies. Package and application
+dependencies remain attributable to their upstream publishers.
 
-```sh
-./bootstrap-mastic.zsh --artifact-dir RELEASE_ARTIFACT_DIRECTORY --yes
-mastic setup
-```
-
-MASTIC inspects the host, builds an exact setup preview, and asks for
-confirmation before applying it. Model and runtime downloads can be
-substantial; review the selected revisions, projected resources, Application
-Configuration Targets, preflight, and ordered operations before continuing.
-After confirmation, setup reports installation `completion` separately from
-application `readiness`, including one result for each selected target.
+The project also builds a dependency-complete Host-Test Fixture for clean-host
+CI and explicitly authorized target-machine validation. That short-lived,
+authenticated workflow artifact is test infrastructure, not a MASTIC
+distributable or supported installation channel.
 
 ## Operate an existing stack
 

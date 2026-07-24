@@ -25,6 +25,12 @@ A Plan limited to installing MASTIC and dependencies shared by every
 Blueprint.
 _Avoid_: setup plan, Stack Plan
 
+**Host-Test Fixture**:
+An authenticated, short-lived, non-release assembly of one MASTIC distributable
+and exact third-party inputs used only for CI or an explicitly authorized
+target-host validation run.
+_Avoid_: MASTIC release, distributable, Verified Artifact Closure
+
 **Desired State**:
 The durable exact host-local declarations MASTIC owns after the Plan is
 Eligible for its purpose. A required Plan Approval is a separate authorization
