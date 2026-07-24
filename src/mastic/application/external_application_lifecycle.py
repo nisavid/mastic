@@ -36,9 +36,31 @@ class InstallationDiscoveryError(RuntimeError):
 class OwnerUpgradeCommandError(RuntimeError):
     """Declared content-free failure from an owner mutation port."""
 
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class OwnerUpgradeNotAttemptedFailure(StrEnum):
+    OWNER_ACTION_INVALID = "owner_action_invalid"
+    OWNER_RUNTIME_INVALID = "owner_runtime_invalid"
+    ARTIFACT_CONFIG_PREPARE_FAILED = "artifact_config_prepare_failed"
+    ARTIFACT_CACHE_PREPARE_FAILED = "artifact_cache_prepare_failed"
+    ARTIFACT_PREPARATION_FAILED = "artifact_preparation_failed"
+    ARTIFACT_DIRECTORY_NOT_PRIVATE = "artifact_directory_not_private"
+    STAGED_ARCHIVE_CHANGED = "staged_archive_changed"
+    STAGED_PAYLOAD_CHANGED = "staged_payload_changed"
+    STAGED_ARTIFACT_CHANGED = "staged_artifact_changed"
+    EXPECTED_CURRENT_UNAVAILABLE = "expected_current_unavailable"
+    EXPECTED_CURRENT_CHANGED = "expected_current_changed"
+
 
 class OwnerUpgradeNotAttemptedError(OwnerUpgradeCommandError):
     """Owner port rejected expected-current before spawning the mutation."""
+
+    def __init__(self, reason_code: str | OwnerUpgradeNotAttemptedFailure) -> None:
+        reason = OwnerUpgradeNotAttemptedFailure(reason_code)
+        super().__init__(reason.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,9 +697,9 @@ def _apply_owner_upgrade_retained(
         )
         try:
             execution = executor.apply_exact(request)
-        except OwnerUpgradeNotAttemptedError:
+        except OwnerUpgradeNotAttemptedError as error:
             return _result_not_attempted(
-                "owner_expected_current_changed",
+                error.reason_code,
                 preview,
                 authorization,
                 source,

@@ -48,9 +48,7 @@ _NPM_VERSION = re.compile(
 
 
 class ArtifactClosureMaterializationError(OwnerUpgradeCommandError):
-    def __init__(self, reason_code: str) -> None:
-        super().__init__(reason_code)
-        self.reason_code = reason_code
+    """Content-free artifact closure materialization failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,45 +352,56 @@ class CodexViteArtifactClosureVerifier:
         ):
             raise OwnerUpgradeCommandError("owner_runtime_invalid")
         _require_private_directory(closure.cache_directory)
-        environment = {
-            **self._environment,
-            "PATH": f"{self._vp_home / 'bin'}:/usr/bin:/bin:/usr/sbin:/sbin",
-            "VP_HOME": str(self._vp_home),
-            "NO_COLOR": "1",
-            "NPM_CONFIG_CACHE": str(closure.cache_directory),
-            "NPM_CONFIG_OFFLINE": "true",
-            "NPM_CONFIG_AUDIT": "false",
-            "NPM_CONFIG_FUND": "false",
-            "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
-            "NPM_CONFIG_USERCONFIG": "/dev/null",
-            "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
-            "NPM_CONFIG_ALWAYS_AUTH": "false",
-            "NPM_CONFIG_STRICT_SSL": "true",
-        }
-        for artifact in closure.artifacts:
-            returncode = self._runner.run(
-                (
-                    str(self._vp_home / "bin" / "vp"),
-                    "env",
-                    "exec",
-                    "--node",
-                    runtime,
-                    "--",
-                    str(self._vp_home / "bin" / "npm"),
-                    "cache",
-                    "add",
-                    "--cache",
-                    str(closure.cache_directory),
-                    "--offline",
-                    "--",
-                    str(artifact.staged_path),
-                ),
-                cwd=closure.staging_directory,
-                environment=environment,
-                timeout_seconds=self._timeout,
-            )
-            if returncode != 0:
-                raise OwnerUpgradeCommandError("artifact_cache_prepare_failed")
+        user_config = closure.staging_directory / "npm-user.config"
+        global_config = closure.staging_directory / "npm-global.config"
+        user_config_identity = _create_empty_private_file(user_config)
+        try:
+            global_config_identity = _create_empty_private_file(global_config)
+        except OwnerUpgradeCommandError:
+            _unlink_created_private_file(user_config, user_config_identity)
+            raise
+        try:
+            environment = {
+                **self._environment,
+                "PATH": f"{self._vp_home / 'bin'}:/usr/bin:/bin:/usr/sbin:/sbin",
+                "VP_HOME": str(self._vp_home),
+                "NO_COLOR": "1",
+                "NPM_CONFIG_CACHE": str(closure.cache_directory),
+                "NPM_CONFIG_OFFLINE": "true",
+                "NPM_CONFIG_AUDIT": "false",
+                "NPM_CONFIG_FUND": "false",
+                "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
+                "NPM_CONFIG_USERCONFIG": str(user_config),
+                "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+                "NPM_CONFIG_STRICT_SSL": "true",
+            }
+            for artifact in closure.artifacts:
+                returncode = self._runner.run(
+                    (
+                        str(self._vp_home / "bin" / "vp"),
+                        "env",
+                        "exec",
+                        "--node",
+                        runtime,
+                        "--",
+                        str(self._vp_home / "bin" / "npm"),
+                        "cache",
+                        "add",
+                        "--cache",
+                        str(closure.cache_directory),
+                        "--offline",
+                        "--",
+                        str(artifact.staged_path),
+                    ),
+                    cwd=closure.staging_directory,
+                    environment=environment,
+                    timeout_seconds=self._timeout,
+                )
+                if returncode != 0:
+                    raise OwnerUpgradeCommandError("artifact_cache_prepare_failed")
+        finally:
+            _unlink_created_private_file(global_config, global_config_identity)
+            _unlink_created_private_file(user_config, user_config_identity)
 
     def verify_staged(self, closure: VerifiedArtifactClosure) -> None:
         _require_private_directory(closure.staging_directory)
@@ -752,6 +761,40 @@ def _require_private_directory(path: Path) -> None:
         or metadata.st_uid != os.geteuid()
     ):
         raise OwnerUpgradeCommandError("artifact_directory_not_private")
+
+
+def _create_empty_private_file(path: Path) -> tuple[int, int]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    created_identity: tuple[int, int] | None = None
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            metadata = os.fstat(descriptor)
+            created_identity = metadata.st_dev, metadata.st_ino
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise OSError("private file identity is invalid")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if created_identity is None:
+            raise OSError("private file identity is unavailable")
+        return created_identity
+    except OSError as error:
+        if created_identity is not None:
+            _unlink_created_private_file(path, created_identity)
+        raise OwnerUpgradeCommandError("artifact_config_prepare_failed") from error
+
+
+def _unlink_created_private_file(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) == identity:
+            path.unlink()
+    except OSError:
+        # Best-effort cleanup must not mask the primary preparation failure.
+        pass
 
 
 def _validate_registry_tarball_url(url: str) -> None:

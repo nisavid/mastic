@@ -2,6 +2,10 @@ import base64
 import hashlib
 import io
 import json
+import os
+import shutil
+import stat
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -174,6 +178,25 @@ class Downloader:
         )
 
 
+class NpmConfigLoadingRunner:
+    def __init__(self, npm: Path, node: Path):
+        self.npm = npm.resolve()
+        self.node = node.resolve()
+        self.calls = []
+
+    def run(self, argv, *, cwd, environment, timeout_seconds):
+        completed = subprocess.run(
+            (self.node, self.npm, "config", "get", "cache"),
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        self.calls.append((tuple(argv), dict(environment), completed))
+        return completed.returncode
+
+
 def resolution(*, main_payload=MAIN):
     return CurrentReleaseResolution(
         installation_identity="application-installation:codex:vite",
@@ -295,9 +318,17 @@ class ArtifactClosureMaterializerTests(unittest.TestCase):
 class Runner:
     def __init__(self):
         self.calls = []
+        self.config_snapshots = []
 
     def run(self, argv, *, cwd, environment, timeout_seconds):
         self.calls.append((tuple(argv), cwd, dict(environment), timeout_seconds))
+        snapshot = {}
+        for name in ("NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"):
+            if name in environment:
+                path = Path(environment[name])
+                snapshot[name] = (path, path.lstat(), path.read_bytes())
+        if snapshot:
+            self.config_snapshots.append(snapshot)
         return 0
 
 
@@ -318,6 +349,134 @@ def write_installed(root, files):
 
 
 class ArtifactClosureVerifierTests(unittest.TestCase):
+    @unittest.skipUnless(
+        shutil.which("npm") and shutil.which("node"),
+        "real npm and Node.js are unavailable",
+    )
+    def test_private_configs_cross_the_real_npm_loading_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = NpmCodexArtifactClosureMaterializer(
+                stage_root=root,
+                fetcher=Fetcher([packument(), packument()]),
+                downloader=Downloader({MAIN_URL: MAIN, PLATFORM_URL: PLATFORM}),
+            ).materialize(resolution())
+            runner = NpmConfigLoadingRunner(
+                Path(str(shutil.which("npm"))),
+                Path(str(shutil.which("node"))),
+            )
+            verifier = CodexViteArtifactClosureVerifier(
+                vp_home=root,
+                roots=Roots({}),
+                runner=runner,
+                base_environment={"HOME": str(root)},
+            )
+
+            verifier.prepare(artifacts, "node:24.18.0")
+
+            self.assertEqual(len(runner.calls), 2)
+            for _argv, environment, completed in runner.calls:
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                self.assertNotEqual(
+                    environment["NPM_CONFIG_USERCONFIG"],
+                    environment["NPM_CONFIG_GLOBALCONFIG"],
+                )
+
+    def test_retained_closure_can_prepare_the_cache_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = NpmCodexArtifactClosureMaterializer(
+                stage_root=root,
+                fetcher=Fetcher([packument(), packument()]),
+                downloader=Downloader({MAIN_URL: MAIN, PLATFORM_URL: PLATFORM}),
+            ).materialize(resolution())
+            runner = Runner()
+            verifier = CodexViteArtifactClosureVerifier(
+                vp_home=root,
+                roots=Roots({}),
+                runner=runner,
+                base_environment={"HOME": str(root)},
+            )
+
+            verifier.prepare(artifacts, "node:24.18.0")
+            verifier.prepare(artifacts, "node:24.18.0")
+
+            self.assertEqual(len(runner.calls), 4)
+            self.assertFalse((artifacts.staging_directory / "npm-user.config").exists())
+            self.assertFalse(
+                (artifacts.staging_directory / "npm-global.config").exists()
+            )
+
+    def test_failed_private_config_creation_removes_its_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = NpmCodexArtifactClosureMaterializer(
+                stage_root=root,
+                fetcher=Fetcher([packument(), packument()]),
+                downloader=Downloader({MAIN_URL: MAIN, PLATFORM_URL: PLATFORM}),
+            ).materialize(resolution())
+            verifier = CodexViteArtifactClosureVerifier(
+                vp_home=root,
+                roots=Roots({}),
+                runner=Runner(),
+                base_environment={"HOME": str(root)},
+            )
+
+            with (
+                patch(
+                    "mastic.infrastructure.codex_artifact_closure.os.fsync",
+                    side_effect=OSError("sync failed"),
+                ),
+                self.assertRaisesRegex(
+                    OwnerUpgradeCommandError,
+                    "artifact_config_prepare_failed",
+                ),
+            ):
+                verifier.prepare(artifacts, "node:24.18.0")
+
+            self.assertFalse((artifacts.staging_directory / "npm-user.config").exists())
+
+    def test_second_private_config_failure_removes_the_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = NpmCodexArtifactClosureMaterializer(
+                stage_root=root,
+                fetcher=Fetcher([packument(), packument()]),
+                downloader=Downloader({MAIN_URL: MAIN, PLATFORM_URL: PLATFORM}),
+            ).materialize(resolution())
+            verifier = CodexViteArtifactClosureVerifier(
+                vp_home=root,
+                roots=Roots({}),
+                runner=Runner(),
+                base_environment={"HOME": str(root)},
+            )
+            real_open = os.open
+            calls = 0
+
+            def fail_second_open(path, flags, mode):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("second config failed")
+                return real_open(path, flags, mode)
+
+            with (
+                patch(
+                    "mastic.infrastructure.codex_artifact_closure.os.open",
+                    side_effect=fail_second_open,
+                ),
+                self.assertRaisesRegex(
+                    OwnerUpgradeCommandError,
+                    "artifact_config_prepare_failed",
+                ),
+            ):
+                verifier.prepare(artifacts, "node:24.18.0")
+
+            self.assertFalse((artifacts.staging_directory / "npm-user.config").exists())
+            self.assertFalse(
+                (artifacts.staging_directory / "npm-global.config").exists()
+            )
+
     def test_prepares_private_cache_and_verifies_both_installed_payloads(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory) / "stage"
@@ -376,6 +535,20 @@ class ArtifactClosureVerifierTests(unittest.TestCase):
             self.assertTrue(
                 all(call[2]["NPM_CONFIG_OFFLINE"] == "true" for call in runner.calls)
             )
+            self.assertTrue(
+                all("NPM_CONFIG_ALWAYS_AUTH" not in call[2] for call in runner.calls)
+            )
+            for snapshot in runner.config_snapshots:
+                user_config = snapshot["NPM_CONFIG_USERCONFIG"][0]
+                global_config = snapshot["NPM_CONFIG_GLOBALCONFIG"][0]
+                self.assertNotEqual(user_config, global_config)
+                for config, metadata, payload in snapshot.values():
+                    self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                    self.assertFalse(stat.S_ISLNK(metadata.st_mode))
+                    self.assertEqual(payload, b"")
+                    self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
+                    self.assertEqual(config.parent, stage)
+                    self.assertFalse(config.exists())
 
             extra_dependency = main_root / "node_modules/extra"
             extra_dependency.mkdir()

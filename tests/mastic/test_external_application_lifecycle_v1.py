@@ -15,6 +15,7 @@ from mastic.application.external_application_lifecycle import (
     OwnerUpgradeAction,
     OwnerUpgradeCommandError,
     OwnerUpgradeExecutionEvidence,
+    OwnerUpgradeNotAttemptedError,
     PlanFollowUp,
     VerifiedArtifact,
     VerifiedArtifactClosure,
@@ -569,6 +570,26 @@ class ExternalApplicationLifecycleTests(unittest.TestCase):
         self.assertEqual(result.mutation_outcome, MutationOutcome.UNKNOWN)
         self.assertEqual(result.reason_code, "owner_command_outcome_unknown")
         self.assertNotIn("private", repr(result))
+
+    def test_not_attempted_owner_reason_survives_without_mutation(self):
+        preview, artifacts = preview_bundle()
+        source = observation(observed_at=NOW + timedelta(seconds=3))
+        current = resolution(source, observed_at=NOW + timedelta(seconds=4))
+        executor = Executor(
+            error=OwnerUpgradeNotAttemptedError("staged_artifact_changed")
+        )
+
+        result = apply(
+            preview,
+            artifacts,
+            Discovery([source, source]),
+            Resolver([current]),
+            executor,
+        )
+
+        self.assertEqual(result.mutation_outcome, MutationOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.reason_code, "staged_artifact_changed")
+        self.assertEqual(len(executor.requests), 1)
 
     def test_unknown_mutation_survives_declared_cleanup_failure(self):
         preview, artifacts = preview_bundle()
