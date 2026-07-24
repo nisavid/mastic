@@ -14,8 +14,8 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILDER = ROOT / "scripts" / "build-bootstrap.zsh"
-CLOSURE_BUILDER = ROOT / "scripts" / "build-bootstrap-closure.zsh"
+BUILDER = ROOT / "scripts" / "build-host-test-runner.zsh"
+FIXTURE_BUILDER = ROOT / "scripts" / "build-host-test-fixture.zsh"
 _SUBPROCESS_TIMEOUT = 30
 
 
@@ -27,7 +27,11 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         build_lock = (ROOT / "packaging" / "build-backend.lock").read_text()
         self.assertIn("hatchling==1.31.0", build_lock)
         self.assertIn("--hash=sha256:", build_lock)
-        for workflow_name in ("bootstrap-artifact.yml", "python-quality.yml"):
+        for workflow_name in (
+            "bootstrap-artifact.yml",
+            "python-quality.yml",
+            "release.yml",
+        ):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
             self.assertIn("--build-constraints packaging/build-backend.lock", workflow)
             self.assertIn("--require-hashes", workflow)
@@ -54,8 +58,8 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         self.assertIn("[[ $after_pid != $before_pid ]]", workflow)
         self.assertIn('"$mastic" supervisor restart', workflow)
 
-    def test_closure_builder_bounds_and_retries_all_direct_downloads(self) -> None:
-        builder = CLOSURE_BUILDER.read_text()
+    def test_fixture_builder_bounds_and_retries_all_direct_downloads(self) -> None:
+        builder = FIXTURE_BUILDER.read_text()
 
         self.assertEqual(
             builder.count("curl --fail --silent --show-error --location"), 3
@@ -63,17 +67,25 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
         self.assertEqual(builder.count("--connect-timeout 30 --max-time 1800"), 3)
         self.assertEqual(builder.count("--retry 3 --retry-delay 2"), 3)
 
-    def test_builder_embeds_exact_release_closure_and_produces_valid_zsh(self) -> None:
+    def test_fixture_builder_manifests_hidden_regular_files(self) -> None:
+        builder = FIXTURE_BUILDER.read_text()
+        write_manifest = builder.split("write_manifest() {", 1)[1].split("\n}", 1)[0]
+
+        self.assertIn('files=("$root"/**/*(DN.))', write_manifest)
+
+    def test_runner_embeds_exact_fixture_without_a_release_or_network_fallback(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             wheel = root / "mastic-0.1.0-py3-none-any.whl"
             wheel.write_bytes(b"exact wheel bytes")
-            closure = root / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
-            closure.write_bytes(b"exact closure bytes")
-            output = root / "bootstrap-mastic.zsh"
+            fixture = root / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
+            fixture.write_bytes(b"exact fixture bytes")
+            output = root / "bootstrap-mastic-host-test.zsh"
 
             completed = subprocess.run(
-                ["zsh", str(BUILDER), str(wheel), str(closure), str(output)],
+                ["zsh", str(BUILDER), str(wheel), str(fixture), str(output)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -84,10 +96,11 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             script = output.read_text(encoding="utf-8")
             self.assertIn("readonly MASTIC_VERSION='0.1.0'", script)
             self.assertIn(hashlib.sha256(wheel.read_bytes()).hexdigest(), script)
-            self.assertIn(hashlib.sha256(closure.read_bytes()).hexdigest(), script)
-            self.assertIn("--connect-timeout 30", script)
-            self.assertIn("--max-time 1800", script)
-            self.assertIn("--retry 3", script)
+            self.assertIn(hashlib.sha256(fixture.read_bytes()).hexdigest(), script)
+            self.assertIn("dependency-complete host-test fixture", script)
+            self.assertNotIn("github.com/nisavid/mastic/releases", script)
+            self.assertNotIn("--fixture-url", script)
+            self.assertNotIn("curl ", script)
             self.assertNotIn("@MASTIC_", script)
             self.assertTrue(output.stat().st_mode & stat.S_IXUSR)
             syntax = subprocess.run(
@@ -98,21 +111,21 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             )
             self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
-    def test_builder_rejects_a_release_tag_that_mismatches_the_wheel(self) -> None:
+    def test_runner_builder_rejects_release_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             wheel = root / "mastic-0.1.0-py3-none-any.whl"
             wheel.write_bytes(b"exact wheel bytes")
-            closure = root / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
-            closure.write_bytes(b"exact closure bytes")
-            output = root / "bootstrap-mastic.zsh"
+            fixture = root / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
+            fixture.write_bytes(b"exact fixture bytes")
+            output = root / "bootstrap-mastic-host-test.zsh"
 
             completed = subprocess.run(
                 [
                     "zsh",
                     str(BUILDER),
                     str(wheel),
-                    str(closure),
+                    str(fixture),
                     str(output),
                     "v9.9.9",
                 ],
@@ -123,10 +136,13 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 2)
-            self.assertIn("does not match wheel version 0.1.0", completed.stderr)
+            self.assertIn(
+                "build-host-test-runner.zsh WHEEL FIXTURE OUTPUT",
+                completed.stderr,
+            )
             self.assertFalse(output.exists())
 
-    def test_offline_artifact_set_reports_every_missing_release_input(self) -> None:
+    def test_artifact_directory_reports_a_missing_host_test_fixture(self) -> None:
         with self._artifact() as (root, artifact, _release):
             tools = root / "tools"
             tools.mkdir()
@@ -140,7 +156,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn(
-                "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz",
+                "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz",
                 completed.stderr,
             )
 
@@ -200,8 +216,8 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
 
     def test_archive_traversal_is_rejected_before_extraction(self) -> None:
         with self._artifact() as (root, _artifact, release):
-            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
-            with tarfile.open(closure, "w:gz") as archive:
+            fixture = release / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
+            with tarfile.open(fixture, "w:gz") as archive:
                 member = tarfile.TarInfo("../escaped")
                 member.size = len(b"unsafe")
                 archive.addfile(member, io.BytesIO(b"unsafe"))
@@ -211,7 +227,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                     "zsh",
                     str(BUILDER),
                     str(release / "mastic-0.1.0-py3-none-any.whl"),
-                    str(closure),
+                    str(fixture),
                     str(artifact),
                 ],
                 check=True,
@@ -231,14 +247,16 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertIn("unsafe member", completed.stderr)
             self.assertFalse((root / "escaped").exists())
 
-    def test_undeclared_closure_file_fails_the_exact_set_check(self) -> None:
+    def test_undeclared_fixture_file_fails_the_exact_set_check(self) -> None:
         with self._artifact() as (root, _artifact, release):
-            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+            fixture = release / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
             unpacked = root / "unpacked"
-            with tarfile.open(closure, "r:gz") as archive:
+            with tarfile.open(fixture, "r:gz") as archive:
                 archive.extractall(unpacked, filter="data")
-            (unpacked / "undeclared.whl").write_bytes(b"not in SHA256SUMS")
-            with tarfile.open(closure, "w:gz") as archive:
+            hidden = unpacked / ".hidden"
+            hidden.mkdir()
+            (hidden / "undeclared.whl").write_bytes(b"not in SHA256SUMS")
+            with tarfile.open(fixture, "w:gz") as archive:
                 for path in sorted(unpacked.rglob("*")):
                     archive.add(path, arcname=path.relative_to(unpacked))
             artifact = root / "undeclared-bootstrap.zsh"
@@ -247,7 +265,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                     "zsh",
                     str(BUILDER),
                     str(release / "mastic-0.1.0-py3-none-any.whl"),
-                    str(closure),
+                    str(fixture),
                     str(artifact),
                 ],
                 check=True,
@@ -264,20 +282,25 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             )
 
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("undeclared:undeclared.whl", completed.stderr)
+            self.assertIn("undeclared:.hidden/undeclared.whl", completed.stderr)
 
-    def test_wheel_digest_failure_aborts_before_install(self) -> None:
-        with self._artifact() as (root, artifact, _release):
+    def test_fixture_digest_failure_aborts_before_install(self) -> None:
+        with self._artifact() as (root, artifact, release):
             tools = root / "tools"
             tools.mkdir()
             self._host_tools(tools, machine="arm64", version="15.7")
-            self._tool(
-                tools / "curl",
-                "local output=''\nwhile (( $# )); do\n  [[ $1 == --output ]] && { output=$2; break; }\n  shift\ndone\nprint -rn -- tampered >\"$output\"",
-            )
             self._tool(tools / "uv", "print -ru2 -- 'uv must not install'; exit 98")
+            (release / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz").write_bytes(
+                b"tampered"
+            )
 
-            completed = self._run(artifact, tools)
+            completed = self._run(
+                artifact,
+                tools,
+                "--artifact-dir",
+                str(release),
+                home=root / "home",
+            )
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("digest verification failed", completed.stderr)
@@ -1135,23 +1158,23 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 old_launcher,
             )
 
-    def test_verified_closure_quarantine_is_removed_without_erasing_other_metadata(
+    def test_verified_fixture_quarantine_is_removed_without_erasing_other_metadata(
         self,
     ) -> None:
         with self._artifact() as (root, artifact, release):
             quarantine = b"0281;6a5fa391;;"
             preserved = b"\x00preserve-me\n"
-            closure_root = root / "closure"
-            manifest = closure_root / "application-targets-v1/manifest.json"
+            fixture_root = root / "fixture"
+            manifest = fixture_root / "application-targets-v1/manifest.json"
             nested_artifact = (
-                closure_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
+                fixture_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
             )
             self._set_xattr(manifest, "com.apple.quarantine", quarantine)
             self._set_xattr(nested_artifact, "com.apple.quarantine", quarantine)
             self._set_xattr(manifest, "io.nisavid.mastic.test", preserved)
-            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+            fixture = release / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
             subprocess.run(
-                ["/usr/bin/tar", "-czf", str(closure), "-C", str(closure_root), "."],
+                ["/usr/bin/tar", "-czf", str(fixture), "-C", str(fixture_root), "."],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -1162,7 +1185,7 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                     "zsh",
                     str(BUILDER),
                     str(release / "mastic-0.1.0-py3-none-any.whl"),
-                    str(closure),
+                    str(fixture),
                     str(artifact),
                 ],
                 check=True,
@@ -1170,8 +1193,8 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 text=True,
                 timeout=_SUBPROCESS_TIMEOUT,
             )
-            self._set_xattr(closure, "com.apple.quarantine", quarantine)
-            closure_bytes = closure.read_bytes()
+            self._set_xattr(fixture, "com.apple.quarantine", quarantine)
+            fixture_bytes = fixture.read_bytes()
             tools = root / "tools"
             tools.mkdir()
             self._host_tools(tools, machine="arm64", version="15.7")
@@ -1200,38 +1223,38 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertIsNone(
                 self._get_xattr(persisted_artifact, "com.apple.quarantine")
             )
-            self.assertEqual(closure.read_bytes(), closure_bytes)
+            self.assertEqual(fixture.read_bytes(), fixture_bytes)
             self.assertEqual(
-                self._get_xattr(closure, "com.apple.quarantine"), quarantine
+                self._get_xattr(fixture, "com.apple.quarantine"), quarantine
             )
 
-    def test_failed_closure_verification_does_not_remove_quarantine(self) -> None:
+    def test_failed_fixture_verification_does_not_remove_quarantine(self) -> None:
         with self._artifact() as (root, _artifact, release):
             quarantine = b"0281;6a5fa391;;"
-            closure_root = root / "closure"
-            manifest = closure_root / "application-targets-v1/manifest.json"
+            fixture_root = root / "fixture"
+            manifest = fixture_root / "application-targets-v1/manifest.json"
             nested_artifact = (
-                closure_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
+                fixture_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
             )
             self._set_xattr(manifest, "com.apple.quarantine", quarantine)
             self._set_xattr(nested_artifact, "com.apple.quarantine", quarantine)
             nested_artifact.write_bytes(b"tampered after the internal manifest")
 
-            closure = release / "mastic-bootstrap-closure-0.1.0-macos-arm64.tar.gz"
+            fixture = release / "mastic-host-test-fixture-0.1.0-macos-arm64.tar.gz"
             subprocess.run(
-                ["/usr/bin/tar", "-czf", str(closure), "-C", str(closure_root), "."],
+                ["/usr/bin/tar", "-czf", str(fixture), "-C", str(fixture_root), "."],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=_SUBPROCESS_TIMEOUT,
             )
-            artifact = root / "invalid-closure-bootstrap.zsh"
+            artifact = root / "invalid-fixture-bootstrap.zsh"
             subprocess.run(
                 [
                     "zsh",
                     str(BUILDER),
                     str(release / "mastic-0.1.0-py3-none-any.whl"),
-                    str(closure),
+                    str(fixture),
                     str(artifact),
                 ],
                 check=True,
@@ -1252,19 +1275,19 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
                 )
 
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("closure digest mismatches", completed.stderr)
+            self.assertIn("fixture digest mismatches", completed.stderr)
             work_directories = list(temporary.glob("mastic-bootstrap.*"))
             self.assertEqual(len(work_directories), 1)
-            failed_closure = work_directories[0] / "closure"
+            failed_fixture = work_directories[0] / "fixture"
             self.assertIsNotNone(
                 self._get_xattr(
-                    failed_closure / "application-targets-v1/manifest.json",
+                    failed_fixture / "application-targets-v1/manifest.json",
                     "com.apple.quarantine",
                 )
             )
             self.assertIsNotNone(
                 self._get_xattr(
-                    failed_closure
+                    failed_fixture
                     / "application-targets-v1/artifacts/hindsight-darwin-arm64",
                     "com.apple.quarantine",
                 )
@@ -1311,17 +1334,23 @@ class BootstrapArtifactV1Tests(unittest.TestCase):
             self.assertFalse((home / ".local/share/mastic").exists())
 
     def test_termination_exits_and_removes_the_temporary_directory(self) -> None:
-        with self._artifact() as (root, artifact, _release):
+        with self._artifact() as (root, artifact, release):
             tools = root / "tools"
             tools.mkdir()
             temporary = root / "tmp"
             temporary.mkdir()
             self._host_tools(tools, machine="arm64", version="15.7")
-            self._tool(tools / "curl", "kill -TERM $PPID\nsleep 1")
+            self._tool(tools / "tar", "kill -TERM $PPID\nsleep 1")
             self._tool(tools / "uv", "exit 0")
 
             with patch.dict(os.environ, {"TMPDIR": str(temporary)}):
-                completed = self._run(artifact, tools)
+                completed = self._run(
+                    artifact,
+                    tools,
+                    "--artifact-dir",
+                    str(release),
+                    home=root / "home",
+                )
 
             self.assertEqual(completed.returncode, 143, completed.stderr)
             self.assertEqual(list(temporary.iterdir()), [])
@@ -1640,15 +1669,15 @@ class _ArtifactFixture:
         release.mkdir()
         release_wheel = release / wheel.name
         release_wheel.write_bytes(wheel.read_bytes())
-        closure = (
-            release / f"mastic-bootstrap-closure-{self._version}-macos-arm64.tar.gz"
+        fixture = (
+            release / f"mastic-host-test-fixture-{self._version}-macos-arm64.tar.gz"
         )
-        closure_root = root / "closure"
-        (closure_root / "uv").mkdir(parents=True)
-        (closure_root / "python/bin").mkdir(parents=True)
-        (closure_root / "wheels").mkdir(parents=True)
-        (closure_root / "application-targets-v1/artifacts").mkdir(parents=True)
-        uv = closure_root / "uv/uv"
+        fixture_root = root / "fixture"
+        (fixture_root / "uv").mkdir(parents=True)
+        (fixture_root / "python/bin").mkdir(parents=True)
+        (fixture_root / "wheels").mkdir(parents=True)
+        (fixture_root / "application-targets-v1/artifacts").mkdir(parents=True)
+        uv = fixture_root / "uv/uv"
         uv.write_text(
             "#!/bin/zsh\n"
             "[[ -n ${BOOTSTRAP_UV_FAIL:-} ]] && exit 97\n"
@@ -1745,39 +1774,39 @@ class _ArtifactFixture:
             encoding="utf-8",
         )
         uv.chmod(0o755)
-        python = closure_root / "python/bin/python3.11"
+        python = fixture_root / "python/bin/python3.11"
         python.write_text("#!/bin/zsh\nexit 0\n", encoding="utf-8")
         python.chmod(0o755)
-        (closure_root / "wheels/dependency-1.0-py3-none-any.whl").write_bytes(
+        (fixture_root / "wheels/dependency-1.0-py3-none-any.whl").write_bytes(
             b"dependency"
         )
-        (closure_root / "wheels" / wheel.name).write_bytes(wheel.read_bytes())
-        (closure_root / "application-targets-v1/manifest.json").write_text(
+        (fixture_root / "wheels" / wheel.name).write_bytes(wheel.read_bytes())
+        (fixture_root / "application-targets-v1/manifest.json").write_text(
             '{"schema_version":1}\n', encoding="utf-8"
         )
         (
-            closure_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
+            fixture_root / "application-targets-v1/artifacts/hindsight-darwin-arm64"
         ).write_bytes(b"hindsight")
         (
-            closure_root
+            fixture_root
             / "application-targets-v1/artifacts/codex-aarch64-apple-darwin.tar.gz"
         ).write_bytes(b"codex")
         (
-            closure_root
+            fixture_root
             / "application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz"
         ).write_bytes(b"hindsight-api")
-        members = sorted(path for path in closure_root.rglob("*") if path.is_file())
+        members = sorted(path for path in fixture_root.rglob("*") if path.is_file())
         manifest = "".join(
-            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(closure_root)}\n"
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(fixture_root)}\n"
             for path in members
         )
-        (closure_root / "SHA256SUMS").write_text(manifest, encoding="utf-8")
-        with tarfile.open(closure, "w:gz") as archive:
-            for path in sorted(closure_root.rglob("*")):
-                archive.add(path, arcname=path.relative_to(closure_root))
-        artifact = root / "bootstrap-mastic.zsh"
+        (fixture_root / "SHA256SUMS").write_text(manifest, encoding="utf-8")
+        with tarfile.open(fixture, "w:gz") as archive:
+            for path in sorted(fixture_root.rglob("*")):
+                archive.add(path, arcname=path.relative_to(fixture_root))
+        artifact = root / "bootstrap-mastic-host-test.zsh"
         subprocess.run(
-            ["zsh", str(BUILDER), str(wheel), str(closure), str(artifact)],
+            ["zsh", str(BUILDER), str(wheel), str(fixture), str(artifact)],
             check=True,
             capture_output=True,
             text=True,

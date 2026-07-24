@@ -16,7 +16,7 @@ readonly HINDSIGHT_URL="https://github.com/vectorize-io/hindsight/releases/downl
 
 fail() {
   emulate -L zsh
-  print -ru2 -- "mastic closure: $1"
+  print -ru2 -- "mastic host-test fixture: $1"
   return 1
 }
 
@@ -39,7 +39,7 @@ write_manifest() {
   setopt err_return no_unset pipe_fail
   local root=$1 output=$2 file relative
   local -a files
-  files=("$root"/**/*(N.))
+  files=("$root"/**/*(DN.))
   : >"$output"
   for file in ${(o)files}; do
     [[ $file == "$output" ]] && continue
@@ -69,25 +69,22 @@ download_wheelhouse() {
 main() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail extended_glob
-  (( $# == 2 || $# == 3 )) || {
-    print -ru2 -- 'usage: build-bootstrap-closure.zsh WHEEL OUTPUT [RELEASE_TAG]'
+  (( $# == 2 )) || {
+    print -ru2 -- 'usage: build-host-test-fixture.zsh WHEEL OUTPUT'
     return 2
   }
   command -v curl >/dev/null || fail 'curl is required'
   command -v shasum >/dev/null || fail 'shasum is required'
   command -v tar >/dev/null || fail 'tar is required'
-  local wheel=${1:A} output=${2:A} release_tag=${3:-}
+  local wheel=${1:A} output=${2:A}
   [[ -f $wheel && ! -L $wheel ]] || fail "wheel must be a regular file: $wheel"
   local wheel_name=${wheel:t}
   [[ $wheel_name =~ '^mastic-([0-9]+\.[0-9]+\.[0-9]+)-py3-none-any\.whl$' ]] || fail "unexpected wheel filename: $wheel_name"
   local version=$match[1]
-  [[ ${output:t} == "mastic-bootstrap-closure-${version}-macos-arm64.tar.gz" ]] || fail 'output filename must match the MASTIC wheel version'
-  if [[ -n $release_tag && $release_tag != "v${version}" ]]; then
-    fail "release tag ${release_tag} does not match wheel version ${version}"
-  fi
+  [[ ${output:t} == "mastic-host-test-fixture-${version}-macos-arm64.tar.gz" ]] || fail 'output filename must match the MASTIC wheel version'
 
   local work
-  work=$(mktemp -d "${TMPDIR:-/tmp}/mastic-closure.XXXXXXXX")
+  work=$(mktemp -d "${TMPDIR:-/tmp}/mastic-fixture.XXXXXXXX")
   local cleanup_command="rm -rf -- ${(q)work}"
   trap "$cleanup_command" EXIT
   trap "$cleanup_command; trap - EXIT; exit 130" INT
@@ -136,10 +133,11 @@ main() {
 
   local hindsight_root="$work/hindsight-api"
   mkdir -p -- "$hindsight_root/wheels"
-  cp "$REPOSITORY_ROOT/packaging/hindsight-api-0.8.4-macos-arm64.lock" "$hindsight_root/requirements.lock"
+  local hindsight_api_filename="hindsight-api-${HINDSIGHT_VERSION}-macos-arm64.tar.gz"
+  cp "$REPOSITORY_ROOT/packaging/${hindsight_api_filename%.tar.gz}.lock" "$hindsight_root/requirements.lock"
   download_wheelhouse "$python" "$hindsight_root/requirements.lock" "$hindsight_root/wheels"
   write_manifest "$hindsight_root" "$hindsight_root/SHA256SUMS"
-  local hindsight_api_bundle="$stage/application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz"
+  local hindsight_api_bundle="$stage/application-targets-v1/artifacts/$hindsight_api_filename"
   COPYFILE_DISABLE=1 tar -czf "$hindsight_api_bundle" -C "$hindsight_root" .
   local hindsight_api_sha256
   hindsight_api_sha256=$(sha256 "$hindsight_api_bundle")
@@ -156,9 +154,9 @@ main() {
   verify_sha256 "$hindsight" $HINDSIGHT_SHA256
   chmod 0755 "$hindsight"
 
-  local api_url="https://github.com/nisavid/mastic/releases/download/v${version}/hindsight-api-0.8.4-macos-arm64.tar.gz"
+  local api_url="https://pypi.org/project/hindsight-api/${HINDSIGHT_VERSION}/"
   local app_manifest="$stage/application-targets-v1/manifest.json"
-  print -r -- "{\"schema_version\":1,\"platform\":\"macos-arm64\",\"artifacts\":[{\"id\":\"codex-cli\",\"version\":\"${CODEX_VERSION}\",\"filename\":\"codex-aarch64-apple-darwin.tar.gz\",\"sha256\":\"${CODEX_SHA256}\",\"source_url\":\"${CODEX_URL}\",\"install_kind\":\"standalone-tar\",\"probe_argv\":[\"--version\"],\"probe_output\":\"codex-cli ${CODEX_VERSION}\"},{\"id\":\"hindsight-cli\",\"version\":\"${HINDSIGHT_VERSION}\",\"filename\":\"hindsight-darwin-arm64\",\"sha256\":\"${HINDSIGHT_SHA256}\",\"source_url\":\"${HINDSIGHT_URL}\",\"install_kind\":\"standalone\",\"probe_argv\":[\"--version\"],\"probe_output\":\"hindsight ${HINDSIGHT_VERSION}\"},{\"id\":\"hindsight-api\",\"version\":\"${HINDSIGHT_VERSION}\",\"filename\":\"hindsight-api-0.8.4-macos-arm64.tar.gz\",\"sha256\":\"${hindsight_api_sha256}\",\"source_url\":\"${api_url}\",\"install_kind\":\"uv-tool-offline\",\"probe_argv\":[\"python-metadata\",\"hindsight-api\"],\"probe_output\":\"${HINDSIGHT_VERSION}\"}]}" >"$app_manifest"
+  print -r -- "{\"schema_version\":1,\"platform\":\"macos-arm64\",\"artifacts\":[{\"id\":\"codex-cli\",\"version\":\"${CODEX_VERSION}\",\"filename\":\"codex-aarch64-apple-darwin.tar.gz\",\"sha256\":\"${CODEX_SHA256}\",\"source_url\":\"${CODEX_URL}\",\"install_kind\":\"standalone-tar\",\"probe_argv\":[\"--version\"],\"probe_output\":\"codex-cli ${CODEX_VERSION}\"},{\"id\":\"hindsight-cli\",\"version\":\"${HINDSIGHT_VERSION}\",\"filename\":\"hindsight-darwin-arm64\",\"sha256\":\"${HINDSIGHT_SHA256}\",\"source_url\":\"${HINDSIGHT_URL}\",\"install_kind\":\"standalone\",\"probe_argv\":[\"--version\"],\"probe_output\":\"hindsight ${HINDSIGHT_VERSION}\"},{\"id\":\"hindsight-api\",\"version\":\"${HINDSIGHT_VERSION}\",\"filename\":\"${hindsight_api_filename}\",\"sha256\":\"${hindsight_api_sha256}\",\"source_url\":\"${api_url}\",\"install_kind\":\"uv-tool-offline\",\"probe_argv\":[\"python-metadata\",\"hindsight-api\"],\"probe_output\":\"${HINDSIGHT_VERSION}\"}]}" >"$app_manifest"
 
   write_manifest "$stage" "$stage/SHA256SUMS"
   mkdir -p -- "${output:h}"

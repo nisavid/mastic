@@ -861,7 +861,7 @@ def _artifact(identity: str, version: str, path: Path) -> dict[str, object]:
             "hindsight 0.8.4",
         ),
         "hindsight-api": (
-            "https://github.com/nisavid/mastic/releases/download/v0.1.0/" + path.name,
+            "https://pypi.org/project/hindsight-api/0.8.4/",
             "uv-tool-offline",
             ["python-metadata", "hindsight-api"],
             "0.8.4",

@@ -4,9 +4,8 @@ set -euo pipefail
 
 readonly MASTIC_VERSION='@MASTIC_VERSION@'
 readonly MASTIC_WHEEL_SHA256='@MASTIC_WHEEL_SHA256@'
-readonly MASTIC_CLOSURE_SHA256='@MASTIC_CLOSURE_SHA256@'
-readonly MASTIC_CLOSURE_NAME="mastic-bootstrap-closure-${MASTIC_VERSION}-macos-arm64.tar.gz"
-readonly MASTIC_DEFAULT_CLOSURE_URL="https://github.com/nisavid/mastic/releases/download/v${MASTIC_VERSION}/${MASTIC_CLOSURE_NAME}"
+readonly MASTIC_HOST_FIXTURE_SHA256='@MASTIC_HOST_FIXTURE_SHA256@'
+readonly MASTIC_HOST_FIXTURE_NAME="mastic-host-test-fixture-${MASTIC_VERSION}-macos-arm64.tar.gz"
 typeset -g MASTIC_WORK_DIR=''
 typeset -g MASTIC_ACTIVE_SWAP_STAGE=''
 typeset -g MASTIC_ACTIVE_SWAP_BACKUP=''
@@ -26,7 +25,7 @@ typeset -g MASTIC_EXPECTED_RECEIPT_SHA256=''
 
 usage() {
   emulate -L zsh
-  print -r -- $'Install one exact, verified MASTIC release on a supported Apple-silicon Mac.\n\nUsage: bootstrap-mastic.zsh [-n|--dry-run] [-y|--yes] [--artifact-dir DIR] [--closure-url URL]\n\n  -n, --dry-run       Validate the host and print the exact plan without mutation or network access.\n  -y, --yes           Accept this command\'s fixed install defaults; no durable consent is stored.\n      --artifact-dir  Install from an offline directory containing the exact release closure.\n      --closure-url   Fetch the closure from an alternate URL; its embedded digest still must match.\n  -h, --help          Show this help.'
+  print -r -- $'Install one exact MASTIC build from a dependency-complete host-test fixture.\n\nThis development and validation tool is not a MASTIC release artifact.\n\nUsage: bootstrap-mastic-host-test.zsh [-n|--dry-run] [-y|--yes] --artifact-dir DIR\n\n  -n, --dry-run       Validate the host without mutation or network access.\n  -y, --yes           Accept this command\'s fixed test defaults; no durable consent is stored.\n      --artifact-dir  Install from a directory containing the exact host-test fixture.\n  -h, --help          Show this help.'
 }
 
 fail() {
@@ -311,7 +310,7 @@ verify_installed_generation() {
   fi
 }
 
-verify_closure() {
+verify_fixture() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
   local root=$1 manifest="$1/SHA256SUMS" line digest relative file actual
@@ -327,7 +326,7 @@ verify_closure() {
     application-targets-v1/artifacts/hindsight-api-0.8.4-macos-arm64.tar.gz
   )
   [[ -f $manifest && ! -L $manifest ]] || {
-    fail 'release closure is missing SHA256SUMS'
+    fail 'host-test fixture is missing SHA256SUMS'
     return 1
   }
   while IFS= read -r line || [[ -n $line ]]; do
@@ -358,50 +357,50 @@ verify_closure() {
   for relative in $required; do
     (( ${+declared[$relative]} )) || missing+=($relative)
   done
-  local -a closure_files=("$root"/**/*(N.))
-  for file in $closure_files; do
+  local -a fixture_files=("$root"/**/*(DN.))
+  for file in $fixture_files; do
     relative=${file#$root/}
     [[ $relative == SHA256SUMS ]] && continue
     (( ${+declared[$relative]} )) || invalid+=("undeclared:$relative")
   done
   if (( ${#invalid} || ${#missing} || ${#mismatched} )); then
-    (( ${#invalid} )) && print -ru2 -- "mastic bootstrap: invalid closure manifest entries: ${(j<, >)invalid}"
-    (( ${#missing} )) && print -ru2 -- "mastic bootstrap: missing closure inputs: ${(j<, >)${(ou)missing}}"
-    (( ${#mismatched} )) && print -ru2 -- "mastic bootstrap: closure digest mismatches: ${(j<, >)${(ou)mismatched}}"
+    (( ${#invalid} )) && print -ru2 -- "mastic bootstrap: invalid fixture manifest entries: ${(j<, >)invalid}"
+    (( ${#missing} )) && print -ru2 -- "mastic bootstrap: missing fixture inputs: ${(j<, >)${(ou)missing}}"
+    (( ${#mismatched} )) && print -ru2 -- "mastic bootstrap: fixture digest mismatches: ${(j<, >)${(ou)mismatched}}"
     return 1
   fi
   verify_sha256 "$root/wheels/mastic-${MASTIC_VERSION}-py3-none-any.whl" $MASTIC_WHEEL_SHA256
-  [[ -x "$root/uv/uv" ]] || fail 'verified closure uv is not executable'
-  [[ -x "$root/python/bin/python3.11" ]] || fail 'verified closure Python 3.11 is not executable'
+  [[ -x "$root/uv/uv" ]] || fail 'verified fixture uv is not executable'
+  [[ -x "$root/python/bin/python3.11" ]] || fail 'verified fixture Python 3.11 is not executable'
 }
 
 clear_verified_quarantine() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
   local root=$1 xattr=/usr/bin/xattr
-  [[ -x $xattr ]] || fail 'xattr is required to trust the verified release closure.'
-  "$xattr" -dr com.apple.quarantine "$root" || fail 'could not clear quarantine from the verified release closure'
+  [[ -x $xattr ]] || fail 'xattr is required to trust the verified host-test fixture.'
+  "$xattr" -dr com.apple.quarantine "$root" || fail 'could not clear quarantine from the verified host-test fixture'
 }
 
 validate_archive_members() {
   emulate -L zsh
   setopt err_return no_unset pipe_fail
   local archive=$1 member normalized listing line kind
-  listing=$(tar -tzf "$archive") || fail 'release closure member listing failed'
+  listing=$(tar -tzf "$archive") || fail 'host-test fixture member listing failed'
   for member in ${(f)listing}; do
     normalized=${member#./}
     [[ -z $normalized ]] && continue
     if [[ $normalized == /* || "/$normalized/" == *'/../'* ]]; then
-      fail "release closure contains an unsafe member: $member"
+      fail "host-test fixture contains an unsafe member: $member"
       return 1
     fi
   done
-  listing=$(tar -tvzf "$archive") || fail 'release closure type listing failed'
+  listing=$(tar -tvzf "$archive") || fail 'host-test fixture type listing failed'
   for line in ${(f)listing}; do
     [[ -n $line ]] || continue
     kind=${line[1]}
     if [[ $kind != '-' && $kind != d ]]; then
-      fail "release closure contains a link or special member (type ${kind})"
+      fail "host-test fixture contains a link or special member (type ${kind})"
       return 1
     fi
   done
@@ -655,7 +654,7 @@ main() {
   setopt err_return no_unset pipe_fail
   integer dry_run=0
   integer accept_defaults=0
-  local artifact_dir='' closure_url=$MASTIC_DEFAULT_CLOSURE_URL
+  local artifact_dir=''
   while (( $# )); do
     case $1 in
       -n|--dry-run) dry_run=1 ;;
@@ -668,11 +667,6 @@ main() {
         artifact_dir=$2
         shift
         ;;
-      --closure-url)
-        (( $# >= 2 )) || fail '--closure-url requires a value'
-        closure_url=$2
-        shift
-        ;;
       -h|--help) usage; return 0 ;;
       *) fail "unknown argument: $1" ;;
     esac
@@ -680,12 +674,14 @@ main() {
   done
 
   validate_host
-  print -r -- "MASTIC ${MASTIC_VERSION} closure: ${closure_url}"
-  print -r -- "Expected closure sha256: ${MASTIC_CLOSURE_SHA256}"
+  print -r -- "MASTIC ${MASTIC_VERSION} host-test fixture: ${MASTIC_HOST_FIXTURE_NAME}"
+  print -r -- "Expected fixture sha256: ${MASTIC_HOST_FIXTURE_SHA256}"
   if (( dry_run )); then
     print -r -- 'Dry run complete: no files, tools, or network resources were changed.'
     return 0
   fi
+  [[ -n $artifact_dir ]] || fail \
+    'host-test fixture installation requires --artifact-dir'
 
   command -v shasum >/dev/null || fail 'shasum is required to verify artifacts.'
   command -v tar >/dev/null || fail 'tar is required to unpack verified artifacts.'
@@ -699,34 +695,27 @@ main() {
     mastic_data_dir="$data_home/mastic"
   fi
   [[ $mastic_data_dir == /* ]] || fail 'MASTIC_DATA_DIR must be an absolute path.'
-  local work closure root uv_source uv_destination python_destination cache_destination wheel
+  local work fixture root uv_source uv_destination python_destination cache_destination wheel
   work=$(mktemp -d "${TMPDIR:-/tmp}/mastic-bootstrap.XXXXXXXX")
   MASTIC_WORK_DIR=$work
   trap cleanup_bootstrap_state EXIT
   trap 'cleanup_bootstrap_state; trap - EXIT; exit 130' INT
   trap 'cleanup_bootstrap_state; trap - EXIT; exit 143' TERM
 
-  closure="$work/$MASTIC_CLOSURE_NAME"
-  if [[ -n $artifact_dir ]]; then
-    [[ -d $artifact_dir ]] || fail "artifact directory does not exist: $artifact_dir"
-    local source="$artifact_dir/$MASTIC_CLOSURE_NAME"
-    [[ -f $source && ! -L $source ]] || {
-      fail "missing release inputs: $MASTIC_CLOSURE_NAME"
-      return 1
-    }
-    cp "$source" "$closure"
-  else
-    command -v curl >/dev/null || fail 'curl is required to fetch verified artifacts.'
-    curl --fail --silent --show-error --location \
-      --connect-timeout 30 --max-time 1800 --retry 3 --retry-delay 2 \
-      "$closure_url" --output "$closure"
-  fi
-  verify_sha256 "$closure" $MASTIC_CLOSURE_SHA256
-  validate_archive_members "$closure"
-  root="$work/closure"
+  fixture="$work/$MASTIC_HOST_FIXTURE_NAME"
+  [[ -d $artifact_dir ]] || fail "artifact directory does not exist: $artifact_dir"
+  local source="$artifact_dir/$MASTIC_HOST_FIXTURE_NAME"
+  [[ -f $source && ! -L $source ]] || {
+    fail "missing host-test fixture input: $MASTIC_HOST_FIXTURE_NAME"
+    return 1
+  }
+  cp "$source" "$fixture"
+  verify_sha256 "$fixture" $MASTIC_HOST_FIXTURE_SHA256
+  validate_archive_members "$fixture"
+  root="$work/fixture"
   mkdir "$root"
-  tar -xzf "$closure" -C "$root"
-  verify_closure "$root"
+  tar -xzf "$fixture" -C "$root"
+  verify_fixture "$root"
   clear_verified_quarantine "$root"
   prepare_supervisor_replacement
 
@@ -744,7 +733,7 @@ main() {
   application_manifest_digest=${application_manifest_digest%% *}
   receipt="$artifacts_parent/bootstrap-receipt.json"
   receipt_stage="${receipt}.mastic-bootstrap.$$"
-  print -r -- "{\"schema_version\":1,\"version\":\"${MASTIC_VERSION}\",\"wheel_sha256\":\"${MASTIC_WHEEL_SHA256}\",\"closure_sha256\":\"${MASTIC_CLOSURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
+  print -r -- "{\"schema_version\":1,\"version\":\"${MASTIC_VERSION}\",\"wheel_sha256\":\"${MASTIC_WHEEL_SHA256}\",\"closure_sha256\":\"${MASTIC_HOST_FIXTURE_SHA256}\",\"application_manifest_sha256\":\"${application_manifest_digest}\"}" >"$receipt_stage"
   chmod 0600 "$receipt_stage"
   replace_file "$receipt_stage" "$receipt"
   MASTIC_EXPECTED_RECEIPT_PATH=$receipt

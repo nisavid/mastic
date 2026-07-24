@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Verify and stage MASTIC distributions
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      tag-commit: ${{ steps.tagged-commit.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+          python-version: "3.11.15"
+
+      - name: Require the tagged commit on main
+        id: tagged-commit
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          tag_commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          git merge-base --is-ancestor "$tag_commit" origin/main
+          print -r -- "commit=$tag_commit" >>"$GITHUB_OUTPUT"
+
+      - name: Install project and development tools
+        run: uv sync --locked --dev
+
+      - name: Type-check with Pyrefly
+        run: uv run --frozen pyrefly check --output-format=github
+
+      - name: Lint with Ruff
+        run: uv run --frozen ruff check .
+
+      - name: Check formatting with Ruff
+        run: uv run --frozen ruff format --check .
+
+      - name: Run tests
+        run: uv run --frozen python -m unittest discover -s tests -t .
+
+      - name: Build and stage MASTIC distributions
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          uv build --sdist --wheel \
+            --build-constraints packaging/build-backend.lock \
+            --require-hashes
+          wheels=(dist/mastic-*-py3-none-any.whl(N))
+          sources=(dist/mastic-*.tar.gz(N))
+          (( ${#wheels} == 1 && ${#sources} == 1 ))
+          version=${${wheels[1]:t}#mastic-}
+          version=${version%-py3-none-any.whl}
+          [[ $GITHUB_REF_NAME == "v${version}" ]]
+          zsh scripts/stage-release-artifacts.zsh \
+            dist/release "$wheels[1]" "$sources[1]"
+
+      - name: Upload staged MASTIC distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mastic-release-${{ github.sha }}
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Attest and publish MASTIC distributions
+    needs: [package]
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout release policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download staged MASTIC distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mastic-release-${{ github.sha }}
+          path: release
+
+      - name: Verify staged checksums
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          files=(release/*(N.))
+          artifacts=(release/mastic-*-py3-none-any.whl(N.))
+          sources=(release/mastic-*.tar.gz(N.))
+          checksums=(release/*.sha256(N.))
+          (( ${#files} == 4 ))
+          (( ${#artifacts} == 1 && ${#sources} == 1 && ${#checksums} == 2 ))
+          for checksum in $checksums; do
+            (cd release && shasum -c "${checksum:t}")
+          done
+
+      - name: Attest MASTIC distributions
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: "release/mastic-*"
+
+      - name: Publish versioned GitHub release
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          zsh scripts/publish-release.zsh
+          "$GITHUB_REF_NAME"
+          "${{ needs.package.outputs.tag-commit }}"
+          "$GITHUB_REPOSITORY"
+          release

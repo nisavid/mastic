@@ -14,40 +14,49 @@ and lifecycle.
 | `masticd` | Foreground per-user Supervisor entry point for direct invocation and help. |
 | `python -m mastic.entrypoints daemon` | Private stable target used by MASTIC's generated LaunchAgent. |
 
-The supported release entry point is `bootstrap-mastic.zsh`. Its embedded digest
-verifies the bytes of one exact macOS/arm64 closure containing MASTIC, Python,
-`uv`, the MASTIC dependency wheelhouse, and the selected application artifacts.
-The digest does not authenticate the publisher; operators must obtain the script
-and its digest manifest through a trusted release channel. Use
-`--dry-run` for host validation without network or mutation, or `--artifact-dir`
-with the exact closure for offline installation. Do not install separate MLX
-runtimes globally for mastic: `mastic runtime install` owns isolated exact Runtime
-Installations.
+MASTIC releases publish the MASTIC wheel and source distribution plus integrity
+and provenance metadata. A MASTIC distributable contains MASTIC; it does not
+rehost Python, `uv`, Codex, Hindsight, their dependency wheelhouses, or other
+third-party projects. The deployment owner resolves declared package
+dependencies from their upstream publishers. Do not install separate MLX
+runtimes globally for MASTIC: `mastic runtime install` owns isolated exact
+Runtime Installations.
 
-After the closure digest and its complete internal manifest pass, bootstrap
+## Host-Test Fixture
+
+Clean-host CI and an explicitly authorized target-machine validation run may use
+`bootstrap-mastic-host-test.zsh` with a matching Host-Test Fixture. The fixture
+is an authenticated, short-lived, non-release workflow artifact containing the
+exact third-party inputs needed to exercise offline installation and replacement
+behavior. It is not a MASTIC release, distributable, or supported public
+installation channel. The runner has no default download URL and requires
+`--artifact-dir`.
+
+After the fixture digest and its complete internal manifest pass, the runner
 removes only `com.apple.quarantine` from its private extraction tree before it
 executes bundled tools. This permits verified offline artifacts transferred by
 AirDrop to run without changing quarantine metadata in the caller-owned artifact
-directory or removing unrelated extended attributes. Bootstrap aborts with an
+directory or removing unrelated extended attributes. The runner aborts with an
 actionable error if `/usr/bin/xattr` is unavailable or quarantine removal fails.
 
-Before replacing an installed release, bootstrap reads the live launchd state.
+Before replacing an installed release, the host-test runner reads the live
+launchd state.
 An inactive Supervisor remains inactive. A running Supervisor first drains its
 Service Runs and Gateway through the installed CLI, exits, and is unregistered
 so launchd cannot retain its previous program definition. After the exact tool
 replacement, the new CLI registers the current definition, starts the
 Supervisor, and reconciles the Gateway and services according to their
-activation policies. Bootstrap aborts before replacement when launchd cannot
+activation policies. The host-test runner aborts before replacement when launchd cannot
 confirm whether the Supervisor is running. Replacement holds the same
 cross-process lifecycle-transition lock as public MASTIC mutations, so a
 concurrent start cannot cross the generation swap.
 
-Bootstrap reports success only after that active-state transition completes. A
-failed drain or unregister aborts before replacement. A failed installation or
+The host-test runner reports success only after that active-state transition
+completes. A failed drain or unregister aborts before replacement. A failed installation or
 new-generation start rolls back the prior release and attempts to restore its
 previously running Supervisor. The command still exits nonzero after successful
 recovery. If recovery also fails, stop and follow its recovery message before
-running a Supervisor-required command. Bootstrap does not restart the
+running a Supervisor-required command. The host-test runner does not restart the
 Supervisor after an incomplete filesystem rollback. If recovery cannot confirm
 a quiescent Supervisor after replacement, it retains both the installed paths
 and their prior-release backups for explicit repair.
@@ -106,7 +115,7 @@ removal transactions continue to share stable exclusion boundaries.
 The Hugging Face cache remains shared and is not product-owned. MASTIC manages
 its bytes through model-cache operations and reference checks.
 
-Bootstrap leaves an existing external `uv`, Codex, or Hindsight installation
+The host-test runner leaves an existing external `uv`, Codex, or Hindsight installation
 untouched. Guided setup adopts an exact matching application nonmutatively. A
 different application at the conventional path is a visible conflict; MASTIC
 does not replace it implicitly. Removal previews the product-owned roots and
