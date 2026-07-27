@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Ivan D Vasin" }]
 dependencies = [
   "httpx>=0.28,<1",
-  "huggingface-hub>=1.24.0,<2",
+  "huggingface-hub>=1.25.1,<2",
   "psutil>=7.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "rfc8785==0.1.4",
   "rich>=14,<16",
@@ -28,7 +28,7 @@ mastic = "mastic.entrypoints:cli_main"
 masticd = "mastic.entrypoints:daemon_main"
 
 [dependency-groups]
-dev = ["httpx2>=2.7,<3", "pyrefly==1.1.1", "ruff==0.15.22"]
+dev = ["httpx2>=2.9.1,<3", "pyrefly==1.1.1", "ruff==0.16.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mastic"]
