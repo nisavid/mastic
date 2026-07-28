@@ -1,5 +1,7 @@
 import signal
+import shutil
 import subprocess
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -208,12 +210,80 @@ class CodexViteOwnerLifecycleTests(unittest.TestCase):
         self.assertEqual(
             environment["NPM_CONFIG_CACHE"], str(artifacts.cache_directory)
         )
+        self.assertEqual(environment["NPM_CONFIG_USERCONFIG"], "/dev/null")
+        self.assertEqual(environment["NPM_CONFIG_GLOBALCONFIG"], "/dev/fd/0")
         self.assertEqual(environment["NPM_CONFIG_PREFER_OFFLINE"], "true")
+        self.assertNotIn("NPM_CONFIG_ALWAYS_AUTH", environment)
         self.assertNotIn("NODE_OPTIONS", environment)
         self.assertEqual(
             environment["NPM_CONFIG_REGISTRY"], "https://registry.npmjs.org/"
         )
         self.assertNotIn("SECRET_TOKEN", environment)
+
+    @unittest.skipUnless(shutil.which("npm"), "real npm is unavailable")
+    def test_owner_action_config_sources_cross_the_real_npm_loading_boundary(self):
+        npm = Path(str(shutil.which("npm")))
+        vp_home = npm.parent.parent
+        if not (vp_home / "bin" / "vp").exists():
+            self.skipTest("real Vite+ owner tools are unavailable")
+        with tempfile.TemporaryDirectory() as home:
+            observed = replace(
+                observation(),
+                active_invocation=str(vp_home / "bin" / "codex"),
+                reachable_invocations=(str(vp_home / "bin" / "codex"),),
+            )
+            selected = CodexViteOwnerLifecycle(
+                vp_home=vp_home,
+                discovery=Discovery([observed]),
+                artifact_verifier=Verifier(),
+                runner=Runner(),
+                base_environment={"HOME": home},
+            )
+            action = selected.preview_action(observed, closure())
+            environment = dict(action.environment)
+            owner_npm_launcher = action.argv[:7]
+            version_environment = {
+                **environment,
+                "NPM_CONFIG_GLOBALCONFIG": "/dev/fd/0",
+            }
+            version = subprocess.run(
+                (*owner_npm_launcher, "--version"),
+                cwd=home,
+                env=version_environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+            )
+            if version.returncode != 0:
+                self.skipTest("owner npm version is unavailable")
+            major = int(version.stdout.decode().partition(".")[0])
+            if major < 12:
+                self.skipTest("npm 12 config identity checks are unavailable")
+            duplicate = {
+                **environment,
+                "NPM_CONFIG_GLOBALCONFIG": environment["NPM_CONFIG_USERCONFIG"],
+            }
+
+            rejected = subprocess.run(
+                (*owner_npm_launcher, "config", "get", "prefix"),
+                cwd=home,
+                env=duplicate,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+            )
+            accepted = subprocess.run(
+                (*owner_npm_launcher, "config", "get", "prefix"),
+                cwd=home,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(b"double-loading config", rejected.stderr)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr.decode())
 
     def test_vite_native_owner_previews_exact_local_global_install(self):
         selected, observed, *_rest = lifecycle(owner="vite-plus/global-package")
