@@ -179,16 +179,15 @@ class Downloader:
 
 
 class NpmConfigLoadingRunner:
-    def __init__(self, npm: Path, node: Path):
-        self.npm = npm.resolve()
-        self.node = node.resolve()
+    def __init__(self, npm: Path):
+        self.npm = npm
         self.calls = []
 
     def run(self, argv, *, cwd, environment, timeout_seconds):
         completed = subprocess.run(
-            (self.node, self.npm, "config", "get", "cache"),
+            (self.npm, "config", "get", "cache"),
             cwd=cwd,
-            env=environment,
+            env={**environment, "PATH": os.environ.get("PATH", "")},
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
@@ -350,8 +349,8 @@ def write_installed(root, files):
 
 class ArtifactClosureVerifierTests(unittest.TestCase):
     @unittest.skipUnless(
-        shutil.which("npm") and shutil.which("node"),
-        "real npm and Node.js are unavailable",
+        shutil.which("npm"),
+        "real npm is unavailable",
     )
     def test_private_configs_cross_the_real_npm_loading_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -361,10 +360,7 @@ class ArtifactClosureVerifierTests(unittest.TestCase):
                 fetcher=Fetcher([packument(), packument()]),
                 downloader=Downloader({MAIN_URL: MAIN, PLATFORM_URL: PLATFORM}),
             ).materialize(resolution())
-            runner = NpmConfigLoadingRunner(
-                Path(str(shutil.which("npm"))),
-                Path(str(shutil.which("node"))),
-            )
+            runner = NpmConfigLoadingRunner(Path(str(shutil.which("npm"))))
             verifier = CodexViteArtifactClosureVerifier(
                 vp_home=root,
                 roots=Roots({}),

@@ -432,8 +432,7 @@ class CodexViteOwnerLifecycle:
             "NPM_CONFIG_PREFER_OFFLINE": "true",
             "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
             "NPM_CONFIG_USERCONFIG": "/dev/null",
-            "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
-            "NPM_CONFIG_ALWAYS_AUTH": "false",
+            "NPM_CONFIG_GLOBALCONFIG": "/dev/fd/0",
             "NPM_CONFIG_STRICT_SSL": "true",
         }
         if owner_identity == "vite-plus/npm-global":
