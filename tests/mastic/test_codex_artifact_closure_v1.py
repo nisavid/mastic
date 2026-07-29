@@ -529,6 +529,20 @@ class ArtifactClosureVerifierTests(unittest.TestCase):
             self.assertEqual(len(runner.calls), 2)
             self.assertTrue(all("cache" in call[0] for call in runner.calls))
             self.assertTrue(
+                all(
+                    call[0][6]
+                    == str(
+                        Path(directory)
+                        / "js_runtime"
+                        / "node"
+                        / "24.18.0"
+                        / "bin"
+                        / "npm"
+                    )
+                    for call in runner.calls
+                )
+            )
+            self.assertTrue(
                 all(call[2]["NPM_CONFIG_OFFLINE"] == "true" for call in runner.calls)
             )
             self.assertTrue(

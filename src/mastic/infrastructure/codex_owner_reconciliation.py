@@ -342,6 +342,23 @@ class LocalCodexOwnerReconciliation:
             ),
         }
 
+    def diagnose(self, application: str) -> Mapping[str, object]:
+        if application != "codex":
+            raise ApplicationError(
+                "invalid_parameter",
+                f"unsupported application: {application!r}",
+            )
+        selected, observation = self._observe_installation()
+        return {
+            "application": "codex",
+            "installation_identity": selected.installation_identity,
+            "owner_identity": observation.owner_identity,
+            "owner_installation_identity": observation.owner_installation_identity,
+            "owner_runtime_identity": observation.owner_runtime_identity,
+            "installed_version": observation.installed_release,
+            "state": "resolved",
+        }
+
     def _prepare(self) -> PreparedOwnerReconciliation:
         selected, observation, resolution = self._observe_current()
         transition = classify_release_transition(
@@ -405,13 +422,30 @@ class LocalCodexOwnerReconciliation:
         InstallationObservation,
         CurrentReleaseResolution,
     ]:
+        selected, observation = self._observe_installation()
+        try:
+            resolution = self._current.resolve(selected, observation)
+        except ApplicationError:
+            raise
+        except Exception as error:
+            reason = getattr(error, "reason_code", type(error).__name__)
+            raise ApplicationError(
+                "codex_current_unavailable",
+                "Codex current-release evidence could not be resolved.",
+                details={"reason_code": str(reason)},
+            ) from error
+        return selected, observation, resolution
+
+    def _observe_installation(
+        self,
+    ) -> tuple[ExternalApplicationInstallation, InstallationObservation]:
         try:
             observation = self._discovery.discover(
                 selected_installation_identity=CODEX_SELECTION.installation_identity,
                 selected_release_channel=CODEX_SELECTION.release_intent.channel,
             )
             selected = _selection(observation.owner_identity)
-            return selected, observation, self._current.resolve(selected, observation)
+            return selected, observation
         except ApplicationError:
             raise
         except CodexViteDiscoveryError as error:
@@ -423,8 +457,8 @@ class LocalCodexOwnerReconciliation:
         except Exception as error:
             reason = getattr(error, "reason_code", type(error).__name__)
             raise ApplicationError(
-                "codex_current_unavailable",
-                "Codex current-release evidence could not be resolved.",
+                "codex_owner_unavailable",
+                "Codex installation-owner evidence could not be resolved.",
                 details={"reason_code": str(reason)},
             ) from error
 

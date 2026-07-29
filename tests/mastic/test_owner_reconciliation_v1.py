@@ -53,6 +53,40 @@ SHA_D = "sha256:" + "d" * 64
 
 
 class OwnerReconciliationTests(unittest.TestCase):
+    def test_owner_diagnostic_observes_installation_without_resolving_current(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            prepared = _prepared(Path(raw))
+            local = LocalCodexOwnerReconciliation(
+                discovery=StaticDiscovery(prepared.observation),
+                current=Unused(),
+                closure_materializer=Unused(),
+                lifecycle=Unused(),
+                store=Unused(),
+                planning=Unused(),
+                issuer=Unused(),
+                remote=Unused(),
+                uid=501,
+            )
+
+            result = local.diagnose("codex")
+
+            self.assertEqual(
+                result,
+                {
+                    "application": "codex",
+                    "installation_identity": (prepared.selected.installation_identity),
+                    "owner_identity": "vite-plus/npm-global",
+                    "owner_installation_identity": (
+                        prepared.observation.owner_installation_identity
+                    ),
+                    "owner_runtime_identity": "node:24.18.0",
+                    "installed_version": "0.144.5",
+                    "state": "resolved",
+                },
+            )
+
     def test_production_owner_authorization_survives_process_environment_drift(
         self,
     ) -> None:

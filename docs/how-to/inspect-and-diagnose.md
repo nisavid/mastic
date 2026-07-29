@@ -53,6 +53,11 @@ configuration, lifecycle, routing, runtime, and service evidence, then returns
 stable next actions. Follow the narrowest suggested operation instead of
 editing MASTIC state or application configuration directly.
 
+It also observes the selected Codex Installation Owner and exact Owner Runtime
+without requiring an online current-release lookup. An unresolved or
+unavailable owner appears as a diagnostic issue with its machine-readable
+reason and a focused `mastic app inspect codex` follow-up.
+
 ## Inspect logs and durable work
 
 Read the bounded product log:

@@ -70,10 +70,16 @@ It does not select an owner or authorize mutation.
 _Avoid_: External Application Installation, inventory row, lifecycle authority
 
 **Owner Runtime Identity**:
-The exact runtime selected by an Installation Owner for one External
-Application Installation. An owner-preserving mutation keeps this identity
-unless a separately authorized Plan changes it.
+The exact runtime containing and executing one External Application
+Installation selected by its Installation Owner. It remains distinct from the
+Installation Owner's current or default runtime, and an owner-preserving
+mutation keeps this identity unless a separately authorized Plan changes it.
 _Avoid_: application release, host default runtime, inferred compatibility
+
+**Owner Installation Identity**:
+The exact owner-native package instance for one External Application
+Installation bound to its Owner Runtime.
+_Avoid_: package name, External Application, Owner Runtime Identity
 
 **Verified Artifact Closure**:
 The complete bounded set of exact archives and installed payload fingerprints
