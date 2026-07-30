@@ -545,6 +545,7 @@ class SetupOperationPort:
             capacity = parameters.get("capacity")
             capacity_name = str(capacity) if capacity is not None else None
             intent = str(parameters.get("intent", "balanced"))
+            host_requirements = None
             if profile == "exact":
                 missing = _missing_exact_selection(parameters)
                 if missing:
@@ -564,10 +565,12 @@ class SetupOperationPort:
                 )
                 if capacity_name is None and baseline.capacity_profile is not None:
                     capacity_name = baseline.capacity_profile.name
+                host_requirements = baseline.host_requirements
                 selection = _selection(parameters, baseline.selection)
                 explicit_selection = _has_selection(parameters)
             request = SetupRequest(
                 selection=selection if explicit_selection else None,
+                host_requirements=host_requirements if explicit_selection else None,
                 capacity_profile=capacity_name,
                 intent=intent,
                 skip_canaries=_strings(parameters.get("skip_canaries", ())),
@@ -648,6 +651,7 @@ class SetupOperationPort:
                 "context_window": preview.context_window,
             },
             "preflight": _plain(resolved.preflight),
+            "host_requirements": _plain(resolved.host_requirements),
             "steps": [_plain(step) for step in preview.steps],
             "offline_note": preview.offline_note,
             "performance_profile": _plain(self._performance_profile),

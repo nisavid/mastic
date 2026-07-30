@@ -89,6 +89,15 @@ class SetupPreflight:
 
 
 @dataclass(frozen=True, slots=True)
+class SetupHostRequirements:
+    platform: str
+    machine: str
+    macos_major: int | None
+    minimum_memory_bytes: int
+    minimum_disk_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class CapacityProfile:
     """A coherent service context, concurrency, and prompt-cache budget."""
 
@@ -347,6 +356,7 @@ class RecommendedProfile:
 @dataclass(frozen=True, slots=True)
 class SetupRequest:
     selection: ExactSetupSelection | None = None
+    host_requirements: SetupHostRequirements | None = None
     capacity_profile: str | None = None
     intent: SetupIntent = SetupIntent.BALANCED
     skip_canaries: tuple[str, ...] = ()
@@ -406,6 +416,7 @@ class ResolvedSetup:
     profile_name: str
     selection: ExactSetupSelection
     preflight: SetupPreflight
+    host_requirements: SetupHostRequirements
     steps: tuple[MutationStep, ...]
     offline: bool
     editable: bool
@@ -572,9 +583,13 @@ class SetupResolver:
         if request.selection is None:
             profile = self._recommend(preflight.memory_bytes, preflight.disk_free_bytes)
             selection = profile.selection
+            host_requirements = self._host_requirements(preflight, profile)
         else:
             profile = None
             selection = request.selection
+            host_requirements = request.host_requirements or self._host_requirements(
+                preflight, None
+            )
         capacity_name = request.capacity_profile
         if capacity_name is None and request.selection is None:
             capacity_name = self._intent_capacity_profiles.get(
@@ -610,7 +625,14 @@ class SetupResolver:
         steps: list[MutationStep] = []
         dependency_blocked = False
         for step_id, title, inputs, network_required in specifications:
-            fingerprint = _fingerprint(step_id, inputs)
+            # The preflight step reports the exact host observation, while its
+            # approval and reusable evidence bind the requirements it evaluated.
+            approval_inputs = (
+                _plain_host_requirements(host_requirements)
+                if step_id == "preflight"
+                else inputs
+            )
+            fingerprint = _fingerprint(step_id, approval_inputs)
             prior = evidence_by_step.get((step_id, fingerprint))
             if prior is not None and prior.state is StepState.COMPLETE:
                 state = StepState.COMPLETE
@@ -638,6 +660,7 @@ class SetupResolver:
             profile_name=profile.name if profile is not None else "custom",
             selection=selection,
             preflight=preflight,
+            host_requirements=host_requirements,
             steps=tuple(steps),
             offline=not preflight.online,
             editable=not request.noninteractive,
@@ -892,6 +915,23 @@ class SetupResolver:
             raise ValueError("preflight memory and disk facts must be nonnegative")
 
     @staticmethod
+    def _host_requirements(
+        preflight: SetupPreflight,
+        profile: RecommendedProfile | None,
+    ) -> SetupHostRequirements:
+        return SetupHostRequirements(
+            platform="darwin",
+            machine="arm64",
+            macos_major=_macos_major(preflight.os_version),
+            minimum_memory_bytes=(
+                profile.minimum_memory_bytes if profile is not None else 1
+            ),
+            minimum_disk_bytes=(
+                profile.minimum_disk_bytes if profile is not None else 0
+            ),
+        )
+
+    @staticmethod
     def _setup_specs(
         preflight: SetupPreflight,
         selection: ExactSetupSelection,
@@ -1081,6 +1121,25 @@ def _verification_dependency_fingerprint(
             "application_target_options": selection.application_target_options,
         },
     )
+
+
+def _plain_host_requirements(
+    requirements: SetupHostRequirements,
+) -> Mapping[str, object]:
+    return {
+        "platform": requirements.platform,
+        "machine": requirements.machine,
+        "macos_major": requirements.macos_major,
+        "minimum_memory_bytes": requirements.minimum_memory_bytes,
+        "minimum_disk_bytes": requirements.minimum_disk_bytes,
+    }
+
+
+def _macos_major(version: str) -> int | None:
+    major, _, _ = version.partition(".")
+    if not major.isdecimal():
+        return None
+    return int(major)
 
 
 def _fingerprint(step_id: str, inputs: Mapping[str, object]) -> str:

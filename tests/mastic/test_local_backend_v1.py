@@ -137,6 +137,29 @@ class _SetupPort(_Port):
         return {"state": "complete", "removed": True}
 
 
+class _DriftingSetupPort(_SetupPort):
+    def __init__(self):
+        super().__init__({"state": "complete"})
+        self.preview_disk_free_bytes = iter((500 * 1024**3, 500 * 1024**3 - 4096))
+        self.previews = []
+
+    def preview(self, parameters):
+        preview = {
+            "state": "review_required",
+            "preview_fingerprint": "sha256:host-requirements",
+            "preflight": {
+                "disk_free_bytes": next(self.preview_disk_free_bytes),
+            },
+            "parameters": {
+                key: value
+                for key, value in parameters.items()
+                if key not in {"confirmed", "preview_fingerprint"}
+            },
+        }
+        self.previews.append(preview)
+        return preview
+
+
 class _ApplicationsPort(_Port):
     def preview(self, operation, parameters):
         return {
@@ -1596,6 +1619,43 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertFalse(prepared.requires_supervisor)
             self.assertEqual(prepared.events[0]["preview_fingerprint"], "sha256:exact")
             self.assertEqual(setup.calls, [])
+
+    def test_setup_confirmation_uses_host_requirements_across_observation_drift(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            setup = _DriftingSetupPort()
+            backend, _ = self._backend(Path(directory), setup=setup)
+            preview = backend.prepare(OperationRequest("setup")).events[-1]
+
+            prepared = backend.prepare(
+                OperationRequest(
+                    "setup",
+                    {
+                        "confirmed": True,
+                        "preview_fingerprint": preview["preview_fingerprint"],
+                    },
+                )
+            )
+            result = prepared.execute()
+
+            self.assertEqual(
+                [item["preflight"]["disk_free_bytes"] for item in setup.previews],
+                [500 * 1024**3, 500 * 1024**3 - 4096],
+            )
+            self.assertEqual(result["resource"]["state"], "complete")
+            self.assertEqual(
+                setup.calls,
+                [
+                    (
+                        "setup",
+                        {
+                            "confirmed": True,
+                            "preview_fingerprint": "sha256:host-requirements",
+                        },
+                    )
+                ],
+            )
 
     def test_product_removal_previews_exact_operations_without_starting_supervisor(
         self,
