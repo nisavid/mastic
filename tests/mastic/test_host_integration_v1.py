@@ -37,6 +37,11 @@ class _Launchd:
         self.calls.append("kickstart")
         self.running = True
 
+    def bootout(self):
+        self.calls.append("bootout")
+        self.registered = False
+        self.running = False
+
 
 class _Dispatcher:
     def __init__(self, value) -> None:
@@ -90,6 +95,61 @@ class HostIntegrationTests(unittest.TestCase):
         activator.activate()
 
         self.assertEqual(launchd.calls, ["status"])
+
+    def test_recycle_waits_for_old_socket_to_quiesce_before_starting_replacement(
+        self,
+    ) -> None:
+        launchd = _Launchd(registered=True, running=True)
+        socket_states = iter((True, True, False, False, True))
+
+        def socket_ready(_path):
+            ready = next(socket_states)
+            launchd.calls.append(f"socket:{ready}")
+            return ready
+
+        activator = LaunchdSupervisorActivator(
+            launchd,
+            Path("/unused"),
+            socket_ready=socket_ready,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: None,
+        )
+
+        activator.recycle()
+
+        self.assertEqual(
+            launchd.calls,
+            [
+                "status",
+                "bootout",
+                "socket:True",
+                "socket:True",
+                "socket:False",
+                "status",
+                "register",
+                "kickstart",
+                "socket:False",
+                "socket:True",
+            ],
+        )
+
+    def test_recycle_does_not_start_replacement_when_old_socket_stays_ready(
+        self,
+    ) -> None:
+        launchd = _Launchd(registered=True, running=True)
+        clock = iter((0.0, 6.0))
+        activator = LaunchdSupervisorActivator(
+            launchd,
+            Path("/unused"),
+            socket_ready=lambda _path: True,
+            monotonic=lambda: next(clock),
+            sleep=lambda _seconds: None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not close"):
+            activator.recycle()
+
+        self.assertEqual(launchd.calls, ["status", "bootout"])
 
     def test_snapshot_provider_uses_real_status_without_mutation(self) -> None:
         dispatcher = _Dispatcher(

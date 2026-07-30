@@ -112,6 +112,233 @@ _APPLICATION_TARGET_NAMES = frozenset({"codex", "hindsight"})
 _APPLICATION_NAMES = frozenset({"codex"})
 
 
+def _load_config(config_store: ConfigStore[MasticConfig]) -> MasticConfig:
+    if config_store.exists:
+        return config_store.load().value
+    return validate_config({"schema_version": 1})
+
+
+def _resolve_model_installation_name(resource: str, config: MasticConfig) -> str:
+    if resource in config.aliases:
+        return config.aliases[resource].installation_name
+    return resource
+
+
+class LocalConfigurationMutations:
+    """Apply physical desired-state mutations without public dispatcher re-entry."""
+
+    def __init__(
+        self,
+        config_store: ConfigStore[MasticConfig],
+        state_store: OperationalStateStore,
+    ) -> None:
+        self._config_store = config_store
+        self._state_store = state_store
+
+    def validate_stores(
+        self,
+        config_store: ConfigStore[MasticConfig],
+        state_store: OperationalStateStore,
+    ) -> None:
+        if (
+            self._config_store is not config_store
+            or self._state_store is not state_store
+        ):
+            raise ValueError(
+                "configuration mutations must share the composed config and state stores"
+            )
+
+    def execute_plan_mutation(
+        self,
+        operation: str,
+        parameters: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if operation not in {"gateway.configure", "service.create", "model.trust"}:
+            raise ApplicationError(
+                "operation_unavailable",
+                f"{operation} is not a setup configuration mutation",
+            )
+        revision = (
+            self._config_store.load().revision if self._config_store.exists else None
+        )
+        return self.execute(
+            OperationRequest(operation, parameters),
+            {"config_revision": revision},
+        )
+
+    def execute(
+        self,
+        request: OperationRequest,
+        preview: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        name = request.name
+        parameters = request.parameters
+        if name == "config.import":
+            text = _config_import_text(parameters)
+            if preview.get("candidate_sha256") != _text_digest(text):
+                raise _stale_preview(name)
+            try:
+                return _plain(
+                    self._config_store.import_text(
+                        text,
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            except ConfigRevisionConflict as error:
+                raise _stale_preview(name) from error
+        if name == "config.restore":
+            try:
+                return _plain(
+                    self._config_store.restore(
+                        str(parameters["revision"]),
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            except ConfigRevisionConflict as error:
+                raise _stale_preview(name) from error
+        if name == "model.trust":
+            resource = str(parameters.get("resource", parameters.get("model", "")))
+            config = _load_config(self._config_store)
+            installation_name = _resolve_model_installation_name(resource, config)
+            _resource(
+                OperationRequest(name, {"resource": installation_name}),
+                config.models,
+                "Model Installation",
+            )
+            runtime = str(parameters.get("runtime", ""))
+            _resource(
+                OperationRequest(name, {"resource": runtime}),
+                config.runtimes,
+                "Runtime Installation",
+            )
+            model = config.models[installation_name]
+            revision = str(parameters.get("revision", model.revision.revision))
+            if revision != model.revision.revision:
+                raise ApplicationError(
+                    "revision_mismatch",
+                    "trust must target the configured exact Model Revision",
+                )
+            accepted = parameters.get("accepted_risks")
+            if not isinstance(accepted, (tuple, list)) or not all(
+                isinstance(item, str) and item for item in accepted
+            ):
+                raise ApplicationError(
+                    "invalid_parameter",
+                    "accepted_risks must be a JSON array of nonempty strings",
+                )
+            return self._state_store.put_snapshot(
+                {
+                    "kind": "trust",
+                    "id": f"{installation_name}@{runtime}",
+                    "version": revision,
+                    "model_installation": installation_name,
+                    "repository": model.revision.repository,
+                    "revision": revision,
+                    "runtime_installation": runtime,
+                    "accepted_risks": list(accepted),
+                }
+            )
+
+        model_uninstall: tuple[str, tuple[str, ...]] | None = None
+        if name == "model.uninstall":
+            config = _load_config(self._config_store)
+            resource = str(parameters.get("resource", ""))
+            installation_name = _resolve_model_installation_name(resource, config)
+            aliases = tuple(
+                sorted(
+                    alias
+                    for alias, target in config.aliases.items()
+                    if target.installation_name == installation_name
+                )
+            )
+            referenced = tuple(
+                sorted(
+                    service_name
+                    for service_name, service in config.services.items()
+                    if str(service.model_alias) in aliases
+                )
+            )
+            if referenced:
+                raise ApplicationError(
+                    "resource_in_use",
+                    f"Model Installation {installation_name!r} is selected by services: "
+                    + ", ".join(referenced),
+                    next_actions=tuple(
+                        f"mastic service remove {service}" for service in referenced
+                    ),
+                )
+            model_uninstall = installation_name, aliases
+
+        def edit(document) -> None:
+            if name == "gateway.configure":
+                gateway = document.setdefault("gateway", tomlkit.table())
+                for key in ("host", "port"):
+                    if key in parameters:
+                        gateway[key] = parameters[key]
+                return
+            if name.startswith("service."):
+                services = document.setdefault("services", tomlkit.table())
+                resource = str(
+                    parameters.get(
+                        "resource",
+                        parameters.get("service", parameters.get("name", "")),
+                    )
+                )
+                if (
+                    name in {"service.edit", "service.remove"}
+                    and resource not in services
+                ):
+                    raise _not_found("Inference Service", resource)
+                if name == "service.remove":
+                    del services[resource]
+                    return
+                table = services.get(resource, tomlkit.table())
+                for key in (
+                    "model_alias",
+                    "runtime",
+                    "route",
+                    "activation",
+                    "pinned",
+                    "options",
+                ):
+                    if key in parameters:
+                        table[key] = parameters[key]
+                services[resource] = table
+                return
+            if name == "model.uninstall":
+                models = document.setdefault("models", tomlkit.table())
+                if model_uninstall is None:
+                    raise ApplicationError(
+                        "invalid_state",
+                        "model uninstall was not resolved before the document edit",
+                    )
+                installation_name, aliases_to_remove = model_uninstall
+                alias_table = document.setdefault("aliases", tomlkit.table())
+                for alias in aliases_to_remove:
+                    alias_table.pop(alias, None)
+                del models[installation_name]
+
+        try:
+            if not self._config_store.exists:
+                document = tomlkit.parse("schema_version = 1\n")
+                edit(document)
+                return _plain(
+                    self._config_store.save(
+                        document,
+                        action="edit",
+                        expected_revision=preview.get("config_revision"),
+                    )
+                )
+            return _plain(
+                self._config_store.edit(
+                    edit,
+                    expected_revision=preview.get("config_revision"),
+                )
+            )
+        except ConfigRevisionConflict as error:
+            raise _stale_preview(name) from error
+
+
 class LocalOperationBackend:
     """Prepare observations and owner-scoped mutations without hidden activation."""
 
@@ -133,6 +360,7 @@ class LocalOperationBackend:
         application_diagnostics: ApplicationDiagnosticPort | None = None,
         config_path: str | Path,
         gateway_credential_path: str | Path | None = None,
+        configuration_mutations: LocalConfigurationMutations | None = None,
         model_intelligence=None,
         setup_outcomes: SetupOutcomeProvider | None = None,
     ) -> None:
@@ -149,6 +377,11 @@ class LocalOperationBackend:
         self._applications = applications
         self._application_diagnostics = application_diagnostics
         self._application_targets = application_targets
+        self._configuration_mutations = (
+            configuration_mutations
+            if configuration_mutations is not None
+            else LocalConfigurationMutations(config_store, state_store)
+        )
         self._config_path = Path(config_path)
         self._gateway_credential_path = (
             Path(gateway_credential_path)
@@ -1224,7 +1457,7 @@ class LocalOperationBackend:
             service = self._config().services.get(resource)
             if service is None:
                 raise _not_found("Inference Service", resource)
-            configured = self._local_mutation(request, preview)
+            configured = self._configuration_mutations.execute(request, preview)
             removed = self._supervisor.execute(
                 "service.remove",
                 {
@@ -1253,7 +1486,7 @@ class LocalOperationBackend:
         elif name in {"application-target.configure", "application-target.remove"}:
             value = self._application_targets.execute(name, parameters)
         elif name in _LOCAL_MUTATIONS:
-            value = self._local_mutation(request, preview)
+            value = self._configuration_mutations.execute(request, preview)
         else:
             raise ApplicationError(
                 "operation_unavailable", f"{name} has no mutation owner"
@@ -1340,9 +1573,7 @@ class LocalOperationBackend:
 
     @staticmethod
     def _model_installation_name(resource: str, config: MasticConfig) -> str:
-        if resource in config.aliases:
-            return config.aliases[resource].installation_name
-        return resource
+        return _resolve_model_installation_name(resource, config)
 
     def _supplied_model_installation(
         self, installation_name: str, config: MasticConfig
@@ -1404,174 +1635,6 @@ class LocalOperationBackend:
             ),
         )
 
-    def _local_mutation(
-        self,
-        request: OperationRequest,
-        preview: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        name = request.name
-        parameters = request.parameters
-        if name == "config.import":
-            text = _config_import_text(parameters)
-            if preview.get("candidate_sha256") != _text_digest(text):
-                raise _stale_preview(name)
-            try:
-                return _plain(
-                    self._config_store.import_text(
-                        text,
-                        expected_revision=preview.get("config_revision"),
-                    )
-                )
-            except ConfigRevisionConflict as error:
-                raise _stale_preview(name) from error
-        if name == "config.restore":
-            try:
-                return _plain(
-                    self._config_store.restore(
-                        str(parameters["revision"]),
-                        expected_revision=preview.get("config_revision"),
-                    )
-                )
-            except ConfigRevisionConflict as error:
-                raise _stale_preview(name) from error
-        if name == "model.trust":
-            resource = str(parameters.get("resource", parameters.get("model", "")))
-            config = self._config()
-            installation_name = self._model_installation_name(resource, config)
-            _resource(
-                OperationRequest(name, {"resource": installation_name}),
-                config.models,
-                "Model Installation",
-            )
-            runtime = str(parameters.get("runtime", ""))
-            _resource(
-                OperationRequest(name, {"resource": runtime}),
-                config.runtimes,
-                "Runtime Installation",
-            )
-            model = config.models[installation_name]
-            revision = str(parameters.get("revision", model.revision.revision))
-            if revision != model.revision.revision:
-                raise ApplicationError(
-                    "revision_mismatch",
-                    "trust must target the configured exact Model Revision",
-                )
-            accepted = parameters.get("accepted_risks")
-            if not isinstance(accepted, (tuple, list)) or not all(
-                isinstance(item, str) and item for item in accepted
-            ):
-                raise ApplicationError(
-                    "invalid_parameter",
-                    "accepted_risks must be a JSON array of nonempty strings",
-                )
-            return self._state_store.put_snapshot(
-                {
-                    "kind": "trust",
-                    "id": f"{installation_name}@{runtime}",
-                    "version": revision,
-                    "model_installation": installation_name,
-                    "repository": model.revision.repository,
-                    "revision": revision,
-                    "runtime_installation": runtime,
-                    "accepted_risks": list(accepted),
-                }
-            )
-
-        model_uninstall: tuple[str, tuple[str, ...]] | None = None
-        if name == "model.uninstall":
-            config = self._config()
-            resource = str(parameters.get("resource", ""))
-            installation_name = self._model_installation_name(resource, config)
-            aliases = tuple(
-                sorted(
-                    alias
-                    for alias, target in config.aliases.items()
-                    if target.installation_name == installation_name
-                )
-            )
-            referenced = tuple(
-                sorted(
-                    service_name
-                    for service_name, service in config.services.items()
-                    if str(service.model_alias) in aliases
-                )
-            )
-            if referenced:
-                raise ApplicationError(
-                    "resource_in_use",
-                    f"Model Installation {installation_name!r} is selected by services: "
-                    + ", ".join(referenced),
-                    next_actions=tuple(
-                        f"mastic service remove {service}" for service in referenced
-                    ),
-                )
-            model_uninstall = installation_name, aliases
-
-        def edit(document) -> None:
-            if name == "gateway.configure":
-                gateway = document.setdefault("gateway", tomlkit.table())
-                for key in ("host", "port"):
-                    if key in parameters:
-                        gateway[key] = parameters[key]
-                return
-            if name.startswith("service."):
-                services = document.setdefault("services", tomlkit.table())
-                resource = str(
-                    parameters.get(
-                        "resource",
-                        parameters.get("service", parameters.get("name", "")),
-                    )
-                )
-                if (
-                    name in {"service.edit", "service.remove"}
-                    and resource not in services
-                ):
-                    raise _not_found("Inference Service", resource)
-                if name == "service.remove":
-                    del services[resource]
-                    return
-                table = services.get(resource, tomlkit.table())
-                for key in (
-                    "model_alias",
-                    "runtime",
-                    "route",
-                    "activation",
-                    "pinned",
-                    "options",
-                ):
-                    if key in parameters:
-                        table[key] = parameters[key]
-                services[resource] = table
-                return
-            if name == "model.uninstall":
-                models = document.setdefault("models", tomlkit.table())
-                assert model_uninstall is not None
-                installation_name, aliases_to_remove = model_uninstall
-                alias_table = document.setdefault("aliases", tomlkit.table())
-                for alias in aliases_to_remove:
-                    alias_table.pop(alias, None)
-                del models[installation_name]
-
-        try:
-            if not self._config_store.exists:
-                document = tomlkit.parse("schema_version = 1\n")
-                edit(document)
-                return _plain(
-                    self._config_store.save(
-                        document,
-                        action="edit",
-                        expected_revision=preview.get("config_revision"),
-                    )
-                )
-            return _plain(
-                self._config_store.edit(
-                    edit,
-                    expected_revision=preview.get("config_revision"),
-                )
-            )
-        except ConfigRevisionConflict as error:
-            raise _stale_preview(name) from error
-
     def _service_items(self, config: MasticConfig) -> list[dict[str, object]]:
         runs: dict[str, Mapping[str, object]] = {}
         for run in self._state_store.snapshots("service_run"):
@@ -1586,9 +1649,7 @@ class LocalOperationBackend:
         return self._state_store.snapshot(kind, resource)
 
     def _config(self) -> MasticConfig:
-        if self._config_store.exists:
-            return self._config_store.load().value
-        return validate_config({"schema_version": 1})
+        return _load_config(self._config_store)
 
 
 def _resource(

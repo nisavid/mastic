@@ -26,6 +26,8 @@ class LaunchdPort(Protocol):
 
     def kickstart(self): ...
 
+    def bootout(self): ...
+
 
 class StatusDispatcher(Protocol):
     def execute(self, request: OperationRequest): ...
@@ -65,12 +67,32 @@ class LaunchdSupervisorActivator:
             self._launchd.register()
         if not status.running:
             self._launchd.kickstart()
+        self._wait_for_socket(
+            ready=True,
+            timeout_message=(
+                "masticd did not open its private control socket before the timeout"
+            ),
+        )
+
+    def recycle(self) -> None:
+        """Replace the current daemon without mistaking its stale socket for readiness."""
+
+        status = self._launchd.status()
+        if status.registered:
+            self._launchd.bootout()
+        self._wait_for_socket(
+            ready=False,
+            timeout_message=(
+                "masticd did not close its private control socket before replacement"
+            ),
+        )
+        self.activate()
+
+    def _wait_for_socket(self, *, ready: bool, timeout_message: str) -> None:
         deadline = self._monotonic() + self._timeout
-        while not self._socket_ready(self._socket_path):
+        while self._socket_ready(self._socket_path) is not ready:
             if self._monotonic() >= deadline:
-                raise RuntimeError(
-                    "masticd did not open its private control socket before the timeout"
-                )
+                raise RuntimeError(timeout_message)
             self._sleep(self._poll)
 
 
