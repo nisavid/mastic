@@ -264,6 +264,8 @@ class SetupOperationPortTests(unittest.TestCase):
     def port(
         self,
         *,
+        resolver=None,
+        preflight=None,
         model=None,
         facts=None,
         performance_profile=None,
@@ -276,16 +278,19 @@ class SetupOperationPortTests(unittest.TestCase):
         plan_store=None,
     ):
         return SetupOperationPort(
-            self.resolver,
-            preflight=lambda offline: (
-                facts
-                or SetupPreflight(
-                    self.facts.platform,
-                    self.facts.machine,
-                    self.facts.memory_bytes,
-                    self.facts.disk_free_bytes,
-                    self.facts.online and not offline,
-                    os_version=self.facts.os_version,
+            resolver or self.resolver,
+            preflight=preflight
+            or (
+                lambda offline: (
+                    facts
+                    or SetupPreflight(
+                        self.facts.platform,
+                        self.facts.machine,
+                        self.facts.memory_bytes,
+                        self.facts.disk_free_bytes,
+                        self.facts.online and not offline,
+                        os_version=self.facts.os_version,
+                    )
                 )
             ),
             runtime=self.runtime,
@@ -1872,6 +1877,254 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertNotEqual(
             baseline["preview_fingerprint"], options["preview_fingerprint"]
         )
+
+    def test_confirmation_survives_harmless_free_disk_observation_drift(self):
+        observations = iter(
+            (
+                self.facts,
+                replace(
+                    self.facts,
+                    disk_free_bytes=self.facts.disk_free_bytes - 4096,
+                ),
+            )
+        )
+        port = self.port(preflight=lambda _offline: next(observations))
+        preview = port.preview({})
+        preflight_step = next(
+            step for step in preview["steps"] if step["id"] == "preflight"
+        )
+
+        self.assertEqual(
+            preflight_step["inputs"],
+            {
+                "platform": "darwin",
+                "machine": "arm64",
+                "os_version": "26.5",
+                "memory_bytes": self.facts.memory_bytes,
+                "disk_free_bytes": self.facts.disk_free_bytes,
+            },
+        )
+        self.assertEqual(
+            preview["preflight"]["disk_free_bytes"],
+            self.facts.disk_free_bytes,
+        )
+        self.assertEqual(
+            preview["host_requirements"],
+            {
+                "platform": "darwin",
+                "machine": "arm64",
+                "macos_major": 26,
+                "minimum_memory_bytes": 64 * GIB,
+                "minimum_disk_bytes": 0,
+            },
+        )
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(
+            result["preflight"]["disk_free_bytes"],
+            self.facts.disk_free_bytes - 4096,
+        )
+        self.assertTrue(self.runtime.calls)
+
+    def test_confirmation_survives_macos_patch_observation_drift(self):
+        observations = iter(
+            (
+                self.facts,
+                replace(self.facts, os_version="26.6"),
+            )
+        )
+        port = self.port(preflight=lambda _offline: next(observations))
+        preview = port.preview({})
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["preflight"]["os_version"], "26.6")
+        self.assertTrue(self.runtime.calls)
+
+    def test_confirmation_rejects_macos_major_observation_drift(self):
+        observations = iter(
+            (
+                self.facts,
+                replace(self.facts, os_version="27.0"),
+            )
+        )
+        port = self.port(preflight=lambda _offline: next(observations))
+        preview = port.preview({})
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "setup",
+                {
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "preview_changed")
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_edited_recommended_confirmation_survives_harmless_disk_drift(self):
+        observations = iter(
+            (
+                self.facts,
+                replace(
+                    self.facts,
+                    disk_free_bytes=self.facts.disk_free_bytes - 4096,
+                ),
+            )
+        )
+        parameters = {"service_route": "assistant"}
+        port = self.port(preflight=lambda _offline: next(observations))
+        preview = port.preview(parameters)
+
+        result = port.execute(
+            "setup",
+            {
+                **parameters,
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["selection"]["service_route"], "assistant")
+        self.assertTrue(self.runtime.calls)
+
+    def test_exact_confirmation_survives_harmless_free_disk_observation_drift(self):
+        observations = iter(
+            (
+                self.facts,
+                replace(
+                    self.facts,
+                    disk_free_bytes=self.facts.disk_free_bytes - 4096,
+                ),
+            )
+        )
+        exact_selection = selection()
+        port = self.port(preflight=lambda _offline: next(observations))
+        parameters = {
+            "profile": "exact",
+            "selection": exact_selection,
+        }
+        preview = port.preview(parameters)
+
+        result = port.execute(
+            "setup",
+            {
+                **parameters,
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(
+            result["preflight"]["disk_free_bytes"],
+            self.facts.disk_free_bytes - 4096,
+        )
+        self.assertTrue(self.runtime.calls)
+
+    def test_confirmation_rechecks_recommended_profile_disk_requirement(self):
+        minimum_disk_bytes = 100 * GIB
+        resolver = SetupResolver(
+            (
+                RecommendedProfile(
+                    "workstation",
+                    64 * GIB,
+                    selection(),
+                    minimum_disk_bytes=minimum_disk_bytes,
+                ),
+            )
+        )
+        observations = iter(
+            (
+                self.facts,
+                replace(
+                    self.facts,
+                    disk_free_bytes=minimum_disk_bytes - 1,
+                ),
+            )
+        )
+        port = self.port(
+            resolver=resolver,
+            preflight=lambda _offline: next(observations),
+        )
+        preview = port.preview({})
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertEqual(result["state"], "no_validated_fit")
+        self.assertEqual(result["mutation_count"], 0)
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_edited_recommended_confirmation_rejects_profile_boundary_drift(self):
+        high_minimum_disk_bytes = 100 * GIB
+        shared_selection = selection()
+        resolver = SetupResolver(
+            (
+                RecommendedProfile(
+                    "low",
+                    64 * GIB,
+                    shared_selection,
+                    minimum_disk_bytes=10 * GIB,
+                ),
+                RecommendedProfile(
+                    "high",
+                    64 * GIB,
+                    shared_selection,
+                    minimum_disk_bytes=high_minimum_disk_bytes,
+                ),
+            )
+        )
+        observations = iter(
+            (
+                self.facts,
+                replace(
+                    self.facts,
+                    disk_free_bytes=high_minimum_disk_bytes - 1,
+                ),
+            )
+        )
+        parameters = {"service_route": "assistant"}
+        port = self.port(
+            resolver=resolver,
+            preflight=lambda _offline: next(observations),
+        )
+        preview = port.preview(parameters)
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "setup",
+                {
+                    **parameters,
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "preview_changed")
+        self.assertEqual(self.runtime.calls, [])
 
     def test_explicit_revision_scoped_trust_is_applied_but_never_inferred(self):
         trusted = selection(trust=("remote_code",))
