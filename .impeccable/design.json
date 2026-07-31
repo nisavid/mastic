@@ -1,0 +1,330 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-31T09:24:40Z",
+  "title": "Design System: MASTIC",
+  "extensions": {
+    "colorMeta": {
+      "signal-current": {
+        "role": "primary",
+        "displayName": "Current Signal Green",
+        "canonical": "#a6f4c5",
+        "tonalRamp": [
+          "oklch(15% 0.1006 157.2)",
+          "oklch(27% 0.1006 157.2)",
+          "oklch(39% 0.1006 157.2)",
+          "oklch(51% 0.1006 157.2)",
+          "oklch(63% 0.1006 157.2)",
+          "oklch(75% 0.1006 157.2)",
+          "oklch(87% 0.1006 157.2)",
+          "oklch(95% 0.1006 157.2)"
+        ]
+      },
+      "rock-void": {
+        "role": "neutral",
+        "displayName": "Void Rock",
+        "canonical": "#090d0c",
+        "tonalRamp": [
+          "oklch(15% 0.0069 178.7)",
+          "oklch(27% 0.0069 178.7)",
+          "oklch(39% 0.0069 178.7)",
+          "oklch(51% 0.0069 178.7)",
+          "oklch(63% 0.0069 178.7)",
+          "oklch(75% 0.0069 178.7)",
+          "oklch(87% 0.0069 178.7)",
+          "oklch(95% 0.0069 178.7)"
+        ]
+      },
+      "rock-deep": {
+        "role": "neutral",
+        "displayName": "Deep Rock",
+        "canonical": "#0c1210",
+        "tonalRamp": [
+          "oklch(15% 0.0102 172.8)",
+          "oklch(27% 0.0102 172.8)",
+          "oklch(39% 0.0102 172.8)",
+          "oklch(51% 0.0102 172.8)",
+          "oklch(63% 0.0102 172.8)",
+          "oklch(75% 0.0102 172.8)",
+          "oklch(87% 0.0102 172.8)",
+          "oklch(95% 0.0102 172.8)"
+        ]
+      },
+      "rock-raised": {
+        "role": "neutral",
+        "displayName": "Raised Rock",
+        "canonical": "#101916",
+        "tonalRamp": [
+          "oklch(15% 0.0146 172.3)",
+          "oklch(27% 0.0146 172.3)",
+          "oklch(39% 0.0146 172.3)",
+          "oklch(51% 0.0146 172.3)",
+          "oklch(63% 0.0146 172.3)",
+          "oklch(75% 0.0146 172.3)",
+          "oklch(87% 0.0146 172.3)",
+          "oklch(95% 0.0146 172.3)"
+        ]
+      },
+      "rock-panel": {
+        "role": "neutral",
+        "displayName": "Panel Rock",
+        "canonical": "#111a17",
+        "tonalRamp": [
+          "oklch(15% 0.0145 172.4)",
+          "oklch(27% 0.0145 172.4)",
+          "oklch(39% 0.0145 172.4)",
+          "oklch(51% 0.0145 172.4)",
+          "oklch(63% 0.0145 172.4)",
+          "oklch(75% 0.0145 172.4)",
+          "oklch(87% 0.0145 172.4)",
+          "oklch(95% 0.0145 172.4)"
+        ]
+      },
+      "rock-control": {
+        "role": "neutral",
+        "displayName": "Control Rock",
+        "canonical": "#111715",
+        "tonalRamp": [
+          "oklch(15% 0.0100 173.0)",
+          "oklch(27% 0.0100 173.0)",
+          "oklch(39% 0.0100 173.0)",
+          "oklch(51% 0.0100 173.0)",
+          "oklch(63% 0.0100 173.0)",
+          "oklch(75% 0.0100 173.0)",
+          "oklch(87% 0.0100 173.0)",
+          "oklch(95% 0.0100 173.0)"
+        ]
+      },
+      "rock-hover": {
+        "role": "neutral",
+        "displayName": "Hover Rock",
+        "canonical": "#171f1d",
+        "tonalRamp": [
+          "oklch(15% 0.0123 178.3)",
+          "oklch(27% 0.0123 178.3)",
+          "oklch(39% 0.0123 178.3)",
+          "oklch(51% 0.0123 178.3)",
+          "oklch(63% 0.0123 178.3)",
+          "oklch(75% 0.0123 178.3)",
+          "oklch(87% 0.0123 178.3)",
+          "oklch(95% 0.0123 178.3)"
+        ]
+      },
+      "metal-boundary": {
+        "role": "secondary",
+        "displayName": "Structural Metal",
+        "canonical": "#2b3733",
+        "tonalRamp": [
+          "oklch(15% 0.0175 172.9)",
+          "oklch(27% 0.0175 172.9)",
+          "oklch(39% 0.0175 172.9)",
+          "oklch(51% 0.0175 172.9)",
+          "oklch(63% 0.0175 172.9)",
+          "oklch(75% 0.0175 172.9)",
+          "oklch(87% 0.0175 172.9)",
+          "oklch(95% 0.0175 172.9)"
+        ]
+      },
+      "metal-emphasis": {
+        "role": "secondary",
+        "displayName": "Emphasized Metal",
+        "canonical": "#2f5144",
+        "tonalRamp": [
+          "oklch(15% 0.0458 167.8)",
+          "oklch(27% 0.0458 167.8)",
+          "oklch(39% 0.0458 167.8)",
+          "oklch(51% 0.0458 167.8)",
+          "oklch(63% 0.0458 167.8)",
+          "oklch(75% 0.0458 167.8)",
+          "oklch(87% 0.0458 167.8)",
+          "oklch(95% 0.0458 167.8)"
+        ]
+      },
+      "text-primary": {
+        "role": "neutral",
+        "displayName": "Primary Mineral Text",
+        "canonical": "#e7ecea",
+        "tonalRamp": [
+          "oklch(15% 0.0060 170.4)",
+          "oklch(27% 0.0060 170.4)",
+          "oklch(39% 0.0060 170.4)",
+          "oklch(51% 0.0060 170.4)",
+          "oklch(63% 0.0060 170.4)",
+          "oklch(75% 0.0060 170.4)",
+          "oklch(87% 0.0060 170.4)",
+          "oklch(95% 0.0060 170.4)"
+        ]
+      },
+      "text-secondary": {
+        "role": "neutral",
+        "displayName": "Secondary Mineral Text",
+        "canonical": "#b6c5bf",
+        "tonalRamp": [
+          "oklch(15% 0.0184 170.0)",
+          "oklch(27% 0.0184 170.0)",
+          "oklch(39% 0.0184 170.0)",
+          "oklch(51% 0.0184 170.0)",
+          "oklch(63% 0.0184 170.0)",
+          "oklch(75% 0.0184 170.0)",
+          "oklch(87% 0.0184 170.0)",
+          "oklch(95% 0.0184 170.0)"
+        ]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "Muted Mineral Text",
+        "canonical": "#8a9691",
+        "tonalRamp": [
+          "oklch(15% 0.0156 169.0)",
+          "oklch(27% 0.0156 169.0)",
+          "oklch(39% 0.0156 169.0)",
+          "oklch(51% 0.0156 169.0)",
+          "oklch(63% 0.0156 169.0)",
+          "oklch(75% 0.0156 169.0)",
+          "oklch(87% 0.0156 169.0)",
+          "oklch(95% 0.0156 169.0)"
+        ]
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "80 cells"
+      },
+      {
+        "name": "wide",
+        "value": "120 cells"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Top Bar",
+      "kind": "nav",
+      "refersTo": "topbar",
+      "description": "Product identity and the global command-palette shortcut.",
+      "html": "<div class=\"ds-topbar\"><strong>◈ mastic</strong><span>LOCAL INFERENCE ON THIS MAC</span><kbd>Ctrl+P anything</kbd></div>",
+      "css": ".ds-topbar { display: flex; align-items: center; gap: 1rem; min-height: 3rem; padding: 0.5rem 1rem; background: #101916; color: #a6f4c5; border-bottom: 2px solid #2f5144; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; } .ds-topbar span { color: #b6c5bf; } .ds-topbar kbd { margin-left: auto; color: #a6f4c5; background: transparent; border: 0; font: inherit; }"
+    },
+    {
+      "name": "Machine-State Strip",
+      "kind": "custom",
+      "refersTo": "machine-state",
+      "description": "A compact state summary that pairs symbols with complete words.",
+      "html": "<div class=\"ds-machine-state\"><span>● Supervisor running</span><span>● Gateway ready</span><span>◆ Pressure normal</span><span>◇ Readiness degraded</span></div>",
+      "css": ".ds-machine-state { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; min-height: 2rem; padding: 0.25rem 1rem; background: #101916; color: #b6c5bf; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; } .ds-machine-state span { white-space: nowrap; }"
+    },
+    {
+      "name": "Resource Navigation Item",
+      "kind": "nav",
+      "refersTo": "navigation-item",
+      "description": "A full-width resource action for the structural navigation pane.",
+      "html": "<button class=\"ds-nav-item\">◆ <span>Services</span></button>",
+      "css": ".ds-nav-item { display: flex; align-items: center; gap: 0.75rem; width: 100%; min-height: 3rem; padding: 0.5rem; border: 0; background: transparent; color: #8a9691; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; } .ds-nav-item:hover, .ds-nav-item:focus-visible { background: #171f1d; color: #e7ecea; font-weight: 700; outline: 2px solid #2f5144; outline-offset: -2px; }"
+    },
+    {
+      "name": "Workbench Panel",
+      "kind": "card",
+      "refersTo": "workbench-panel",
+      "description": "The single dominant reading surface for state, evidence, and next actions.",
+      "html": "<section class=\"ds-workbench\"><h3>Inference Services</h3><p><strong>coding</strong> — BLOCKED</p><p class=\"ds-workbench-detail\">Exact model and runtime evidence remain close to the next action.</p></section>",
+      "css": ".ds-workbench { padding: 1rem; background: #111a17; color: #e7ecea; border: 2px solid #2f5144; border-radius: 0.5rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; } .ds-workbench h3 { margin: 0 0 1rem; color: #a6f4c5; } .ds-workbench p { margin: 0.5rem 0; } .ds-workbench-detail { color: #b6c5bf; }"
+    },
+    {
+      "name": "Operation Form",
+      "kind": "input",
+      "refersTo": "operation-form",
+      "description": "A bounded mutation workbench with durable labels and help.",
+      "html": "<form class=\"ds-operation-form\"><label for=\"ds-service\">Service · Argument · required</label><small>Name the stable Inference Service.</small><input id=\"ds-service\" placeholder=\"Required\"><div class=\"ds-form-actions\"><button type=\"button\">Review resolved preview</button></div></form>",
+      "css": ".ds-operation-form { padding: 1rem; background: #111715; color: #e7ecea; border: 1px solid #2b3733; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; } .ds-operation-form label { display: block; font-weight: 700; } .ds-operation-form small { display: block; margin: 0.25rem 0 0.5rem; color: #8a9691; } .ds-operation-form input { box-sizing: border-box; width: 100%; padding: 0.65rem; background: #090d0c; color: #e7ecea; border: 1px solid #2b3733; border-radius: 0; font: inherit; } .ds-operation-form input:focus-visible { border-color: #a6f4c5; outline: 1px solid #a6f4c5; } .ds-form-actions { margin-top: 1rem; } .ds-form-actions button { min-height: 2.75rem; padding: 0.5rem 1rem; background: #a6f4c5; color: #090d0c; border: 0; font: inherit; font-weight: 700; }"
+    },
+    {
+      "name": "Primary Action",
+      "kind": "button",
+      "refersTo": "primary-action",
+      "description": "The provisional current treatment for the guided setup action.",
+      "html": "<button class=\"ds-primary-action\">Guided setup</button>",
+      "css": ".ds-primary-action { min-width: 9rem; min-height: 2.75rem; padding: 0.5rem 1rem; border: 0; background: #a6f4c5; color: #090d0c; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; } .ds-primary-action:hover { filter: brightness(0.92); } .ds-primary-action:focus-visible { outline: 2px solid #e7ecea; outline-offset: 2px; } .ds-primary-action:active { transform: translateY(1px); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Mineral Instrument",
+    "overview": "MASTIC is a precise operational instrument composed from believable natural materials. Rock carries structure, metal carries boundaries and control, and gemstones carry compact live signals. The material language is timeless and functional: it should feel carefully made, not themed.\n\nThe implemented interface is a terminal-native control room. It translates the Mineral Instrument into flat rock-dark panes, restrained green-gray metal boundaries, one observed pale signal color, exact status words, and compact symbols. It does not pretend a terminal can render physical texture, luster, or facets. Future richer surfaces may express those material qualities, but they must preserve the same semantic roles and operational restraint.\n\nThe current signal green is an observed implementation token, not a permanent brand-color decision. The confirmed longer-term direction remains a broader gemstone signal vocabulary. Additional gem colors become normative only when a real interface assigns and validates their semantic roles.",
+    "keyCharacteristics": [
+      "Structural rock surfaces, metal boundaries, and sparingly used signal color",
+      "One integrated workbench rather than a grid of floating cards",
+      "Dense operational clarity with exact evidence and next actions close at hand",
+      "Terminal-owned typography, keyboard-first control, and responsive pane removal",
+      "Material richness scaled honestly to the rendering surface"
+    ],
+    "rules": [
+      {
+        "name": "The Material Role Rule",
+        "body": "Rock provides structure, metal defines boundaries, and gemstones signal state. Never exchange those roles merely for visual variety.",
+        "section": "colors"
+      },
+      {
+        "name": "The Implemented-Token Rule",
+        "body": "Frontmatter contains colors the product actually renders. Directional gem colors stay out until an implemented surface gives them exact values and meanings.",
+        "section": "colors"
+      },
+      {
+        "name": "The Rare Light Rule",
+        "body": "Signal color is compact and limited to product identity, view titles, action, focus, or live state. Every signal has an authoritative word or symbol equivalent.",
+        "section": "colors"
+      },
+      {
+        "name": "The Terminal Ownership Rule",
+        "body": "Nerd-font glyphs may enrich a capable terminal but can never be required for identity, navigation, state, or action.",
+        "section": "typography"
+      },
+      {
+        "name": "The Evidence Type Rule",
+        "body": "Monospace distinguishes exact evidence; it does not make all prose feel like a daemon log.",
+        "section": "typography"
+      },
+      {
+        "name": "The Capability-Preserving Collapse Rule",
+        "body": "Narrow layouts may remove secondary panes, never operations. The command palette and workbench retain the complete catalogue.",
+        "section": "layout"
+      },
+      {
+        "name": "The Workbench Rule",
+        "body": "Ordinary product structure belongs in rows, panes, forms, and one integrated workbench—not nested or repeated cards.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-at-Rest Rule",
+        "body": "Surfaces remain integrated and shadowless. State changes use color, weight, and content before simulated elevation.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Earned Glow Rule",
+        "body": "Glow is permitted only for a live semantic signal on a capable surface. Ambient decorative bloom is forbidden.",
+        "section": "elevation"
+      },
+      {
+        "name": "The One Soft Surface Rule",
+        "body": "Reserve the rounded outline for the principal content surface. Repeating it around every region would turn the instrument into a card grid.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do keep exact artifacts, trust, resource cost, ownership, evidence, and planned mutations visible before confirmation.",
+      "Do pair every state color or symbol with an exact state word.",
+      "Do preserve the same operation catalogue, vocabulary, previews, and outcomes across CLI, TUI, and structured automation.",
+      "Do use rock for structural surfaces, metal for boundaries, and signal color for compact action or state emphasis.",
+      "Do collapse secondary panes at narrow widths while preserving the workbench and command palette.",
+      "Do update the frontmatter and sidecar when an implemented token or component becomes part of the system."
+    ],
+    "donts": [
+      "Don't promote the current signal green into a permanent brand color without a separate confirmed decision.",
+      "Don't fabricate exact gem colors or semantic assignments before an interface implements and validates them.",
+      "Don't expose ports, processes, configuration files, and adapter trivia as the primary information architecture.",
+      "Don't hide exact artifacts, trust, resource cost, ownership, evidence, or mutations behind a generic setup wizard.",
+      "Don't use generic dashboard card grids, nested cards, glassmorphism, decorative terminal nostalgia, neon cyberpunk, gratuitous animation, or unfamiliar controls invented for novelty.",
+      "Don't imitate game-inventory UI with jewel overload, ornate dark frames, constant glow, or status spectacle."
+    ]
+  }
+}
