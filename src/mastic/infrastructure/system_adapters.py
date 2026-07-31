@@ -68,6 +68,109 @@ _ALLOWED_PROCESS_ENVIRONMENT = frozenset(
 )
 
 
+def _canonical_runtime_launcher(
+    root_entry: Path, root: Path, launcher_entry: Path
+) -> Path:
+    if not root_entry.is_absolute() or not launcher_entry.is_absolute():
+        raise ValueError("runtime paths must be absolute")
+    relative = launcher_entry.relative_to(root_entry)
+    if not relative.parts or ".." in relative.parts:
+        raise ValueError("runtime launcher is outside its installation")
+    parent = root
+    for component in relative.parts[:-1]:
+        parent /= component
+        metadata = parent.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("runtime launcher parent is not canonical")
+    return root / relative
+
+
+def _read_pyvenv_fields(root: Path) -> dict[str, str] | None:
+    try:
+        venv_path = root / "pyvenv.cfg"
+        metadata = venv_path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size > 16 * 1024
+        ):
+            return None
+        fields: dict[str, str] = {}
+        for line in venv_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            key, separator, value = line.partition("=")
+            key = key.strip().casefold()
+            if not separator or not key or key in fields:
+                return None
+            fields[key] = value.strip()
+        return fields
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return None
+
+
+def _venv_metadata_matches_interpreter(root: Path, resolved_launcher: Path) -> bool:
+    fields = _read_pyvenv_fields(root)
+    if fields is None:
+        return False
+    try:
+        home = Path(fields["home"]).expanduser()
+        version_text = fields.get("version_info", fields.get("version", ""))
+        version = re.fullmatch(r"(\d+)\.(\d+)(?:\.[A-Za-z0-9_-]+)*", version_text)
+        if not home.is_absolute() or version is None:
+            return False
+        major, minor = version.groups()
+        candidates = (
+            home / f"python{major}.{minor}",
+            home / f"python{major}",
+            home / "python",
+        )
+        candidate_matches = False
+        for candidate in candidates:
+            try:
+                if candidate.resolve(strict=True) == resolved_launcher:
+                    candidate_matches = True
+                    break
+            except (OSError, RuntimeError):
+                continue
+        if not candidate_matches:
+            return False
+        executable = fields.get("executable")
+        return executable is None or (
+            Path(executable).expanduser().is_absolute()
+            and Path(executable).expanduser().resolve(strict=True) == resolved_launcher
+        )
+    except (KeyError, OSError, RuntimeError, ValueError):
+        return False
+
+
+def _runtime_launcher_is_contained(
+    root: Path,
+    lexical_launcher: Path,
+    launcher_argv: tuple[str, ...],
+    resolved_launcher: Path,
+    runtime_name: str,
+) -> bool:
+    try:
+        resolved_launcher.relative_to(root)
+        return True
+    except ValueError:
+        pass
+    try:
+        lexical_launcher.relative_to(root)
+    except ValueError:
+        return False
+    expected_module = runtime_name.replace("-", "_")
+    module = launcher_argv[2] if len(launcher_argv) >= 3 else ""
+    return (
+        lexical_launcher == root / "bin/python"
+        and lexical_launcher.is_symlink()
+        and launcher_argv[1:2] == ("-m",)
+        and (module == expected_module or module.startswith(f"{expected_module}."))
+        and _venv_metadata_matches_interpreter(root, resolved_launcher)
+    )
+
+
 class SubprocessManagedProcess:
     """Adapt one directly spawned subprocess to the Supervisor process port."""
 
@@ -572,7 +675,7 @@ class ExactRuntimeLaunchSupply:
             raise CapabilityValidationError(
                 f"runtime installation '{service.runtime_installation}' is unavailable"
             )
-        self._validate_runtime(configured_runtime, runtime)
+        validated_launcher = self._validate_runtime(configured_runtime, runtime)
 
         alias = config.aliases.get(str(service.model_alias))
         if alias is None:
@@ -617,6 +720,7 @@ class ExactRuntimeLaunchSupply:
             port=port,
             options=options,
         )
+        argv = (validated_launcher, *argv[1:])
         return PreparedLaunch(
             argv=argv,
             environment={
@@ -633,7 +737,7 @@ class ExactRuntimeLaunchSupply:
         return supply() if callable(supply) else supply
 
     @staticmethod
-    def _validate_runtime(configured, runtime: SuppliedRuntimeInstallation) -> None:
+    def _validate_runtime(configured, runtime: SuppliedRuntimeInstallation) -> str:
         if runtime.installation_id != configured.installation_id:
             raise CapabilityValidationError("runtime installation identity mismatch")
         if runtime.runtime.replace("_", "-") != configured.definition.replace("_", "-"):
@@ -647,24 +751,47 @@ class ExactRuntimeLaunchSupply:
         if runtime.bundle_id != configured.bundle_id:
             raise CapabilityValidationError("runtime bundle identity mismatch")
         try:
-            root = runtime.root.expanduser().resolve(strict=True)
-            launcher = Path(runtime.launcher[0]).expanduser().resolve(strict=True)
-            configured_root = Path(configured.root).expanduser().resolve(strict=True)
-            configured_launcher = (
-                str(Path(configured.launcher[0]).expanduser().resolve(strict=True)),
-                *configured.launcher[1:],
+            root_entry = runtime.root.expanduser()
+            root = root_entry.resolve(strict=True)
+            launcher_entry = Path(runtime.launcher[0]).expanduser()
+            lexical_launcher = _canonical_runtime_launcher(
+                root_entry, root, launcher_entry
             )
-            launcher.relative_to(root)
-        except (FileNotFoundError, IndexError, ValueError) as error:
+            launcher = lexical_launcher.resolve(strict=True)
+            configured_root_entry = Path(configured.root).expanduser()
+            configured_root = configured_root_entry.resolve(strict=True)
+            configured_launcher_entry = Path(configured.launcher[0]).expanduser()
+            configured_lexical_launcher = _canonical_runtime_launcher(
+                configured_root_entry, configured_root, configured_launcher_entry
+            )
+            if not _runtime_launcher_is_contained(
+                root,
+                lexical_launcher,
+                runtime.launcher,
+                launcher,
+                runtime.runtime,
+            ):
+                raise ValueError("runtime launcher escapes its installation")
+        except (
+            FileNotFoundError,
+            IndexError,
+            OSError,
+            RuntimeError,
+            ValueError,
+        ) as error:
             raise CapabilityValidationError(
                 "runtime launcher is not inside the exact installation"
             ) from error
         if configured_root != root:
             raise CapabilityValidationError("runtime root evidence mismatch")
-        if configured_launcher != (str(launcher), *runtime.launcher[1:]):
+        if (
+            configured_lexical_launcher != lexical_launcher
+            or configured.launcher[1:] != runtime.launcher[1:]
+        ):
             raise CapabilityValidationError("runtime launcher evidence mismatch")
         if not launcher.is_file() or not os.access(launcher, os.X_OK):
             raise CapabilityValidationError("runtime launcher is not executable")
+        return str(lexical_launcher)
 
     @staticmethod
     def _validate_model(configured, model: SuppliedModelInstallation) -> Path:

@@ -798,7 +798,211 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
                 config.services["coding"], "127.0.0.1", 49152
             )
 
-            self.assertEqual(prepared.argv[0], runtime.launcher[0])
+            self.assertEqual(
+                prepared.argv[0], str(runtime.root.resolve() / "bin/optiq")
+            )
+
+    def test_launch_accepts_a_venv_python_symlink_for_a_module_launcher(self):
+        major = sys.version_info.major
+        minor = sys.version_info.minor
+        cases = (
+            (
+                f"python{major}.{minor}",
+                f"version_info = {major}.{minor}\n"
+                f"executable = {Path(sys.executable).resolve()}\n",
+            ),
+            (f"python{major}", f"version_info = {major}.{minor}.0.final.0\n"),
+            ("python", f"version = {major}.{minor}.0\n"),
+        )
+        for interpreter_name, version_metadata in cases:
+            with self.subTest(
+                interpreter_name=interpreter_name,
+                version_metadata=version_metadata,
+            ):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    runtime, model = self._physical_supply(root)
+                    Path(runtime.launcher[0]).unlink()
+                    interpreter_home = root / "interpreter-home"
+                    interpreter_home.mkdir()
+                    (interpreter_home / interpreter_name).symlink_to(sys.executable)
+                    python = runtime.root / "bin/python"
+                    python.symlink_to(interpreter_home / interpreter_name)
+                    (runtime.root / "pyvenv.cfg").write_text(
+                        f"home = {interpreter_home}\n{version_metadata}",
+                        encoding="utf-8",
+                    )
+                    runtime = SuppliedRuntimeInstallation(
+                        installation_id=runtime.installation_id,
+                        runtime=runtime.runtime,
+                        version=runtime.version,
+                        provenance=runtime.provenance,
+                        root=runtime.root,
+                        launcher=(str(python), "-m", "optiq.cli", "serve"),
+                        capabilities=runtime.capabilities,
+                        bundle_id=runtime.bundle_id,
+                    )
+                    config = _config(
+                        runtime_root=runtime.root,
+                        runtime_launcher=runtime.launcher,
+                        runtime_capabilities=runtime.capabilities,
+                    )
+                    supply = ExactRuntimeLaunchSupply(
+                        load_config=lambda: config,
+                        runtime_installations={runtime.installation_id: runtime},
+                        model_installations={"qwen-exact": model},
+                        launch_builder=RuntimeLaunchBuilder(
+                            RuntimeCatalogue.load_builtin()
+                        ),
+                        model_security=_AllowingModelSecurity(),
+                        model_verifier=_verified_model,
+                    )
+
+                    prepared = supply.prepare_launch(
+                        config.services["coding"], "127.0.0.1", 49152
+                    )
+
+                    self.assertEqual(
+                        prepared.argv[:4],
+                        (
+                            str(runtime.root.resolve() / "bin/python"),
+                            *runtime.launcher[1:],
+                        ),
+                    )
+
+                    (runtime.root / "pyvenv.cfg").unlink()
+                    with self.assertRaisesRegex(
+                        CapabilityValidationError,
+                        "not inside the exact installation",
+                    ):
+                        supply.prepare_launch(
+                            config.services["coding"], "127.0.0.1", 49152
+                        )
+
+    def test_launch_rejects_unbound_venv_python_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            Path(runtime.launcher[0]).unlink()
+            interpreter_home = root / "attacker-home"
+            interpreter_home.mkdir()
+            attacker = interpreter_home / (
+                f"python{sys.version_info.major}.{sys.version_info.minor}"
+            )
+            attacker.write_text("#!/bin/sh\n", encoding="utf-8")
+            attacker.chmod(0o700)
+            python = runtime.root / "bin/python"
+            python.symlink_to(attacker)
+            (runtime.root / "pyvenv.cfg").write_text("", encoding="utf-8")
+            runtime = SuppliedRuntimeInstallation(
+                installation_id=runtime.installation_id,
+                runtime=runtime.runtime,
+                version=runtime.version,
+                provenance=runtime.provenance,
+                root=runtime.root,
+                launcher=(str(python), "-m", "optiq.cli", "serve"),
+                capabilities=runtime.capabilities,
+                bundle_id=runtime.bundle_id,
+            )
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
+            )
+
+            with self.assertRaisesRegex(
+                CapabilityValidationError, "not inside the exact installation"
+            ):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
+            (runtime.root / "pyvenv.cfg").write_text(
+                f"home = {interpreter_home}\n"
+                f"version_info = {sys.version_info.major}.{sys.version_info.minor}\n"
+                f"executable = {sys.executable}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CapabilityValidationError, "not inside the exact installation"
+            ):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
+    def test_launch_rejects_a_symlinked_launcher_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            real_bin = runtime.root / "real-bin"
+            real_bin.mkdir()
+            real_python = real_bin / "python"
+            real_python.symlink_to(sys.executable)
+            (runtime.root / "bin/optiq").unlink()
+            (runtime.root / "bin").rmdir()
+            (runtime.root / "bin").symlink_to(real_bin, target_is_directory=True)
+            launcher = runtime.root / "bin/python"
+            runtime = SuppliedRuntimeInstallation(
+                installation_id=runtime.installation_id,
+                runtime=runtime.runtime,
+                version=runtime.version,
+                provenance=runtime.provenance,
+                root=runtime.root,
+                launcher=(str(launcher), "-m", "optiq.cli", "serve"),
+                capabilities=runtime.capabilities,
+                bundle_id=runtime.bundle_id,
+            )
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
+            )
+
+            with self.assertRaisesRegex(
+                CapabilityValidationError, "not inside the exact installation"
+            ):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
+
+    def test_launch_rejects_an_outside_console_launcher_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, model = self._physical_supply(root)
+            outside = root / "outside-optiq"
+            outside.write_text("#!/bin/sh\n", encoding="utf-8")
+            outside.chmod(0o700)
+            launcher = Path(runtime.launcher[0])
+            launcher.unlink()
+            launcher.symlink_to(outside)
+            config = _config(
+                runtime_root=runtime.root,
+                runtime_launcher=runtime.launcher,
+                runtime_capabilities=runtime.capabilities,
+            )
+            supply = ExactRuntimeLaunchSupply(
+                load_config=lambda: config,
+                runtime_installations={runtime.installation_id: runtime},
+                model_installations={"qwen-exact": model},
+                launch_builder=RuntimeLaunchBuilder(RuntimeCatalogue.load_builtin()),
+                model_security=_AllowingModelSecurity(),
+                model_verifier=_verified_model,
+            )
+
+            with self.assertRaisesRegex(
+                CapabilityValidationError, "not inside the exact installation"
+            ):
+                supply.prepare_launch(config.services["coding"], "127.0.0.1", 49152)
 
     def test_launch_uses_configured_installation_and_exact_cached_revision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -826,7 +1030,7 @@ class ExactRuntimeLaunchSupplyTests(unittest.TestCase):
             self.assertEqual(
                 prepared.argv,
                 (
-                    str(runtime.root / "bin/optiq"),
+                    str(runtime.root.resolve() / "bin/optiq"),
                     "serve",
                     "--model",
                     str(model.snapshot_path.resolve()),
