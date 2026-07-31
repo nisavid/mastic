@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import tempfile
 import unittest
 from hashlib import sha256
@@ -405,6 +407,10 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
             result = SubprocessRuntimeProbe(run=run).probe(definition, root)
 
             self.assertEqual(
+                result.launcher_relative,
+                ("bin/python", "-m", "optiq.cli", "serve"),
+            )
+            self.assertEqual(
                 result.supported_flags,
                 frozenset(
                     {
@@ -518,6 +524,88 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
 
 
 class RuntimeManagerTests(unittest.TestCase):
+    def test_published_console_runtime_launcher_survives_staging_relocation(
+        self,
+    ) -> None:
+        class RelocatingConsoleRunner:
+            def run(self, argv):
+                if argv[:2] == ("uv", "venv"):
+                    stage = Path(argv[-1])
+                    subprocess.run(
+                        ("uv", "venv", "--python", sys.executable, str(stage)),
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    return
+                python = Path(argv[argv.index("--python") + 1])
+                stage = python.parent.parent
+                console = stage / "bin/optiq"
+                console.write_text(
+                    f"#!{stage}/bin/python\n"
+                    "import sys\n"
+                    "print('relocated optiq ' + ' '.join(sys.argv[1:]))\n",
+                    encoding="utf-8",
+                )
+                console.chmod(0o700)
+                package = (
+                    stage
+                    / "lib"
+                    / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                    / "site-packages/optiq"
+                )
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("", encoding="utf-8")
+                (package / "cli.py").write_text(
+                    "import sys\n"
+                    "if __name__ == '__main__':\n"
+                    "    print('relocated optiq ' + ' '.join(sys.argv[1:]))\n",
+                    encoding="utf-8",
+                )
+
+        def probe_run(argv, **_options):
+            if "importlib.metadata.version" in argv[-1]:
+                return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
+            if argv[-1] == "optiq/cli.py":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="usage: optiq serve [--model MODEL]",
+                    stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: mlx_lm.server [--host HOST] [--port PORT]",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = RuntimeManager(
+                RuntimeCatalogue.load_builtin(),
+                runner=RelocatingConsoleRunner(),
+                probe=SubprocessRuntimeProbe(run=probe_run),
+                staging_token=lambda: "relocated",
+            )
+
+            installation = manager.install_custom(
+                "optiq", "0.3.3", python="3.13", installation_root=root
+            )
+
+            final = root.resolve() / "optiq-0.3.3-custom"
+            self.assertEqual(
+                installation.launcher,
+                (str(final / "bin/python"), "-m", "optiq.cli", "serve"),
+            )
+            completed = subprocess.run(
+                installation.launcher,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "relocated optiq serve\n")
+
     def test_interrupted_install_removes_its_journaled_stage(self) -> None:
         class InterruptingRunner:
             def run(self, argv):

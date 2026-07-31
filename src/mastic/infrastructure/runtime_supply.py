@@ -19,8 +19,8 @@ from uuid import uuid4
 
 from mastic.application.serialization import to_plain_data
 from mastic.application.setup import (
-    LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION,
-    RUNTIME_CAPABILITY_PROBE_VERSION,
+    LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
 )
 
 
@@ -87,7 +87,7 @@ class RuntimeInstallation:
     launcher: tuple[str, ...]
     capabilities: frozenset[str]
     bundle_id: str | None = None
-    capability_probe_version: int = LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION
+    observation_probe_version: int = LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION
 
 
 @dataclass(frozen=True)
@@ -173,10 +173,18 @@ class SubprocessRuntimeProbe:
                 ) from error
             if not console.is_file():
                 raise RuntimeSupplyError("runtime console launcher is unavailable")
-            launcher_relative = (
-                f"bin/{definition.launcher[0]}",
-                *definition.launcher[1:],
-            )
+            if definition.key == "optiq":
+                launcher_relative = (
+                    "bin/python",
+                    "-m",
+                    "optiq.cli",
+                    *definition.launcher[1:],
+                )
+            else:
+                launcher_relative = (
+                    f"bin/{definition.launcher[0]}",
+                    *definition.launcher[1:],
+                )
         if definition.key == "optiq":
             output = self._probe_installed_source_flags(
                 python,
@@ -664,7 +672,7 @@ class RuntimeManager:
                 definition.key, result.supported_flags
             ),
             bundle_id=bundle_id,
-            capability_probe_version=RUNTIME_CAPABILITY_PROBE_VERSION,
+            observation_probe_version=RUNTIME_OBSERVATION_PROBE_VERSION,
         )
 
     def _bundle(self, bundle_id: str) -> TestedRuntimeBundle:

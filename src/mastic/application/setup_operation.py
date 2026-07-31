@@ -33,7 +33,7 @@ from mastic.application.setup import (
     PHASE1_APPLICATION_VERSIONS,
     PHASE1_PERFORMANCE_PROFILE_ID,
     PHASE1_PERFORMANCE_PROFILE_VERSION,
-    RUNTIME_CAPABILITY_PROBE_VERSION,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
     Readiness,
     RemovalInventory,
     ResolvedRemoval,
@@ -1141,7 +1141,7 @@ def _validate_runtime_result(
         "version": selection.runtime_version,
         "provenance": "tested",
         "lock_sha256": expected_digest,
-        "capability_probe_version": RUNTIME_CAPABILITY_PROBE_VERSION,
+        "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
     }
     mismatched = [
         key for key, expected in required.items() if result.get(key) != expected
@@ -1350,7 +1350,7 @@ def _durable_resumable_material_valid(
         and isinstance(result.get("version"), str)
         and bool(result.get("version"))
         and result.get("provenance") == "tested"
-        and result.get("capability_probe_version") == RUNTIME_CAPABILITY_PROBE_VERSION
+        and result.get("capability_probe_version") == RUNTIME_OBSERVATION_PROBE_VERSION
         and isinstance(result.get("bundle_id"), str)
         and bool(result.get("bundle_id"))
         and isinstance(lock_sha256, str)

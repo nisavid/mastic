@@ -16,6 +16,7 @@ from mastic.application.setup import (
     ExactSetupSelection,
     RecommendedProfile,
     RemovalInventory,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
     SetupEvidence,
     SetupIntent,
     SetupResolver,
@@ -309,7 +310,7 @@ class SetupOperationTests(unittest.TestCase):
                     "provenance": "tested",
                     "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                     "lock_sha256": "a" * 64,
-                    "capability_probe_version": 2,
+                    "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
                 }
             }
         )
@@ -2466,7 +2467,7 @@ class SetupOperationTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                 "lock_sha256": "a" * 64,
-                "capability_probe_version": 2,
+                "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
             },
             "0.3.4": {
                 "installation_id": "optiq-0.3.4-tested",
@@ -2475,7 +2476,7 @@ class SetupOperationTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.4-py3.13-macos-arm64",
                 "lock_sha256": "c" * 64,
-                "capability_probe_version": 2,
+                "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
             },
         }
         self.runtime.results["runtime.install"] = lambda parameters: runtime_results[

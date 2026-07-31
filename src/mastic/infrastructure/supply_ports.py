@@ -18,8 +18,8 @@ import tomlkit
 
 from mastic.application.config_schema import ConfiguredRuntime, MasticConfig
 from mastic.application.setup import (
-    LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION,
-    RUNTIME_CAPABILITY_PROBE_VERSION,
+    LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
 )
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.model_intelligence import (
@@ -944,7 +944,7 @@ class RuntimeSupplyPort:
             raise SupplyPortError(
                 f"existing runtime installation {installation_id!r} does not match the exact request"
             )
-        if installation.capability_probe_version < RUNTIME_CAPABILITY_PROBE_VERSION:
+        if installation.observation_probe_version < RUNTIME_OBSERVATION_PROBE_VERSION:
             installation = self._manager.reprobe(installation)
             self._replace_runtime_marker(root, installation)
         return installation
@@ -1811,7 +1811,7 @@ def _runtime_installation_matches(
     return (
         replace(
             observed,
-            capability_probe_version=configured.capability_probe_version,
+            observation_probe_version=configured.observation_probe_version,
         )
         == configured
     )
@@ -1922,7 +1922,7 @@ def _runtime_result(
         "root": str(installation.root),
         "launcher": list(installation.launcher),
         "capabilities": sorted(installation.capabilities),
-        "capability_probe_version": installation.capability_probe_version,
+        "capability_probe_version": installation.observation_probe_version,
         "bundle_id": installation.bundle_id,
         "preview": _plain_runtime_preview(preview),
     }
@@ -2325,7 +2325,7 @@ def _runtime_marker_payload(
 ) -> dict[str, object]:
     return {
         "bundle_id": installation.bundle_id,
-        "capability_probe_version": installation.capability_probe_version,
+        "capability_probe_version": installation.observation_probe_version,
         "capabilities": sorted(installation.capabilities),
         "installation_id": installation.installation_id,
         "launcher": list(installation.launcher),
@@ -2366,7 +2366,7 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
     capabilities = value["capabilities"]
     bundle_id = value["bundle_id"]
     capability_probe_version = (
-        LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION
+        LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION
         if schema_version == 2
         else value["capability_probe_version"]
     )
@@ -2388,7 +2388,7 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
         or (bundle_id is not None and not isinstance(bundle_id, str))
         or type(capability_probe_version) is not int
         or capability_probe_version < 1
-        or capability_probe_version > RUNTIME_CAPABILITY_PROBE_VERSION
+        or capability_probe_version > RUNTIME_OBSERVATION_PROBE_VERSION
     ):
         raise ValueError("runtime marker fields are invalid")
     launcher_path = Path(launcher[0])
@@ -2403,5 +2403,5 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
         launcher=tuple(launcher),
         capabilities=frozenset(capabilities),
         bundle_id=bundle_id,
-        capability_probe_version=capability_probe_version,
+        observation_probe_version=capability_probe_version,
     )

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mastic.application.config_schema import validate_config
+from mastic.application.setup import RUNTIME_OBSERVATION_PROBE_VERSION
 from mastic.infrastructure.config_store import ConfigStore
 from mastic.infrastructure.control_protocol import MAX_FRAME_BYTES
 from mastic.infrastructure.model_supply import (
@@ -140,7 +141,7 @@ class FakeRuntimeManager:
             launcher=installation.launcher,
             capabilities=installation.capabilities | {"prompt_cache_bytes"},
             bundle_id=installation.bundle_id,
-            capability_probe_version=2,
+            observation_probe_version=RUNTIME_OBSERVATION_PROBE_VERSION,
         )
 
     def _installation(
@@ -163,7 +164,7 @@ class FakeRuntimeManager:
             launcher=(str(path.resolve() / "bin" / runtime), "serve"),
             capabilities=frozenset({"model", "host", "port"}),
             bundle_id=bundle_id,
-            capability_probe_version=2,
+            observation_probe_version=RUNTIME_OBSERVATION_PROBE_VERSION,
         )
 
 
@@ -587,13 +588,107 @@ port = 8766
         )
 
         self.assertEqual(manager.calls, [("reprobe", installation.installation_id)])
-        self.assertEqual(result["capability_probe_version"], 2)
+        self.assertEqual(
+            result["capability_probe_version"], RUNTIME_OBSERVATION_PROBE_VERSION
+        )
         self.assertIn("prompt_cache_bytes", result["capabilities"])
         stored_marker = json.loads(marker.read_text(encoding="utf-8"))
         self.assertEqual(stored_marker["schema_version"], 3)
-        self.assertEqual(stored_marker["capability_probe_version"], 2)
+        self.assertEqual(
+            stored_marker["capability_probe_version"],
+            RUNTIME_OBSERVATION_PROBE_VERSION,
+        )
         configured = self.store.load().value.runtimes[installation.installation_id]
         self.assertIn("prompt_cache_bytes", configured.capabilities)
+
+    def test_runtime_install_reprobes_a_stale_console_launcher_observation(
+        self,
+    ) -> None:
+        class RelocationSafeRuntimeManager(FakeRuntimeManager):
+            def reprobe(self, installation: RuntimeInstallation) -> RuntimeInstallation:
+                self.calls.append(("reprobe", installation.installation_id))
+                return RuntimeInstallation(
+                    installation_id=installation.installation_id,
+                    runtime=installation.runtime,
+                    version=installation.version,
+                    provenance=installation.provenance,
+                    root=installation.root,
+                    launcher=(
+                        str(installation.root / "bin/python"),
+                        "-m",
+                        "optiq.cli",
+                        "serve",
+                    ),
+                    capabilities=installation.capabilities,
+                    bundle_id=installation.bundle_id,
+                    observation_probe_version=RUNTIME_OBSERVATION_PROBE_VERSION,
+                )
+
+        manager = RelocationSafeRuntimeManager(self.root / "runtimes")
+        catalogue = RuntimeCatalogue.load_builtin()
+        bundle = next(
+            item for item in catalogue.tested_bundles if item.runtime == "optiq"
+        )
+        installation = manager._installation(
+            bundle.bundle_id,
+            bundle.runtime,
+            bundle.version,
+            "tested",
+            bundle_id=bundle.bundle_id,
+        )
+        installation.root.mkdir(parents=True)
+        marker = installation.root / ".mastic-runtime-owner.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "bundle_id": installation.bundle_id,
+                    "capabilities": sorted(installation.capabilities),
+                    "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION - 1,
+                    "installation_id": installation.installation_id,
+                    "launcher": list(installation.launcher),
+                    "owner": "mastic",
+                    "provenance": installation.provenance,
+                    "root": str(installation.root),
+                    "runtime": installation.runtime,
+                    "schema_version": 3,
+                    "version": installation.version,
+                }
+            ),
+            encoding="utf-8",
+        )
+        port = RuntimeSupplyPort(
+            manager,
+            self.store,
+            self.root / "runtimes",
+            catalogue=catalogue,
+        )
+
+        result = port.execute(
+            "runtime.install",
+            {
+                "name": "optiq",
+                "channel": "tested",
+                "expected_version": bundle.version,
+                "expected_lock_digest": bundle.lock_sha256,
+            },
+        )
+
+        self.assertEqual(manager.calls, [("reprobe", installation.installation_id)])
+        self.assertEqual(
+            result["capability_probe_version"], RUNTIME_OBSERVATION_PROBE_VERSION
+        )
+        self.assertEqual(
+            result["launcher"],
+            [str(installation.root / "bin/python"), "-m", "optiq.cli", "serve"],
+        )
+        stored_marker = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(
+            stored_marker["capability_probe_version"],
+            RUNTIME_OBSERVATION_PROBE_VERSION,
+        )
+        self.assertEqual(stored_marker["launcher"], result["launcher"])
+        configured = self.store.load().value.runtimes[installation.installation_id]
+        self.assertEqual(configured.launcher, tuple(result["launcher"]))
 
     def test_runtime_install_rejects_unknown_capability_probe_versions(self) -> None:
         manager = FakeRuntimeManager(self.root / "runtimes")
@@ -608,7 +703,7 @@ port = 8766
         payload = {
             "bundle_id": None,
             "capabilities": sorted(installation.capabilities),
-            "capability_probe_version": 3,
+            "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION + 1,
             "installation_id": installation.installation_id,
             "launcher": list(installation.launcher),
             "owner": "mastic",
@@ -620,8 +715,8 @@ port = 8766
         }
         port = RuntimeSupplyPort(manager, self.store, self.root / "runtimes")
 
-        for invalid_version in (3, True, 0):
-            with self.subTest(capability_probe_version=invalid_version):
+        for invalid_version in (RUNTIME_OBSERVATION_PROBE_VERSION + 1, True, 0):
+            with self.subTest(observation_probe_version=invalid_version):
                 payload["capability_probe_version"] = invalid_version
                 marker.write_text(json.dumps(payload), encoding="utf-8")
                 with self.assertRaisesRegex(
