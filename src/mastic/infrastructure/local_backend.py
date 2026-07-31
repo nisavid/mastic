@@ -302,7 +302,7 @@ class LocalConfigurationMutations:
                     "options",
                 ):
                     if key in parameters:
-                        table[key] = parameters[key]
+                        table[key] = _plain(parameters[key])
                 services[resource] = table
                 return
             if name == "model.uninstall":
