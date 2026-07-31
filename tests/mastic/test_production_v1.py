@@ -700,6 +700,106 @@ route = "coding"
             self.assertTrue(target_lock_started.is_set())
             self.assertFalse(profile.exists())
 
+    def test_codex_canary_uses_vite_plus_owner_runtime_through_public_port(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            store = ConfigStore(paths.config_file, validate_config)
+            store.import_text(
+                """\
+schema_version = 1
+
+[gateway]
+host = "127.0.0.1"
+port = 8766
+
+[runtimes."optiq@0.3.3"]
+definition = "optiq"
+version = "0.3.3"
+provenance = "tested"
+root = "/tmp/optiq"
+launcher = ["/tmp/optiq/bin/optiq", "serve"]
+capabilities = ["model"]
+
+[models.qwen]
+repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
+revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+
+[aliases.qwen]
+installation = "qwen"
+
+[services.coding]
+model_alias = "qwen"
+runtime = "optiq@0.3.3"
+route = "coding"
+"""
+            )
+            runtime_bin = root / "vite-plus" / "js_runtime" / "node" / "24.18.0" / "bin"
+            runtime_bin.mkdir(parents=True)
+            codex = runtime_bin / "codex"
+            codex.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            codex.chmod(0o700)
+            node = runtime_bin / "node"
+            node.write_text(
+                "#!/bin/zsh\n"
+                "set -eu\n"
+                "shift\n"
+                "if [[ ${1:-} == debug && ${2:-} == models && ${3:-} == --bundled ]]; then\n"
+                '  print -r -- \'{"models":[{"slug":"gpt-5.4","base_instructions":"test","context_window":131072}]}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "if [[ ${1:-} == debug && ${2:-} == models ]]; then\n"
+                '  print -r -- \'{"models":[{"slug":"coding","context_window":131072}]}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "while (( $# > 0 )); do\n"
+                "  if [[ $1 == --output-last-message ]]; then\n"
+                "    print -r -- 'mastic gateway contract ok' > $2\n"
+                "    exit 0\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            node.chmod(0o700)
+            shim = root / "vite-plus" / "bin" / "codex"
+            shim.parent.mkdir(parents=True)
+            shim.symlink_to(codex)
+
+            with (
+                patch(
+                    "mastic.infrastructure.production_host.shutil.which",
+                    return_value=str(shim),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"PATH": os.pathsep.join((str(runtime_bin), os.defpath))},
+                ),
+            ):
+                target = application_target_port(home, paths, store)
+                target.execute(
+                    "application-target.configure",
+                    {
+                        "application_target": "codex",
+                        "service": "coding",
+                        "context_window": 131072,
+                    },
+                )
+                result = target.execute(
+                    "application-target.test",
+                    {"application_target": "codex", "profile": "coding"},
+                )
+
+            self.assertTrue(result["response"]["exact_contract"])
+
     def test_setup_remote_owner_activates_only_at_execution_boundary(self) -> None:
         activator = _Activator()
         remote = _Port({"state": "complete"})

@@ -143,7 +143,10 @@ class NativeApplicationTargetCanary:
                     cwd=work,
                     env=_isolated_environment(
                         root,
-                        {"CODEX_HOME": str(self._home / ".codex")},
+                        {
+                            "CODEX_HOME": str(self._home / ".codex"),
+                            "PATH": os.pathsep.join((str(codex.parent), os.defpath)),
+                        },
                     ),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
