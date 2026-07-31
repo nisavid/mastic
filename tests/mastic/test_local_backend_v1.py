@@ -146,6 +146,31 @@ class _ApplicationsPort(_Port):
         }
 
 
+class _FailingApplicationDiagnostics:
+    def diagnose(self, application):
+        raise ApplicationError(
+            "codex_owner_unresolved",
+            "The Codex installation owner could not be resolved.",
+            details={"reason_code": "owner_runtime_unavailable"},
+        )
+
+
+class _ApplicationDiagnostics:
+    def __init__(self):
+        self.calls = []
+
+    def diagnose(self, application):
+        self.calls.append(application)
+        return {
+            "application": application,
+            "installation_identity": "application-installation:codex:vite",
+            "owner_identity": "vite-plus/npm-global",
+            "owner_installation_identity": "sha256:" + "a" * 64,
+            "owner_runtime_identity": "node:24.18.0",
+            "state": "resolved",
+        }
+
+
 class _Telemetry:
     def __init__(self, items=()):
         self.calls = []
@@ -260,6 +285,7 @@ class LocalOperationBackendTests(unittest.TestCase):
             metrics=ports.get("metrics", _NeverCalled()),
             setup=ports.get("setup", _NeverCalled()),
             applications=ports.get("applications", _NeverCalled()),
+            application_diagnostics=ports.get("application_diagnostics"),
             application_targets=ports.get("application_targets", _NeverCalled()),
             config_path=config_path,
             model_intelligence=ports.get("model_intelligence", _ModelIntelligence()),
@@ -468,6 +494,57 @@ class LocalOperationBackendTests(unittest.TestCase):
             self.assertNotIn(
                 "codex_catalog_unknown",
                 {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_doctor_surfaces_a_live_codex_owner_diagnostic_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _state = self._backend(
+                Path(directory),
+                config=_EMPTY_CONFIG,
+                application_diagnostics=_FailingApplicationDiagnostics(),
+            )
+
+            result = backend.prepare(OperationRequest("doctor")).execute()
+
+            issue = next(
+                item
+                for item in result["issues"]
+                if item["code"] == "codex_owner_unresolved"
+            )
+            self.assertFalse(result["healthy"])
+            self.assertEqual(
+                issue["details"],
+                {"reason_code": "owner_runtime_unavailable"},
+            )
+            self.assertEqual(issue["next_actions"], ["mastic app inspect codex"])
+
+    def test_doctor_accepts_a_resolved_live_codex_owner(self) -> None:
+        diagnostics = _ApplicationDiagnostics()
+        with TemporaryDirectory() as directory:
+            backend, _state = self._backend(
+                Path(directory),
+                config=_EMPTY_CONFIG,
+                application_diagnostics=diagnostics,
+            )
+
+            result = backend.prepare(OperationRequest("doctor")).execute()
+
+            self.assertTrue(result["healthy"])
+            self.assertEqual(diagnostics.calls, ["codex"])
+            self.assertEqual(
+                result["application_diagnostics"],
+                {
+                    "codex": {
+                        "application": "codex",
+                        "installation_identity": (
+                            "application-installation:codex:vite"
+                        ),
+                        "owner_identity": "vite-plus/npm-global",
+                        "owner_installation_identity": "sha256:" + "a" * 64,
+                        "owner_runtime_identity": "node:24.18.0",
+                        "state": "resolved",
+                    }
+                },
             )
 
     def test_status_reports_failed_for_unhealthy_top_level_components(self) -> None:

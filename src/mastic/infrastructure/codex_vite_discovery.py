@@ -20,6 +20,7 @@ from mastic.application.external_application_lifecycle import (
 )
 from mastic.domain.canonical import canonical_fingerprint
 from mastic.domain.external_applications import InstallationObservation
+from mastic.infrastructure.codex_vite_owner_runtime import vite_node_npm_path
 
 
 _MAX_METADATA_BYTES = 1_048_576
@@ -143,7 +144,10 @@ class CodexViteDiscovery:
         if initial_owner.source == "npm":
             if vite_which.source != "npm" or vite_which.package != "@openai/codex":
                 raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
-            package_root = self._npm_package_root(executable_path=owner_executable_path)
+            package_root = self._npm_package_root(
+                self._owner_npm_path(initial_owner.node_version),
+                executable_path=owner_executable_path,
+            )
             owner_identity = "vite-plus/npm-global"
         else:
             if (
@@ -256,7 +260,8 @@ class CodexViteDiscovery:
             if state.source != "npm":
                 raise CodexViteDiscoveryError(CodexViteDiscoveryFailure.OWNER_AMBIGUOUS)
             primary = self._npm_package_root(
-                executable_path=self._owner_executable_path(state.node_version)
+                self._owner_npm_path(state.node_version),
+                executable_path=self._owner_executable_path(state.node_version),
             )
             identity_root = primary
             trusted_base = None
@@ -502,9 +507,47 @@ class CodexViteDiscovery:
             node_version=labels["node"],
         )
 
-    def _npm_package_root(self, *, executable_path: Sequence[Path]) -> Path:
+    def _owner_npm_path(self, node_version: str) -> Path:
+        runtime_root = self._vp_home / "js_runtime" / "node" / node_version
+        try:
+            npm = vite_node_npm_path(self._vp_home, node_version)
+        except ValueError as error:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
+            ) from error
+        try:
+            npm_metadata = npm.lstat()
+            npm_target = npm.resolve(strict=True)
+            npm_target.relative_to(runtime_root.resolve(strict=True))
+            target_metadata = npm_target.stat()
+        except OSError as error:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            ) from error
+        except ValueError as error:
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            ) from error
+        if (
+            not (
+                stat.S_ISREG(npm_metadata.st_mode) or stat.S_ISLNK(npm_metadata.st_mode)
+            )
+            or not stat.S_ISREG(target_metadata.st_mode)
+            or target_metadata.st_mode & 0o111 == 0
+        ):
+            raise CodexViteDiscoveryError(
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
+            )
+        return npm
+
+    def _npm_package_root(
+        self,
+        owner_npm: Path,
+        *,
+        executable_path: Sequence[Path],
+    ) -> Path:
         result = self._runner.run(
-            (str(self._vp_home / "bin" / "npm"), "root", "-g"),
+            (str(owner_npm), "root", "-g"),
             executable_path=executable_path,
         )
         if result.returncode != 0:
@@ -514,12 +557,17 @@ class CodexViteDiscovery:
             raise CodexViteDiscoveryError(
                 CodexViteDiscoveryFailure.OWNER_METADATA_INVALID
             )
-        root = Path(lines[0]) / "@openai" / "codex"
+        runtime_root = owner_npm.parent.parent
         try:
-            return root.resolve(strict=True)
-        except OSError as error:
+            resolved_runtime_root = runtime_root.resolve(strict=True)
+            npm_root = Path(lines[0]).resolve(strict=True)
+            npm_root.relative_to(resolved_runtime_root)
+            package_root = (npm_root / "@openai" / "codex").resolve(strict=True)
+            package_root.relative_to(resolved_runtime_root)
+            return package_root
+        except (OSError, ValueError) as error:
             raise CodexViteDiscoveryError(
-                CodexViteDiscoveryFailure.OWNER_UNRESOLVED
+                CodexViteDiscoveryFailure.OWNER_RUNTIME_UNAVAILABLE
             ) from error
 
     def _package_metadata(

@@ -24,6 +24,7 @@ from mastic.application.external_application_lifecycle import (
     VerifiedArtifact,
     VerifiedArtifactClosure,
 )
+from mastic.infrastructure.codex_vite_owner_runtime import vite_node_npm_path
 from mastic.domain.canonical import canonical_fingerprint
 from mastic.domain.external_applications import CurrentReleaseResolution
 from mastic.infrastructure.codex_npm_authority import (
@@ -384,7 +385,7 @@ class CodexViteArtifactClosureVerifier:
                         "--node",
                         runtime,
                         "--",
-                        str(self._vp_home / "bin" / "npm"),
+                        str(vite_node_npm_path(self._vp_home, runtime)),
                         "cache",
                         "add",
                         "--cache",
