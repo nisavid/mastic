@@ -18,6 +18,19 @@ from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
 from mastic.application.serialization import to_plain_data
+from mastic.application.setup import (
+    LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION,
+    RUNTIME_CAPABILITY_PROBE_VERSION,
+)
+
+
+_INSTALLED_SOURCE_FLAG_PROBE = (
+    "import importlib.metadata as metadata, re, sys; "
+    "path = metadata.distribution(sys.argv[1]).locate_file(sys.argv[2]); "
+    "source = path.read_text(encoding='utf-8'); "
+    "print('\\n'.join(sorted(set(re.findall("
+    "r'--[A-Za-z0-9][A-Za-z0-9-]*', source)))))"
+)
 
 
 class RuntimeSupplyError(ValueError):
@@ -74,6 +87,7 @@ class RuntimeInstallation:
     launcher: tuple[str, ...]
     capabilities: frozenset[str]
     bundle_id: str | None = None
+    capability_probe_version: int = LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION
 
 
 @dataclass(frozen=True)
@@ -163,27 +177,63 @@ class SubprocessRuntimeProbe:
                 f"bin/{definition.launcher[0]}",
                 *definition.launcher[1:],
             )
-        help_command = (
-            str(resolved_root / launcher_relative[0]),
-            *launcher_relative[1:],
-            "--help",
-        )
-        help_result = self._execute(help_command, output_name="help")
-        if getattr(help_result, "returncode", 1) != 0:
-            raise RuntimeSupplyError(
-                f"runtime help probe failed: {self._detail(help_result)}"
+        if definition.key == "optiq":
+            output = self._probe_installed_source_flags(
+                python,
+                distribution=definition.package,
+                source="optiq/cli.py",
             )
-        output = (
-            str(getattr(help_result, "stdout", ""))
-            + "\n"
-            + str(getattr(help_result, "stderr", ""))
-        )
+            output += self._probe_installed_source_flags(
+                python,
+                distribution="mlx-lm",
+                source="mlx_lm/server.py",
+            )
+        else:
+            help_command = (
+                str(resolved_root / launcher_relative[0]),
+                *launcher_relative[1:],
+                "--help",
+            )
+            help_result = self._execute(help_command, output_name="help")
+            if getattr(help_result, "returncode", 1) != 0:
+                raise RuntimeSupplyError(
+                    f"runtime help probe failed: {self._detail(help_result)}"
+                )
+            output = (
+                str(getattr(help_result, "stdout", ""))
+                + "\n"
+                + str(getattr(help_result, "stderr", ""))
+            )
         return RuntimeProbeResult(
             version=version,
             launcher_relative=launcher_relative,
             supported_flags=frozenset(
                 re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", output)
             ),
+        )
+
+    def _probe_installed_source_flags(
+        self, python: Path, *, distribution: str, source: str
+    ) -> str:
+        result = self._execute(
+            (
+                str(python),
+                "-c",
+                _INSTALLED_SOURCE_FLAG_PROBE,
+                distribution,
+                source,
+            ),
+            output_name="installed source option",
+        )
+        if getattr(result, "returncode", 1) != 0:
+            raise RuntimeSupplyError(
+                f"runtime installed source option probe failed: {self._detail(result)}"
+            )
+        return (
+            "\n"
+            + str(getattr(result, "stdout", ""))
+            + "\n"
+            + str(getattr(result, "stderr", ""))
         )
 
     def _execute(self, argv: tuple[str, ...], *, output_name: str):
@@ -503,6 +553,21 @@ class RuntimeManager:
             result=result,
         )
 
+    def reprobe(self, installation: RuntimeInstallation) -> RuntimeInstallation:
+        """Refresh one exact installation's observed launch capabilities."""
+
+        definition = self._catalogue.definition(installation.runtime)
+        result = self._probe.probe(definition, installation.root)
+        return self._installation(
+            installation_id=installation.installation_id,
+            runtime=installation.runtime,
+            expected_version=installation.version,
+            provenance=installation.provenance,
+            bundle_id=installation.bundle_id,
+            root=installation.root,
+            result=result,
+        )
+
     def _install(
         self,
         *,
@@ -599,6 +664,7 @@ class RuntimeManager:
                 definition.key, result.supported_flags
             ),
             bundle_id=bundle_id,
+            capability_probe_version=RUNTIME_CAPABILITY_PROBE_VERSION,
         )
 
     def _bundle(self, bundle_id: str) -> TestedRuntimeBundle:

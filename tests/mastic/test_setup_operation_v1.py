@@ -309,6 +309,7 @@ class SetupOperationTests(unittest.TestCase):
                     "provenance": "tested",
                     "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                     "lock_sha256": "a" * 64,
+                    "capability_probe_version": 2,
                 }
             }
         )
@@ -356,7 +357,19 @@ class SetupOperationTests(unittest.TestCase):
                 }
             }
         )
-        self.supervisor = FakeOwner()
+        self.supervisor = FakeOwner(
+            {
+                "service.start": {
+                    "operation_id": "op-service-start",
+                    "run": {
+                        "service": "coding",
+                        "run_id": "run-ready",
+                        "state": "ready",
+                    },
+                    "supervisor_started": False,
+                }
+            }
+        )
         self.verifier = FakeOwner(
             {"verify.request": {"ok": True, "text": "mastic ready"}}
         )
@@ -1866,6 +1879,125 @@ class SetupOperationTests(unittest.TestCase):
             ["application.canary.codex", "application.canary.hindsight"],
         )
 
+    def test_rejected_service_start_interrupts_before_application_canaries(
+        self,
+    ) -> None:
+        self.supervisor.results["service.start"] = {
+            "operation_id": "op-service-start",
+            "run": {
+                "service": "coding",
+                "run_id": "run-rejected",
+                "state": "rejected",
+                "error": "runtime does not support a required launch option",
+            },
+            "supervisor_started": False,
+        }
+        port = self.port()
+        preview = port.preview({})
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "setup",
+                {
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "setup_interrupted")
+        self.assertEqual(raised.exception.details["failed_step"], "service.start")
+        self.assertIn(
+            "runtime does not support a required launch option",
+            str(raised.exception),
+        )
+        self.assertEqual(
+            [
+                call
+                for call in self.application_targets.calls
+                if isinstance(call, TestApplicationTarget)
+            ],
+            [],
+        )
+
+    def test_rejected_service_start_evidence_is_retried_on_resume(self) -> None:
+        resolved = self.resolver.resolve(self.facts)
+        runtime_install = next(
+            step for step in resolved.steps if step.id == "runtime.install"
+        )
+        service_start = next(
+            step for step in resolved.steps if step.id == "service.start"
+        )
+        self.evidence.record(
+            "setup",
+            SetupEvidence.complete(
+                runtime_install,
+                json.dumps(
+                    {
+                        "result": {
+                            "installation_id": "optiq-0.3.3-tested",
+                            "runtime": "optiq",
+                            "version": "0.3.3",
+                            "provenance": "tested",
+                            "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
+                            "lock_sha256": "a" * 64,
+                        }
+                    }
+                ),
+            ),
+        )
+        self.evidence.record(
+            "setup",
+            SetupEvidence.complete(
+                service_start,
+                json.dumps(
+                    {
+                        "result": {
+                            "operation_id": "op-service-start",
+                            "run": {
+                                "service": "coding",
+                                "run_id": "run-rejected",
+                                "state": "rejected",
+                                "error": "runtime does not support a required launch option",
+                            },
+                            "supervisor_started": False,
+                        }
+                    }
+                ),
+            ),
+        )
+        port = self.port()
+        preview = port.preview({})
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(
+            [call for call in self.runtime.calls if isinstance(call, InstallRuntime)],
+            [
+                InstallRuntime(
+                    step_fingerprint=runtime_install.fingerprint,
+                    runtime="optiq",
+                    expected_version="0.3.3",
+                    expected_lock_digest="a" * 64,
+                )
+            ],
+        )
+        self.assertEqual(
+            [call for call in self.supervisor.calls if isinstance(call, StartService)],
+            [
+                StartService(
+                    step_fingerprint=service_start.fingerprint,
+                    resource="coding",
+                )
+            ],
+        )
+
     def test_failed_target_canary_is_attributed_and_resumes_at_that_target(
         self,
     ) -> None:
@@ -2334,6 +2466,7 @@ class SetupOperationTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                 "lock_sha256": "a" * 64,
+                "capability_probe_version": 2,
             },
             "0.3.4": {
                 "installation_id": "optiq-0.3.4-tested",
@@ -2342,6 +2475,7 @@ class SetupOperationTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.4-py3.13-macos-arm64",
                 "lock_sha256": "c" * 64,
+                "capability_probe_version": 2,
             },
         }
         self.runtime.results["runtime.install"] = lambda parameters: runtime_results[

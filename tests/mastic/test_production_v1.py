@@ -73,6 +73,11 @@ from mastic.infrastructure.production_host import (
     resolve_uv,
     sampling_profile,
 )
+from mastic.infrastructure.runtime_supply import (
+    RuntimeCatalogue,
+    RuntimeProbeResult,
+    SubprocessRuntimeProbe,
+)
 from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.setup_port import (
     OperationalSetupEvidenceStore,
@@ -1485,6 +1490,78 @@ route = "coding"
             self.assertTrue(paths.gateway_credential.exists())
             self.assertEqual(
                 stat.S_IMODE(paths.gateway_credential.stat().st_mode), 0o600
+            )
+
+    def test_daemon_runtime_install_migrates_legacy_capability_observation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            bundle = next(
+                item
+                for item in RuntimeCatalogue.load_builtin().tested_bundles
+                if item.runtime == "optiq"
+            )
+            installation = paths.runtime_dir / bundle.bundle_id
+            (installation / "bin").mkdir(parents=True)
+            installation = installation.resolve()
+            python = installation / "bin/python"
+            launcher = installation / "bin/optiq"
+            python.touch()
+            launcher.touch()
+            marker = installation / ".mastic-runtime-owner.json"
+            marker.write_text(
+                json.dumps(
+                    {
+                        "bundle_id": bundle.bundle_id,
+                        "capabilities": ["host", "model", "port"],
+                        "installation_id": bundle.bundle_id,
+                        "launcher": [str(launcher), "serve"],
+                        "owner": "mastic",
+                        "provenance": "tested",
+                        "root": str(installation),
+                        "runtime": "optiq",
+                        "schema_version": 2,
+                        "version": bundle.version,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            probe = RuntimeProbeResult(
+                version=bundle.version,
+                launcher_relative=("bin/optiq", "serve"),
+                supported_flags=frozenset(
+                    {"--host", "--model", "--port", "--prompt-cache-bytes"}
+                ),
+            )
+
+            with patch.object(SubprocessRuntimeProbe, "probe", return_value=probe):
+                daemon = compose_daemon(paths=paths, home=root)
+                router = daemon._router_factory(lambda: None)
+                result = router.execute(
+                    "runtime.install",
+                    {
+                        "runtime": "optiq",
+                        "channel": "tested",
+                        "expected_version": bundle.version,
+                        "expected_lock_digest": bundle.lock_sha256,
+                        "confirmed": True,
+                    },
+                )
+
+            self.assertEqual(result["capability_probe_version"], 2)
+            self.assertIn("prompt_cache_bytes", result["capabilities"])
+            stored_marker = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(stored_marker["schema_version"], 3)
+            self.assertEqual(stored_marker["capability_probe_version"], 2)
+            configured = ConfigStore(paths.config_file, validate_config).load().value
+            self.assertIn(
+                "prompt_cache_bytes",
+                configured.runtimes[bundle.bundle_id].capabilities,
             )
 
     def test_daemon_composition_waits_for_removal_before_recreating_paths(self) -> None:

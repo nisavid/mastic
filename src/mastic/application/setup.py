@@ -29,6 +29,9 @@ from mastic.domain.resources import ActivationPolicy, ResourceName
 
 # Bump whenever setup must recycle masticd to load a changed control/schema contract.
 SUPERVISOR_SETUP_PROTOCOL = 3
+# Bump whenever persisted Runtime Installation capabilities require a fresh probe.
+LEGACY_RUNTIME_CAPABILITY_PROBE_VERSION = 1
+RUNTIME_CAPABILITY_PROBE_VERSION = 2
 PHASE1_PERFORMANCE_PROFILE_ID = "phase1-qwen36-optiq-apple-silicon"
 PHASE1_PERFORMANCE_PROFILE_VERSION = 1
 PHASE1_APPLICATION_VERSIONS = MappingProxyType(

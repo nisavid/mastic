@@ -33,6 +33,7 @@ from mastic.application.setup import (
     PHASE1_APPLICATION_VERSIONS,
     PHASE1_PERFORMANCE_PROFILE_ID,
     PHASE1_PERFORMANCE_PROFILE_VERSION,
+    RUNTIME_CAPABILITY_PROBE_VERSION,
     Readiness,
     RemovalInventory,
     ResolvedRemoval,
@@ -808,12 +809,23 @@ class SetupOperation:
                 )
             return configured
         if step.id == "service.start":
-            return self._nested_operations.service_lifecycle.start_service(
+            result = self._nested_operations.service_lifecycle.start_service(
                 StartService(
                     step_fingerprint=step.fingerprint,
                     resource=selection.service_name,
                 ),
             )
+            run = _service_run(result)
+            if run is None or run.get("state") != "ready":
+                detail = (
+                    str(run.get("error") or run.get("state") or "unknown outcome")
+                    if run is not None
+                    else "missing Service Run status"
+                )
+                raise RuntimeError(
+                    f"the Inference Service did not become ready: {detail}"
+                )
+            return result
         if step.id in {
             "application.canary.codex",
             "application.canary.hindsight",
@@ -1129,6 +1141,7 @@ def _validate_runtime_result(
         "version": selection.runtime_version,
         "provenance": "tested",
         "lock_sha256": expected_digest,
+        "capability_probe_version": RUNTIME_CAPABILITY_PROBE_VERSION,
     }
     mismatched = [
         key for key, expected in required.items() if result.get(key) != expected
@@ -1139,6 +1152,11 @@ def _validate_runtime_result(
     ):
         fields = ", ".join(mismatched) or "installation_id or bundle_id"
         raise RuntimeError(f"Runtime Installation evidence did not match: {fields}")
+
+
+def _service_run(result: Mapping[str, object]) -> Mapping[str, object] | None:
+    run = result.get("run")
+    return run if isinstance(run, Mapping) else None
 
 
 def _validate_model_result(
@@ -1332,6 +1350,7 @@ def _durable_resumable_material_valid(
         and isinstance(result.get("version"), str)
         and bool(result.get("version"))
         and result.get("provenance") == "tested"
+        and result.get("capability_probe_version") == RUNTIME_CAPABILITY_PROBE_VERSION
         and isinstance(result.get("bundle_id"), str)
         and bool(result.get("bundle_id"))
         and isinstance(lock_sha256, str)
@@ -2166,6 +2185,10 @@ def _terminal_setup_evidence_valid(
         return False
     if not _resumable_material_valid(resolved, evidence):
         return False
+    if evidence.step_id == "service.start":
+        result = _evidence_result(evidence)
+        run = _service_run(result) if result is not None else None
+        return run is not None and run.get("state") == "ready"
     if evidence.step_id == "verify.request":
         return _verification_ready(evidence)
     return True
