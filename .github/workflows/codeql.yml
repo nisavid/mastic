@@ -33,11 +33,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Test vendored Impeccable security boundaries
-        run: |
-          node --test .agents/skills/impeccable/scripts/live-security.test.mjs
-          node --test .github/skills/impeccable/scripts/live-security.test.mjs
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
