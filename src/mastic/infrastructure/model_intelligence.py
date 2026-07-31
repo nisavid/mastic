@@ -238,7 +238,7 @@ class CacheInventoryPort(Protocol):
 
 
 class HuggingFaceModelRepository:
-    """Official Hub adapter for exact, bounded model metadata inspection."""
+    """Inspect exact public Hub metadata without sending ambient credentials."""
 
     def __init__(
         self,
@@ -264,6 +264,7 @@ class HuggingFaceModelRepository:
             files_metadata=True,
             securityStatus=True,
             timeout=10.0,
+            token=False,
         )
         canonical_id = getattr(info, "id", None)
         commit_sha = getattr(info, "sha", None)
@@ -704,7 +705,7 @@ class ModelIntelligence:
 
 
 class _HuggingFaceMetadataFetcher:
-    """Stream one allowlisted exact-revision metadata file with hard bounds."""
+    """Stream bounded public metadata without sending ambient credentials."""
 
     def fetch(
         self, repo_id: str, commit_sha: str, path: str, *, max_bytes: int
@@ -718,7 +719,7 @@ class _HuggingFaceMetadataFetcher:
             f"{quote(path, safe='/')}"
         )
         timeout = httpx.Timeout(10.0, connect=5.0)
-        headers = build_hf_headers(token=None)
+        headers = build_hf_headers(token=False)
         with httpx.Client(follow_redirects=False, timeout=timeout) as client:
             current_url = url
             for _redirect in range(6):

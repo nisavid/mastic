@@ -195,6 +195,7 @@ class ModelIntelligenceTests(unittest.TestCase):
                         "files_metadata": True,
                         "securityStatus": True,
                         "timeout": 10.0,
+                        "token": False,
                     },
                 )
             ],
@@ -242,12 +243,18 @@ class ModelIntelligenceTests(unittest.TestCase):
         repository = HuggingFaceModelRepository(
             api=_HubApi(), cache_inventory=_CacheInventory()
         )
+        header_tokens: list[object] = []
 
         with (
             patch("httpx.Client", Client),
+            patch(
+                "huggingface_hub.utils.build_hf_headers",
+                side_effect=lambda *, token: header_tokens.append(token) or {},
+            ),
             self.assertRaisesRegex(ModelIntelligenceError, "untrusted URL"),
         ):
             repository.fetch_metadata("acme/Model", SHA, "config.json", max_bytes=32)
+        self.assertEqual(header_tokens, [False])
         self.assertEqual(len(Client.calls), 1)
 
     def test_inspects_arbitrary_repository_at_an_exact_revision_before_install(

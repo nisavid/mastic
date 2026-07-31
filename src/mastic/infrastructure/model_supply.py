@@ -386,7 +386,7 @@ class ModelSupply:
 
 
 class HuggingFaceHubClient:
-    """Official huggingface_hub implementation of the injectable boundary."""
+    """Use official public Hub APIs without sending ambient credentials."""
 
     def search_models(
         self, query: str, *, author: str | None, limit: int
@@ -398,6 +398,7 @@ class HuggingFaceHubClient:
             author=author,
             limit=limit,
             full=True,
+            token=False,
         )
         return tuple(
             HubModelRecord(
@@ -427,7 +428,14 @@ class HuggingFaceHubClient:
             from huggingface_hub import HfApi
 
             commit_sha = (
-                HfApi().model_info(repo_id, revision=revision, files_metadata=True).sha
+                HfApi()
+                .model_info(
+                    repo_id,
+                    revision=revision,
+                    files_metadata=True,
+                    token=False,
+                )
+                .sha
             )
         if not commit_sha:
             raise ModelSupplyError(f"Hub returned no commit SHA for {repo_id}")
@@ -449,6 +457,7 @@ class HuggingFaceHubClient:
                 revision=revision,
                 local_files_only=local_files_only,
                 force_download=force_download,
+                token=False,
             )
         )
 
@@ -501,6 +510,7 @@ class HuggingFaceHubClient:
                     revision=revision,
                     files_metadata=True,
                     timeout=10.0,
+                    token=False,
                 )
                 manifest_revision = getattr(info, "sha", None)
                 if (
