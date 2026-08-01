@@ -17,6 +17,10 @@ from typing import Callable, Mapping, Protocol
 import tomlkit
 
 from mastic.application.config_schema import ConfiguredRuntime, MasticConfig
+from mastic.application.setup import (
+    LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
+)
 from mastic.infrastructure.config_store import ConfigStore, private_file_lock
 from mastic.infrastructure.model_intelligence import (
     ModelIntelligence,
@@ -877,11 +881,43 @@ class RuntimeSupplyPort:
         else:
             os.close(descriptor)
 
+    def _replace_runtime_marker(
+        self, marker_root: Path, installation: RuntimeInstallation
+    ) -> None:
+        marker = marker_root / ".mastic-runtime-owner.json"
+        payload = json.dumps(
+            _runtime_marker_payload(installation, installation.root),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f"{marker.name}.tmp-",
+            dir=marker_root,
+        )
+        temporary = Path(temporary_name)
+        published = False
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(marker)
+            published = True
+            _fsync_directory(marker_root)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if not published:
+                temporary.unlink(missing_ok=True)
+            raise
+
     def _validate_managed_installation(self, installation: RuntimeInstallation) -> None:
         observed = self._read_managed_installation(
             installation.installation_id, root=installation.root
         )
-        if observed != installation:
+        if not _runtime_installation_matches(installation, observed):
             raise SupplyPortError(
                 "runtime ownership marker does not match the registry"
             )
@@ -908,6 +944,9 @@ class RuntimeSupplyPort:
             raise SupplyPortError(
                 f"existing runtime installation {installation_id!r} does not match the exact request"
             )
+        if installation.observation_probe_version < RUNTIME_OBSERVATION_PROBE_VERSION:
+            installation = self._manager.reprobe(installation)
+            self._replace_runtime_marker(root, installation)
         return installation
 
     def _read_managed_installation(
@@ -1098,7 +1137,10 @@ class RuntimeSupplyPort:
                         f"runtime staging recovery is missing {destination}"
                     )
                 installation = self._read_managed_installation(installation_id)
-                if _runtime_installation(configured, installation_id) != installation:
+                if not _runtime_installation_matches(
+                    _runtime_installation(configured, installation_id),
+                    installation,
+                ):
                     raise SupplyPortError(
                         f"runtime staging transition does not match desired state: {transition}"
                     )
@@ -1126,7 +1168,10 @@ class RuntimeSupplyPort:
                     f"runtime removal transition identity is invalid: {transition}"
                 )
             if installation_id in configured:
-                if _runtime_installation(configured, installation_id) != installation:
+                if not _runtime_installation_matches(
+                    _runtime_installation(configured, installation_id),
+                    installation,
+                ):
                     raise SupplyPortError(
                         f"runtime removal transition does not match desired state: {transition}"
                     )
@@ -1757,6 +1802,21 @@ def _runtime_installation(
     )
 
 
+def _runtime_installation_matches(
+    configured: RuntimeInstallation,
+    observed: RuntimeInstallation,
+) -> bool:
+    """Compare configured shape while leaving probe provenance to its marker."""
+
+    return (
+        replace(
+            observed,
+            observation_probe_version=configured.observation_probe_version,
+        )
+        == configured
+    )
+
+
 def _runtime_references(config: MasticConfig, resource: str) -> tuple[str, ...]:
     return tuple(
         sorted(
@@ -1862,6 +1922,7 @@ def _runtime_result(
         "root": str(installation.root),
         "launcher": list(installation.launcher),
         "capabilities": sorted(installation.capabilities),
+        "capability_probe_version": installation.observation_probe_version,
         "bundle_id": installation.bundle_id,
         "preview": _plain_runtime_preview(preview),
     }
@@ -2264,6 +2325,7 @@ def _runtime_marker_payload(
 ) -> dict[str, object]:
     return {
         "bundle_id": installation.bundle_id,
+        "capability_probe_version": installation.observation_probe_version,
         "capabilities": sorted(installation.capabilities),
         "installation_id": installation.installation_id,
         "launcher": list(installation.launcher),
@@ -2271,13 +2333,16 @@ def _runtime_marker_payload(
         "provenance": installation.provenance,
         "root": str(root),
         "runtime": installation.runtime,
-        "schema_version": 2,
+        "schema_version": 3,
         "version": installation.version,
     }
 
 
 def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInstallation:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict):
+        raise ValueError("runtime marker schema is invalid")
+    schema_version = value.get("schema_version")
+    fields = {
         "bundle_id",
         "capabilities",
         "installation_id",
@@ -2288,7 +2353,10 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
         "runtime",
         "schema_version",
         "version",
-    }:
+    }
+    if schema_version == 3:
+        fields.add("capability_probe_version")
+    if schema_version not in {2, 3} or set(value) != fields:
         raise ValueError("runtime marker schema is invalid")
     installation_id = value["installation_id"]
     runtime = value["runtime"]
@@ -2297,9 +2365,13 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
     launcher = value["launcher"]
     capabilities = value["capabilities"]
     bundle_id = value["bundle_id"]
+    capability_probe_version = (
+        LEGACY_RUNTIME_OBSERVATION_PROBE_VERSION
+        if schema_version == 2
+        else value["capability_probe_version"]
+    )
     if (
         value["owner"] != "mastic"
-        or value["schema_version"] != 2
         or value["root"] != str(root)
         or not isinstance(installation_id, str)
         or installation_id != root.name
@@ -2314,6 +2386,9 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
         or not isinstance(capabilities, list)
         or not all(isinstance(item, str) for item in capabilities)
         or (bundle_id is not None and not isinstance(bundle_id, str))
+        or type(capability_probe_version) is not int
+        or capability_probe_version < 1
+        or capability_probe_version > RUNTIME_OBSERVATION_PROBE_VERSION
     ):
         raise ValueError("runtime marker fields are invalid")
     launcher_path = Path(launcher[0])
@@ -2328,4 +2403,5 @@ def _runtime_installation_from_marker(value: object, root: Path) -> RuntimeInsta
         launcher=tuple(launcher),
         capabilities=frozenset(capabilities),
         bundle_id=bundle_id,
+        observation_probe_version=capability_probe_version,
     )

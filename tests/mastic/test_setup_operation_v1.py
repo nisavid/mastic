@@ -1,39 +1,63 @@
+import hashlib
 import json
 import tempfile
 import unittest
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
-from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
+from mastic.application.application_targets import (
+    APPLICATION_CANARY_CONTRACTS,
+    application_canary_evidence_sha256,
+)
 from mastic.application.dispatch import ApplicationError
 from mastic.application.setup import (
     CapacityProfile,
     ExactSetupSelection,
     RecommendedProfile,
     RemovalInventory,
+    RUNTIME_OBSERVATION_PROBE_VERSION,
     SetupEvidence,
     SetupIntent,
     SetupResolver,
     SetupPreflight,
     StepState,
 )
-from mastic.infrastructure.state_store import OperationalStateStore
-from mastic.infrastructure.application_target_canaries import (
-    application_canary_evidence_sha256,
+from mastic.application.setup_operation import (
+    ActivateSupervisor,
+    ConfigureApplicationTarget,
+    ConfigureGateway,
+    ConfigureService,
+    DrainService,
+    InstallApplications,
+    InstallModel,
+    InstallRuntime,
+    RemoveApplications,
+    RemoveApplicationTarget,
+    RemoveState,
+    SetupNestedOperations,
+    SetupOperation,
+    StartService,
+    StopService,
+    TestApplicationTarget,
+    TrustModel,
+    UnregisterSupervisor,
+    VerifyGatewayRequest,
+    combined_readiness,
 )
+from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.setup_port import (
     DurableSetupOutcomeProvider,
     OperationalSetupEvidenceStore,
     OperationalSetupPlanStore,
-    SetupOperationPort,
-    _combined_readiness,
 )
 
 
 GIB = 1024**3
 MODEL_REPOSITORY = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
 MODEL_REVISION = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+SELECTION_SHA256 = "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+READY_RESPONSE_SHA256 = hashlib.sha256(b"mastic ready").hexdigest()
 
 
 class FakeOwner:
@@ -48,6 +72,94 @@ class FakeOwner:
             raise RuntimeError(f"{operation} interrupted")
         result = self.results.get(operation, {})
         return dict(result(parameters) if callable(result) else result)
+
+    def execute_typed(self, result_key, operation):
+        self.calls.append(operation)
+        if result_key == self.fail:
+            raise RuntimeError(f"{result_key} interrupted")
+        result = self.results.get(result_key, {})
+        parameters = {
+            field.name: getattr(operation, field.name) for field in fields(operation)
+        }
+        return dict(result(parameters) if callable(result) else result)
+
+
+class FakeSetupCapabilities:
+    def __init__(
+        self,
+        *,
+        runtime,
+        model,
+        config,
+        applications,
+        application_targets,
+        supervisor,
+        verifier,
+    ):
+        self.runtime = runtime
+        self.model = model
+        self.config = config
+        self.applications = applications
+        self.application_targets = application_targets
+        self.supervisor = supervisor
+        self.verifier = verifier
+
+    def activate_supervisor(self, operation: ActivateSupervisor):
+        return self.supervisor.execute_typed("supervisor.start", operation)
+
+    def install_runtime(self, operation: InstallRuntime):
+        return self.runtime.execute_typed("runtime.install", operation)
+
+    def install_model(self, operation: InstallModel):
+        return self.model.execute_typed("model.install", operation)
+
+    def trust_model(self, operation: TrustModel):
+        return self.config.execute_typed("model.trust", operation)
+
+    def configure_service(self, operation: ConfigureService):
+        return self.config.execute_typed("service.create", operation)
+
+    def configure_gateway(self, operation: ConfigureGateway):
+        return self.config.execute_typed("gateway.configure", operation)
+
+    def install_applications(self, operation: InstallApplications):
+        return self.applications.execute_typed("application.install", operation)
+
+    def configure_application_target(self, operation: ConfigureApplicationTarget):
+        return self.application_targets.execute_typed(
+            "application-target.configure", operation
+        )
+
+    def start_service(self, operation: StartService):
+        return self.supervisor.execute_typed("service.start", operation)
+
+    def test_application_target(self, operation: TestApplicationTarget):
+        return self.application_targets.execute_typed(
+            "application-target.test", operation
+        )
+
+    def verify_gateway(self, operation: VerifyGatewayRequest):
+        return self.verifier.execute_typed("verify.request", operation)
+
+    def drain_service(self, operation: DrainService):
+        return self.supervisor.execute_typed("service.drain", operation)
+
+    def stop_service(self, operation: StopService):
+        return self.supervisor.execute_typed("service.stop", operation)
+
+    def unregister_supervisor(self, operation: UnregisterSupervisor):
+        return self.supervisor.execute_typed("supervisor.unregister", operation)
+
+    def remove_application_target(self, operation: RemoveApplicationTarget):
+        return self.application_targets.execute_typed(
+            "application-target.remove", operation
+        )
+
+    def remove_applications(self, operation: RemoveApplications):
+        return self.applications.execute_typed("application.remove", operation)
+
+    def remove_state(self, operation: RemoveState):
+        return self.config.execute_typed("state.remove", operation)
 
 
 class FakeEvidenceStore:
@@ -158,7 +270,7 @@ def canary_evidence_sha256(target: str, *, service: str = "coding") -> str:
     )
 
 
-class SetupOperationPortTests(unittest.TestCase):
+class SetupOperationTests(unittest.TestCase):
     def setUp(self):
         compact = RecommendedProfile("compact", 16 * GIB, selection(revision="1" * 40))
         workstation = RecommendedProfile("workstation", 64 * GIB, selection())
@@ -198,6 +310,7 @@ class SetupOperationPortTests(unittest.TestCase):
                     "provenance": "tested",
                     "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                     "lock_sha256": "a" * 64,
+                    "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
                 }
             }
         )
@@ -245,7 +358,19 @@ class SetupOperationPortTests(unittest.TestCase):
                 }
             }
         )
-        self.supervisor = FakeOwner()
+        self.supervisor = FakeOwner(
+            {
+                "service.start": {
+                    "operation_id": "op-service-start",
+                    "run": {
+                        "service": "coding",
+                        "run_id": "run-ready",
+                        "state": "ready",
+                    },
+                    "supervisor_started": False,
+                }
+            }
+        )
         self.verifier = FakeOwner(
             {"verify.request": {"ok": True, "text": "mastic ready"}}
         )
@@ -259,6 +384,13 @@ class SetupOperationPortTests(unittest.TestCase):
             shared_cache_paths=("~/.cache/huggingface/hub/models--qwen",),
             shared_cache_bytes=40 * GIB,
             unrelated_settings=("Codex theme", "Hindsight bank ID"),
+        )
+
+    def test_codex_canary_evidence_contract_digest_is_pinned(self) -> None:
+        # Changing this digest requires an intentional evidence-contract update.
+        self.assertEqual(
+            canary_evidence_sha256("codex"),
+            "b6907b0ba664ab5b09aeaa80ef7361821b20e8bc1f4fc6413cdf9e0b7dc584d0",
         )
 
     def port(
@@ -277,31 +409,46 @@ class SetupOperationPortTests(unittest.TestCase):
         removal_transition=None,
         plan_store=None,
     ):
-        return SetupOperationPort(
-            resolver or self.resolver,
-            preflight=preflight
-            or (
-                lambda offline: (
-                    facts
-                    or SetupPreflight(
-                        self.facts.platform,
-                        self.facts.machine,
-                        self.facts.memory_bytes,
-                        self.facts.disk_free_bytes,
-                        self.facts.online and not offline,
-                        os_version=self.facts.os_version,
-                    )
-                )
-            ),
+        selected_model = self.model if model is None else model
+        selected_config = self.config if config is None else config
+        selected_applications = (
+            self.applications if applications is None else applications
+        )
+        selected_facts = self.facts if facts is None else facts
+        capabilities = FakeSetupCapabilities(
             runtime=self.runtime,
-            model=model or self.model,
-            config=config or self.config,
-            applications=applications or self.applications,
+            model=selected_model,
+            config=selected_config,
+            applications=selected_applications,
             application_targets=self.application_targets,
             supervisor=self.supervisor,
             verifier=self.verifier,
-            evidence=evidence or self.evidence,
-            removal_inventory=lambda: inventory or self.inventory,
+        )
+        return SetupOperation(
+            self.resolver if resolver is None else resolver,
+            preflight=preflight
+            if preflight is not None
+            else (
+                lambda offline: replace(
+                    selected_facts,
+                    online=selected_facts.online and not offline,
+                )
+            ),
+            nested_operations=SetupNestedOperations(
+                desired_state=capabilities,
+                runtime_supply=capabilities,
+                model_supply=capabilities,
+                application_lifecycle=capabilities,
+                application_configuration=capabilities,
+                native_canaries=capabilities,
+                service_lifecycle=capabilities,
+                gateway_verification=capabilities,
+                state_removal=capabilities,
+            ),
+            evidence=self.evidence if evidence is None else evidence,
+            removal_inventory=lambda: (
+                self.inventory if inventory is None else inventory
+            ),
             performance_profile=performance_profile,
             transition=transition,
             removal_transition=removal_transition,
@@ -312,7 +459,15 @@ class SetupOperationPortTests(unittest.TestCase):
         plan_store = FakePlanStore()
 
         def record(plan):
-            plan_store.calls_before_record = list(self.runtime.calls)
+            plan_store.calls_before_record = [
+                *self.runtime.calls,
+                *self.model.calls,
+                *self.config.calls,
+                *self.applications.calls,
+                *self.application_targets.calls,
+                *self.supervisor.calls,
+                *self.verifier.calls,
+            ]
             plan_store.plan = dict(plan)
 
         plan_store.record = record
@@ -333,15 +488,13 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         self.assertEqual(plan_store.plan["application_targets"], ("codex", "hindsight"))
         self.assertTrue(plan_store.plan["steps"])
-        self.assertTrue(
-            all(
-                {"id", "fingerprint", "state"}.issubset(step)
-                and set(step).issubset(
-                    {"id", "fingerprint", "state", "expected_result"}
+        for step in plan_store.plan["steps"]:
+            with self.subTest(step=step.get("id")):
+                self.assertLessEqual({"id", "fingerprint", "state"}, set(step))
+                self.assertLessEqual(
+                    set(step),
+                    {"id", "fingerprint", "state", "expected_result"},
                 )
-                for step in plan_store.plan["steps"]
-            )
-        )
         material_contracts = {
             step["id"]: step["expected_result"]
             for step in plan_store.plan["steps"]
@@ -381,7 +534,13 @@ class SetupOperationPortTests(unittest.TestCase):
             },
         )
         encoded = json.dumps(plan_store.plan)
-        for forbidden in ("prompt", "messages", "credentials", "model_repository"):
+        for forbidden in (
+            "prompt",
+            "messages",
+            "credentials",
+            "model_repository",
+            MODEL_REPOSITORY,
+        ):
             self.assertNotIn(forbidden, encoded)
 
     def test_durable_outcome_survives_store_recomposition_and_fails_closed(self):
@@ -426,9 +585,11 @@ class SetupOperationPortTests(unittest.TestCase):
                 },
             )
 
-            stored["steps"] = [{"id": "application.canary.codex"}]
             malformed = FakePlanStore()
-            malformed.plan = stored
+            malformed.plan = {
+                **stored,
+                "steps": [{"id": "application.canary.codex"}],
+            }
             conservative = DurableSetupOutcomeProvider(
                 malformed, OperationalSetupEvidenceStore(reopened)
             ).outcome()
@@ -493,7 +654,7 @@ class SetupOperationPortTests(unittest.TestCase):
             ),
             "application_targets": ("codex", "hindsight"),
             "performance_binding": {
-                "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
+                "selection_sha256": SELECTION_SHA256,
                 "application_versions": {
                     "codex": "0.144.1",
                     "hindsight": "0.8.4",
@@ -569,16 +730,18 @@ class SetupOperationPortTests(unittest.TestCase):
                 },
             ),
         )
-        self.assertNotIn("credential", json.dumps(outcome))
+        encoded = json.dumps(outcome)
+        self.assertNotIn("credential", encoded)
+        self.assertNotIn("must not escape the inspection boundary", encoded)
 
     def test_unknown_or_empty_target_readiness_fails_closed(self):
-        self.assertEqual(_combined_readiness({}).value, "unverified")
+        self.assertEqual(combined_readiness({}).value, "unverified")
         self.assertEqual(
-            _combined_readiness({"codex": "future-state"}).value,
+            combined_readiness({"codex": "future-state"}).value,
             "unverified",
         )
         self.assertEqual(
-            _combined_readiness({"codex": "ready", "hindsight": "future-state"}).value,
+            combined_readiness({"codex": "ready", "hindsight": "future-state"}).value,
             "unverified",
         )
 
@@ -595,7 +758,7 @@ class SetupOperationPortTests(unittest.TestCase):
             ),
             "application_targets": ("codex",),
             "performance_binding": {
-                "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
+                "selection_sha256": SELECTION_SHA256,
                 "application_versions": {
                     "codex": "0.144.1",
                     "hindsight": "0.8.4",
@@ -660,16 +823,11 @@ class SetupOperationPortTests(unittest.TestCase):
             ).outcome()
 
         self.assertEqual(
-            outcome_for(
-                "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d"
-            )["readiness"],
+            outcome_for(READY_RESPONSE_SHA256)["readiness"],
             "ready",
         )
         self.assertEqual(outcome_for("b" * 64)["readiness"], "unverified")
-        skipped = outcome_for(
-            "8d3b1f10b22a30a4a9d48bff9d603d8742e527d8a34dbe5a69413b6e49919d7d",
-            state=StepState.SKIPPED,
-        )
+        skipped = outcome_for(READY_RESPONSE_SHA256, state=StepState.SKIPPED)
         self.assertEqual(skipped["completion"], "partial")
         self.assertEqual(skipped["readiness"], "unverified")
         self.assertEqual(inspections.calls, [])
@@ -712,7 +870,7 @@ class SetupOperationPortTests(unittest.TestCase):
                             "service": "coding",
                             "ok": True,
                             "exact_contract": True,
-                            "phases": ["codex.exec", "responses.exact"],
+                            "phases": canary_phases("codex"),
                             "evidence_sha256": canary_evidence_sha256("codex"),
                             "performance": {
                                 "metric": "codex.native_canary.duration_seconds",
@@ -795,9 +953,12 @@ class SetupOperationPortTests(unittest.TestCase):
             {"application-target.inspect": {"state": "healthy", "detail": "ok"}}
         )
 
-        without_binding = DurableSetupOutcomeProvider(
-            plans, evidence, profile, application_targets=inspections
-        ).outcome()
+        with self.subTest("without_binding"):
+            without_binding = DurableSetupOutcomeProvider(
+                plans, evidence, profile, application_targets=inspections
+            ).outcome()
+            self.assertEqual(without_binding["completion"], "partial")
+            self.assertEqual(without_binding["readiness"], "unverified")
         plans.plan["performance_binding"] = {
             "selection_sha256": "c" * 64,
             "application_versions": {"codex": "0.144.1", "hindsight": "0.8.4"},
@@ -807,9 +968,11 @@ class SetupOperationPortTests(unittest.TestCase):
             "macos_major": 26,
             "service": "coding",
         }
-        matching = DurableSetupOutcomeProvider(
-            plans, evidence, profile, application_targets=inspections
-        ).outcome()
+        with self.subTest("matching"):
+            matching = DurableSetupOutcomeProvider(
+                plans, evidence, profile, application_targets=inspections
+            ).outcome()
+            self.assertEqual(matching["readiness"], "ready")
         canary = evidence.items["setup"][0]
         wrong_service_detail = json.loads(canary.detail)
         wrong_service_detail["result"].update(
@@ -821,25 +984,23 @@ class SetupOperationPortTests(unittest.TestCase):
         evidence.items["setup"][0] = replace(
             canary, detail=json.dumps(wrong_service_detail)
         )
-        wrong_service = DurableSetupOutcomeProvider(
-            plans, evidence, profile, application_targets=inspections
-        ).outcome()
+        with self.subTest("wrong_service"):
+            wrong_service = DurableSetupOutcomeProvider(
+                plans, evidence, profile, application_targets=inspections
+            ).outcome()
+            self.assertEqual(wrong_service["completion"], "partial")
+            self.assertEqual(wrong_service["readiness"], "unverified")
         evidence.items["setup"][0] = canary
         plans.plan["performance_binding"] = {
             **plans.plan["performance_binding"],
             "selection_sha256": "d" * 64,
         }
-        wrong_plan = DurableSetupOutcomeProvider(
-            plans, evidence, profile, application_targets=inspections
-        ).outcome()
-
-        self.assertEqual(without_binding["completion"], "partial")
-        self.assertEqual(without_binding["readiness"], "unverified")
-        self.assertEqual(matching["readiness"], "ready")
-        self.assertEqual(wrong_service["completion"], "partial")
-        self.assertEqual(wrong_service["readiness"], "unverified")
-        self.assertEqual(wrong_plan["completion"], "complete")
-        self.assertEqual(wrong_plan["readiness"], "unverified")
+        with self.subTest("wrong_plan"):
+            wrong_plan = DurableSetupOutcomeProvider(
+                plans, evidence, profile, application_targets=inspections
+            ).outcome()
+            self.assertEqual(wrong_plan["completion"], "complete")
+            self.assertEqual(wrong_plan["readiness"], "unverified")
 
     def test_durable_skipped_canary_requires_a_structurally_valid_plan_binding(
         self,
@@ -867,7 +1028,9 @@ class SetupOperationPortTests(unittest.TestCase):
         ]
         profile = validated_performance_profile(plan_sha256="c" * 64)
 
-        missing = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+        with self.subTest("missing"):
+            missing = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+            self.assertEqual(missing["completion"], "partial")
         plans.plan["performance_binding"] = {
             "selection_sha256": "not-a-digest",
             "application_versions": {
@@ -880,33 +1043,35 @@ class SetupOperationPortTests(unittest.TestCase):
             "macos_major": 26,
             "service": "coding",
         }
-        malformed = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+        with self.subTest("malformed"):
+            malformed = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
+            self.assertEqual(malformed["completion"], "partial")
         plans.plan["performance_binding"] = {
             **plans.plan["performance_binding"],
             "selection_sha256": "d" * 64,
         }
-        exact_alternate_plan = DurableSetupOutcomeProvider(
-            plans, evidence, profile
-        ).outcome()
+        with self.subTest("exact_alternate_plan"):
+            exact_alternate_plan = DurableSetupOutcomeProvider(
+                plans, evidence, profile
+            ).outcome()
+            self.assertEqual(exact_alternate_plan["completion"], "complete")
+            self.assertEqual(exact_alternate_plan["readiness"], "unverified")
         plans.plan["steps"] = (
             {
                 **plans.plan["steps"][0],
                 "state": "ready",
             },
         )
-        unauthorized = DurableSetupOutcomeProvider(plans, evidence, profile).outcome()
-
-        self.assertEqual(missing["completion"], "partial")
-        self.assertEqual(malformed["completion"], "partial")
-        self.assertEqual(exact_alternate_plan["completion"], "complete")
-        self.assertEqual(exact_alternate_plan["readiness"], "unverified")
-        self.assertEqual(unauthorized["completion"], "partial")
+        with self.subTest("unauthorized"):
+            unauthorized = DurableSetupOutcomeProvider(
+                plans, evidence, profile
+            ).outcome()
+            self.assertEqual(unauthorized["completion"], "partial")
 
     def test_plan_store_can_reactivate_an_exact_prior_plan(self):
         with tempfile.TemporaryDirectory() as directory:
-            plans = OperationalSetupPlanStore(
-                OperationalStateStore(Path(directory) / "state.sqlite3")
-            )
+            state = OperationalStateStore(Path(directory) / "state.sqlite3")
+            plans = OperationalSetupPlanStore(state)
             base = {
                 "steps": ({"id": "verify.request", "fingerprint": "verify-v1"},),
                 "application_targets": (),
@@ -917,6 +1082,7 @@ class SetupOperationPortTests(unittest.TestCase):
             plans.record({**base, "plan_identity": "a" * 64})
 
             self.assertEqual(plans.load()["plan_identity"], "a" * 64)
+            self.assertEqual(len(state.snapshots("setup_plan")), 1)
 
     def test_plan_store_rejects_fields_outside_the_content_free_envelope(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -971,34 +1137,8 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(
             preview["performance_profile"],
             {
-                "id": "phase1-qwen36-optiq-apple-silicon",
-                "version": 1,
+                **validated_performance_profile(plan_sha256=SELECTION_SHA256),
                 "status": "provisional",
-                "host": {
-                    "platform": "darwin",
-                    "machine": "arm64",
-                    "minimum_memory_bytes": 48 * GIB,
-                    "macos_major_versions": [15, 26],
-                },
-                "plan": {
-                    "selection_sha256": "7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60",
-                    "application_versions": {
-                        "codex": "0.144.1",
-                        "hindsight": "0.8.4",
-                    },
-                },
-                "metrics": {
-                    "codex.native_canary.duration_seconds": {
-                        "unit": "seconds",
-                        "expected": {"maximum": 60.0},
-                        "degraded": {"minimum_exclusive": 60.0},
-                    },
-                    "hindsight.native_canary.duration_seconds": {
-                        "unit": "seconds",
-                        "expected": {"maximum": 180.0},
-                        "degraded": {"minimum_exclusive": 180.0},
-                    },
-                },
             },
         )
         self.assertEqual(
@@ -1007,7 +1147,8 @@ class SetupOperationPortTests(unittest.TestCase):
             + self.config.calls
             + self.applications.calls
             + self.application_targets.calls
-            + self.supervisor.calls,
+            + self.supervisor.calls
+            + self.verifier.calls,
             [],
         )
 
@@ -1035,7 +1176,8 @@ class SetupOperationPortTests(unittest.TestCase):
             + self.config.calls
             + self.applications.calls
             + self.application_targets.calls
-            + self.supervisor.calls,
+            + self.supervisor.calls
+            + self.verifier.calls,
             [],
         )
 
@@ -1105,30 +1247,24 @@ class SetupOperationPortTests(unittest.TestCase):
             result["application_target_readiness"],
             {"codex": "unverified", "hindsight": "unverified"},
         )
-        self.assertEqual(
-            self.runtime.calls[0],
-            (
-                "runtime.install",
-                {
-                    "runtime": "optiq",
-                    "channel": "tested",
-                    "expected_version": "0.3.3",
-                    "expected_lock_digest": "a" * 64,
-                    "confirmed": True,
-                },
-            ),
-        )
-        self.assertEqual(self.model.calls[0][0], "model.install")
+        runtime = self.runtime.calls[0]
+        self.assertIsInstance(runtime, InstallRuntime)
+        self.assertEqual(runtime.runtime, "optiq")
+        self.assertEqual(runtime.expected_version, "0.3.3")
+        self.assertEqual(runtime.expected_lock_digest, "a" * 64)
+        self.assertIsInstance(self.model.calls[0], InstallModel)
         self.assertEqual(
             self.applications.calls,
             [
-                (
-                    "application.install",
-                    {
-                        "application_targets": ("codex", "hindsight"),
-                        "offline": False,
-                        "confirmed": True,
-                    },
+                InstallApplications(
+                    step_fingerprint=next(
+                        step["fingerprint"]
+                        for step in result["steps"]
+                        if step["id"] == "application.install"
+                    ),
+                    application_targets=("codex", "hindsight"),
+                    preserve_outdated_codex=False,
+                    offline=False,
                 )
             ],
         )
@@ -1140,49 +1276,53 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(
             result["steps"][configure_index - 1]["id"], "application.install"
         )
-        self.assertEqual(self.model.calls[0][1]["revision"], MODEL_REVISION)
-        self.assertEqual(self.model.calls[0][1]["alias"], "qwen-optiq")
+        self.assertEqual(self.model.calls[0].revision, MODEL_REVISION)
+        self.assertEqual(self.model.calls[0].alias, "qwen-optiq")
         service = next(
-            call for call in self.config.calls if call[0] == "service.create"
+            call for call in self.config.calls if isinstance(call, ConfigureService)
         )
-        self.assertEqual(service[1]["resource"], "coding")
-        self.assertEqual(service[1]["runtime"], "optiq-0.3.3-tested")
-        self.assertEqual(service[1]["model_alias"], "qwen-optiq")
-        self.assertEqual(service[1]["route"], "engineering")
-        self.assertEqual(service[1]["activation"], "supervisor")
-        self.assertTrue(service[1]["pinned"])
+        self.assertEqual(service.service, "coding")
+        self.assertEqual(service.runtime, "optiq-0.3.3-tested")
+        self.assertEqual(service.model_alias, "qwen-optiq")
+        self.assertEqual(service.route, "engineering")
+        self.assertEqual(service.activation, "supervisor")
+        self.assertTrue(service.pinned)
         self.assertEqual(
-            service[1]["options"],
+            service.options,
             {
                 "kv_config": "kv_config.json",
                 "mtp": True,
                 "runtime": {"draft_tokens": 4},
             },
         )
-        self.assertEqual(self.supervisor.calls[0][0], "supervisor.start")
-        self.assertEqual(
-            self.supervisor.calls[-1], ("service.start", {"resource": "coding"})
-        )
+        self.assertIsInstance(self.supervisor.calls[0], ActivateSupervisor)
+        self.assertIsInstance(self.supervisor.calls[-1], StartService)
+        self.assertEqual(self.supervisor.calls[-1].resource, "coding")
         self.assertEqual(self.verifier.calls, [])
         self.assertEqual(
             [
-                call[1]["application_target"]
-                for call in self.application_targets.calls[-2:]
+                call.application_target
+                for call in self.application_targets.calls
+                if isinstance(call, TestApplicationTarget)
             ],
             ["codex", "hindsight"],
         )
         self.assertEqual(
             {
-                call[1]["service"]
+                call.service
                 for call in self.application_targets.calls
-                if call[0] == "application-target.configure"
+                if isinstance(call, ConfigureApplicationTarget)
             },
             {"coding"},
         )
-        self.assertEqual(len(self.evidence.items["setup"]), 11)
-        verification_evidence = self.evidence.items["setup"][-1].detail
-        self.assertNotIn("mastic ready", verification_evidence)
-        self.assertIn("evidence_sha256", verification_evidence)
+        self.assertEqual(len(self.evidence.items["setup"]), len(result["steps"]))
+        canary_evidence = next(
+            item.detail
+            for item in self.evidence.items["setup"]
+            if item.step_id == "application.canary.hindsight"
+        )
+        self.assertNotIn("mastic ready", canary_evidence)
+        self.assertIn("evidence_sha256", canary_evidence)
 
     def test_skipped_target_canary_completes_unverified_without_invocation(self):
         port = self.port()
@@ -1200,10 +1340,10 @@ class SetupOperationPortTests(unittest.TestCase):
         tests = [
             call
             for call in self.application_targets.calls
-            if call[0] == "application-target.test"
+            if isinstance(call, TestApplicationTarget)
         ]
         self.assertEqual(
-            [call[1]["application_target"] for call in tests],
+            [call.application_target for call in tests],
             ["codex"],
         )
         self.assertEqual(result["completion"], "complete")
@@ -1237,7 +1377,7 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         port = self.port(
             performance_profile=validated_performance_profile(
-                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+                plan_sha256=SELECTION_SHA256
             )
         )
         preview = port.preview({})
@@ -1300,7 +1440,7 @@ class SetupOperationPortTests(unittest.TestCase):
     def test_resumed_preview_rejects_malformed_terminal_canary_evidence(self) -> None:
         port = self.port(
             performance_profile=validated_performance_profile(
-                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+                plan_sha256=SELECTION_SHA256
             )
         )
         preview = port.preview({})
@@ -1341,9 +1481,9 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(repaired["readiness"], "ready")
         self.assertEqual(
             [
-                call[1]["application_target"]
+                call.application_target
                 for call in self.application_targets.calls
-                if call[0] == "application-target.test"
+                if isinstance(call, TestApplicationTarget)
             ],
             ["codex"],
         )
@@ -1351,7 +1491,7 @@ class SetupOperationPortTests(unittest.TestCase):
     def test_resumed_preview_validates_the_complete_canary_evidence_shape(self) -> None:
         port = self.port(
             performance_profile=validated_performance_profile(
-                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+                plan_sha256=SELECTION_SHA256
             )
         )
         preview = port.preview({})
@@ -1436,7 +1576,8 @@ class SetupOperationPortTests(unittest.TestCase):
         )
 
         self.assertEqual(repaired["readiness"], "ready")
-        self.assertEqual([call[0] for call in self.verifier.calls], ["verify.request"])
+        self.assertEqual(len(self.verifier.calls), 1)
+        self.assertIsInstance(self.verifier.calls[0], VerifyGatewayRequest)
 
     def test_resumed_preview_rejects_unauthorized_skipped_gateway_evidence(
         self,
@@ -1484,7 +1625,8 @@ class SetupOperationPortTests(unittest.TestCase):
         )
 
         self.assertEqual(repaired["readiness"], "ready")
-        self.assertEqual([call[0] for call in self.verifier.calls], ["verify.request"])
+        self.assertEqual(len(self.verifier.calls), 1)
+        self.assertIsInstance(self.verifier.calls[0], VerifyGatewayRequest)
 
     def test_resumed_preview_rejects_unauthorized_skipped_canary_evidence(
         self,
@@ -1531,9 +1673,9 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(repaired["completion"], "complete")
         self.assertEqual(
             [
-                call[1]["application_target"]
+                call.application_target
                 for call in self.application_targets.calls
-                if call[0] == "application-target.test"
+                if isinstance(call, TestApplicationTarget)
             ],
             ["codex"],
         )
@@ -1555,7 +1697,7 @@ class SetupOperationPortTests(unittest.TestCase):
         )
         port = self.port(
             performance_profile=validated_performance_profile(
-                plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
+                plan_sha256=SELECTION_SHA256
             )
         )
         preview = port.preview({"skip_canaries": ["hindsight"]})
@@ -1584,7 +1726,11 @@ class SetupOperationPortTests(unittest.TestCase):
             "alias": "coding",
             "revision": alternate_revision,
         }
-        port = self.port()
+        port = self.port(
+            performance_profile=validated_performance_profile(
+                plan_sha256=SELECTION_SHA256
+            )
+        )
         preview = port.preview({"selection": alternate})
 
         result = port.execute(
@@ -1629,9 +1775,7 @@ class SetupOperationPortTests(unittest.TestCase):
             self.port(performance_profile={})
 
     def test_validated_profile_binds_capacity_and_macos_range(self) -> None:
-        profile = validated_performance_profile(
-            plan_sha256="7316e2d9b7271228199254ed30b0d89f243d4ad821502fbbc074c5a9654f5f60"
-        )
+        profile = validated_performance_profile(plan_sha256=SELECTION_SHA256)
 
         exact = self.port(performance_profile=profile)
         exact_preview = exact.preview({})
@@ -1707,21 +1851,6 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertIn("finite nonnegative duration", str(raised.exception))
 
     def test_confirmed_preview_executes_each_selected_target_canary(self) -> None:
-        self.application_targets.results["application-target.test"] = (
-            lambda parameters: {
-                "profile": parameters["profile"],
-                "response": {
-                    "ok": True,
-                    "exact_contract": True,
-                    "duration_seconds": 12.0,
-                    "phases": canary_phases(parameters["application_target"]),
-                    "evidence_sha256": canary_evidence_sha256(
-                        parameters["application_target"]
-                    ),
-                    "contract": parameters["application_target"],
-                },
-            }
-        )
         port = self.port()
         preview = port.preview({})
 
@@ -1736,25 +1865,138 @@ class SetupOperationPortTests(unittest.TestCase):
         tests = [
             call
             for call in self.application_targets.calls
-            if call[0] == "application-target.test"
+            if isinstance(call, TestApplicationTarget)
         ]
         self.assertEqual(
-            tests,
+            [(call.application_target, call.profile) for call in tests],
             [
-                (
-                    "application-target.test",
-                    {"application_target": "codex", "profile": "coding"},
-                ),
-                (
-                    "application-target.test",
-                    {"application_target": "hindsight", "profile": "retain"},
-                ),
+                ("codex", "coding"),
+                ("hindsight", "retain"),
             ],
         )
         self.assertEqual(self.verifier.calls, [])
         self.assertEqual(
             list(result["results"])[-2:],
             ["application.canary.codex", "application.canary.hindsight"],
+        )
+
+    def test_rejected_service_start_interrupts_before_application_canaries(
+        self,
+    ) -> None:
+        self.supervisor.results["service.start"] = {
+            "operation_id": "op-service-start",
+            "run": {
+                "service": "coding",
+                "run_id": "run-rejected",
+                "state": "rejected",
+                "error": "runtime does not support a required launch option",
+            },
+            "supervisor_started": False,
+        }
+        port = self.port()
+        preview = port.preview({})
+
+        with self.assertRaises(ApplicationError) as raised:
+            port.execute(
+                "setup",
+                {
+                    "confirmed": True,
+                    "preview_fingerprint": preview["preview_fingerprint"],
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "setup_interrupted")
+        self.assertEqual(raised.exception.details["failed_step"], "service.start")
+        self.assertIn(
+            "runtime does not support a required launch option",
+            str(raised.exception),
+        )
+        self.assertEqual(
+            [
+                call
+                for call in self.application_targets.calls
+                if isinstance(call, TestApplicationTarget)
+            ],
+            [],
+        )
+
+    def test_rejected_service_start_evidence_is_retried_on_resume(self) -> None:
+        resolved = self.resolver.resolve(self.facts)
+        runtime_install = next(
+            step for step in resolved.steps if step.id == "runtime.install"
+        )
+        service_start = next(
+            step for step in resolved.steps if step.id == "service.start"
+        )
+        self.evidence.record(
+            "setup",
+            SetupEvidence.complete(
+                runtime_install,
+                json.dumps(
+                    {
+                        "result": {
+                            "installation_id": "optiq-0.3.3-tested",
+                            "runtime": "optiq",
+                            "version": "0.3.3",
+                            "provenance": "tested",
+                            "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
+                            "lock_sha256": "a" * 64,
+                        }
+                    }
+                ),
+            ),
+        )
+        self.evidence.record(
+            "setup",
+            SetupEvidence.complete(
+                service_start,
+                json.dumps(
+                    {
+                        "result": {
+                            "operation_id": "op-service-start",
+                            "run": {
+                                "service": "coding",
+                                "run_id": "run-rejected",
+                                "state": "rejected",
+                                "error": "runtime does not support a required launch option",
+                            },
+                            "supervisor_started": False,
+                        }
+                    }
+                ),
+            ),
+        )
+        port = self.port()
+        preview = port.preview({})
+
+        result = port.execute(
+            "setup",
+            {
+                "confirmed": True,
+                "preview_fingerprint": preview["preview_fingerprint"],
+            },
+        )
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(
+            [call for call in self.runtime.calls if isinstance(call, InstallRuntime)],
+            [
+                InstallRuntime(
+                    step_fingerprint=runtime_install.fingerprint,
+                    runtime="optiq",
+                    expected_version="0.3.3",
+                    expected_lock_digest="a" * 64,
+                )
+            ],
+        )
+        self.assertEqual(
+            [call for call in self.supervisor.calls if isinstance(call, StartService)],
+            [
+                StartService(
+                    step_fingerprint=service_start.fingerprint,
+                    resource="coding",
+                )
+            ],
         )
 
     def test_failed_target_canary_is_attributed_and_resumes_at_that_target(
@@ -1854,13 +2096,12 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "complete")
         self.assertEqual(
-            self.application_targets.calls,
             [
-                (
-                    "application-target.test",
-                    {"application_target": "hindsight", "profile": "retain"},
-                )
+                (call.application_target, call.profile)
+                for call in self.application_targets.calls
+                if isinstance(call, TestApplicationTarget)
             ],
+            [("hindsight", "retain")],
         )
 
     def test_editing_service_identity_or_options_changes_preview_identity(self):
@@ -2128,8 +2369,9 @@ class SetupOperationPortTests(unittest.TestCase):
 
     def test_explicit_revision_scoped_trust_is_applied_but_never_inferred(self):
         trusted = selection(trust=("remote_code",))
-        preview = self.port().preview({"selection": trusted})
-        self.port().execute(
+        port = self.port()
+        preview = port.preview({"selection": trusted})
+        port.execute(
             "setup",
             {
                 "selection": trusted,
@@ -2138,9 +2380,9 @@ class SetupOperationPortTests(unittest.TestCase):
             },
         )
 
-        trust = next(call for call in self.config.calls if call[0] == "model.trust")
-        self.assertEqual(trust[1]["accepted_risks"], ("remote_code",))
-        self.assertEqual(trust[1]["revision"], MODEL_REVISION)
+        trust = next(call for call in self.config.calls if isinstance(call, TrustModel))
+        self.assertEqual(trust.accepted_risks, ("remote_code",))
+        self.assertEqual(trust.revision, MODEL_REVISION)
 
     def test_missing_or_changed_preview_fingerprint_never_mutates(self):
         port = self.port()
@@ -2214,7 +2456,7 @@ class SetupOperationPortTests(unittest.TestCase):
         )
 
         self.assertEqual(len(self.runtime.calls), 1)
-        self.assertEqual(self.model.calls[0][0], "model.install")
+        self.assertIsInstance(self.model.calls[0], InstallModel)
 
     def test_resume_restores_dependency_material_for_the_exact_step_version(self):
         runtime_results = {
@@ -2225,6 +2467,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.3-py3.13-macos-arm64",
                 "lock_sha256": "a" * 64,
+                "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
             },
             "0.3.4": {
                 "installation_id": "optiq-0.3.4-tested",
@@ -2233,6 +2476,7 @@ class SetupOperationPortTests(unittest.TestCase):
                 "provenance": "tested",
                 "bundle_id": "optiq-0.3.4-py3.13-macos-arm64",
                 "lock_sha256": "c" * 64,
+                "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION,
             },
         }
         self.runtime.results["runtime.install"] = lambda parameters: runtime_results[
@@ -2269,11 +2513,28 @@ class SetupOperationPortTests(unittest.TestCase):
         )
 
         configured = next(
-            parameters
-            for operation, parameters in self.config.calls
-            if operation == "service.create"
+            operation
+            for operation in self.config.calls
+            if isinstance(operation, ConfigureService)
         )
-        self.assertEqual(configured["runtime"], "optiq-0.3.3-tested")
+        self.assertEqual(configured.runtime, "optiq-0.3.3-tested")
+
+        resumed_alternate = self.port()
+        alternate_preview = resumed_alternate.preview({"selection": alternate})
+        resumed_alternate.execute(
+            "setup",
+            {
+                "selection": alternate,
+                "confirmed": True,
+                "preview_fingerprint": alternate_preview["preview_fingerprint"],
+            },
+        )
+        configured_alternate = [
+            operation
+            for operation in self.config.calls
+            if isinstance(operation, ConfigureService)
+        ][-1]
+        self.assertEqual(configured_alternate.runtime, "optiq-0.3.4-tested")
         self.assertEqual(len(self.runtime.calls), 2)
 
     def test_resume_reexecutes_only_invalid_dependency_material(self) -> None:
@@ -2360,12 +2621,16 @@ class SetupOperationPortTests(unittest.TestCase):
                 )
 
                 self.assertEqual(repaired["completion"], "complete")
-                self.assertEqual([call[0] for call in owner.calls], [step_id])
+                self.assertEqual(len(owner.calls), 1)
+                self.assertIsInstance(
+                    owner.calls[0],
+                    InstallRuntime if step_id == "runtime.install" else InstallModel,
+                )
                 self.assertEqual(
                     [
                         call
                         for call in self.application_targets.calls
-                        if call[0] == "application-target.test"
+                        if isinstance(call, TestApplicationTarget)
                     ],
                     [],
                 )
@@ -2426,19 +2691,23 @@ class SetupOperationPortTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "complete")
         self.assertEqual(
-            [call[0] for call in self.supervisor.calls],
-            ["service.drain", "service.stop", "supervisor.unregister"],
+            [type(call) for call in self.supervisor.calls],
+            [DrainService, StopService, UnregisterSupervisor],
         )
         self.assertEqual(
-            [call[0] for call in self.application_targets.calls],
-            ["application-target.remove", "application-target.remove"],
+            [type(call) for call in self.application_targets.calls],
+            [RemoveApplicationTarget, RemoveApplicationTarget],
+        )
+        self.assertEqual(
+            [call.application_target for call in self.application_targets.calls],
+            ["codex", "hindsight"],
         )
         self.assertEqual(self.applications.calls, [])
         state_remove = next(
-            call for call in self.config.calls if call[0] == "state.remove"
+            call for call in self.config.calls if isinstance(call, RemoveState)
         )
-        self.assertEqual(state_remove[1]["paths"], self.inventory.product_owned_paths)
-        self.assertNotIn(self.inventory.shared_cache_paths[0], state_remove[1]["paths"])
+        self.assertEqual(state_remove.paths, self.inventory.product_owned_paths)
+        self.assertNotIn(self.inventory.shared_cache_paths[0], state_remove.paths)
 
     def test_setup_and_removal_use_their_distinct_coordination_boundaries(self):
         events = []
@@ -2487,11 +2756,7 @@ class SetupOperationPortTests(unittest.TestCase):
     def test_operational_evidence_adapter_round_trips_content_free_evidence(self):
         state = FakeOperationalState()
         evidence = OperationalSetupEvidenceStore(state)
-        port = self.port()
-        resolved = port.preview({})
         first = self.resolver.resolve(self.facts).steps[0]
-
-        from mastic.application.setup import SetupEvidence
 
         evidence.record(
             "setup", SetupEvidence.complete(first, json.dumps({"ok": True}))
@@ -2502,7 +2767,6 @@ class SetupOperationPortTests(unittest.TestCase):
         self.assertEqual(restored[0].fingerprint, first.fingerprint)
         self.assertEqual(state.rows[0]["kind"], "setup_evidence")
         self.assertNotIn("prompt", json.dumps(state.rows[0]))
-        self.assertEqual(len(resolved["preview_fingerprint"]), 64)
 
     def test_operational_evidence_adapter_records_failure_then_success(self):
         with tempfile.TemporaryDirectory() as directory:

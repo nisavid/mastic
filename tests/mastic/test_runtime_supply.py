@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import tempfile
 import unittest
 from hashlib import sha256
@@ -324,7 +326,7 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
 
             def run(argv, **options):
                 calls.append((tuple(argv), options))
-                if "importlib.metadata" in argv[-1]:
+                if "importlib.metadata.version" in argv[-1]:
                     return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
                 return SimpleNamespace(
                     returncode=0,
@@ -374,7 +376,66 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
             )
             self.assertTrue(all(options["shell"] is False for _, options in calls))
 
-    def test_probes_optiq_console_script_and_rejects_failed_help(self) -> None:
+    def test_probes_optiq_and_its_forwarded_server_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bin").mkdir()
+            (root / "bin/python").touch()
+            (root / "bin/optiq").touch()
+            calls = []
+
+            def run(argv, **options):
+                calls.append((tuple(argv), options))
+                if "importlib.metadata.version" in argv[-1]:
+                    return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
+                if argv[-1] == "optiq/cli.py":
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout="usage: optiq serve [--kv-config PATH] [--mtp]",
+                        stderr="",
+                    )
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "usage: mlx_lm.server [--model MODEL] [--host HOST] "
+                        "[--port PORT] [--prompt-cache-bytes BYTES]"
+                    ),
+                    stderr="",
+                )
+
+            definition = RuntimeCatalogue.load_builtin().definition("optiq")
+            result = SubprocessRuntimeProbe(run=run).probe(definition, root)
+
+            self.assertEqual(
+                result.launcher_relative,
+                ("bin/python", "-m", "optiq.cli", "serve"),
+            )
+            self.assertEqual(
+                result.supported_flags,
+                frozenset(
+                    {
+                        "--kv-config",
+                        "--mtp",
+                        "--model",
+                        "--host",
+                        "--port",
+                        "--prompt-cache-bytes",
+                    }
+                ),
+            )
+            self.assertEqual(
+                calls[1][0][:2],
+                (str(root.resolve() / "bin/python"), "-c"),
+            )
+            self.assertIn("metadata.distribution(sys.argv[1])", calls[1][0][2])
+            self.assertEqual(calls[1][0][-2:], ("mlx-optiq", "optiq/cli.py"))
+            self.assertEqual(calls[2][0][-2:], ("mlx-lm", "mlx_lm/server.py"))
+            self.assertFalse(
+                any(call[0] == str(root.resolve() / "bin/optiq") for call, _ in calls)
+            )
+            self.assertTrue(all(options["shell"] is False for _, options in calls))
+
+    def test_probes_optiq_console_and_rejects_failed_source_scan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "bin").mkdir()
@@ -387,7 +448,10 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
                 return SimpleNamespace(returncode=2, stdout="", stderr="broken")
 
             definition = RuntimeCatalogue.load_builtin().definition("optiq")
-            with self.assertRaisesRegex(ValueError, "help probe failed"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "installed source option probe failed",
+            ):
                 SubprocessRuntimeProbe(run=run).probe(definition, root)
 
     def test_help_capture_stops_the_process_at_the_byte_limit(self) -> None:
@@ -460,6 +524,88 @@ class SubprocessRuntimeProbeTests(unittest.TestCase):
 
 
 class RuntimeManagerTests(unittest.TestCase):
+    def test_published_console_runtime_launcher_survives_staging_relocation(
+        self,
+    ) -> None:
+        class RelocatingConsoleRunner:
+            def run(self, argv):
+                if argv[:2] == ("uv", "venv"):
+                    stage = Path(argv[-1])
+                    subprocess.run(
+                        ("uv", "venv", "--python", sys.executable, str(stage)),
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    return
+                python = Path(argv[argv.index("--python") + 1])
+                stage = python.parent.parent
+                console = stage / "bin/optiq"
+                console.write_text(
+                    f"#!{stage}/bin/python\n"
+                    "import sys\n"
+                    "print('relocated optiq ' + ' '.join(sys.argv[1:]))\n",
+                    encoding="utf-8",
+                )
+                console.chmod(0o700)
+                package = (
+                    stage
+                    / "lib"
+                    / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                    / "site-packages/optiq"
+                )
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("", encoding="utf-8")
+                (package / "cli.py").write_text(
+                    "import sys\n"
+                    "if __name__ == '__main__':\n"
+                    "    print('relocated optiq ' + ' '.join(sys.argv[1:]))\n",
+                    encoding="utf-8",
+                )
+
+        def probe_run(argv, **_options):
+            if "importlib.metadata.version" in argv[-1]:
+                return SimpleNamespace(returncode=0, stdout="0.3.3\n", stderr="")
+            if argv[-1] == "optiq/cli.py":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="usage: optiq serve [--model MODEL]",
+                    stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout="usage: mlx_lm.server [--host HOST] [--port PORT]",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = RuntimeManager(
+                RuntimeCatalogue.load_builtin(),
+                runner=RelocatingConsoleRunner(),
+                probe=SubprocessRuntimeProbe(run=probe_run),
+                staging_token=lambda: "relocated",
+            )
+
+            installation = manager.install_custom(
+                "optiq", "0.3.3", python="3.13", installation_root=root
+            )
+
+            final = root.resolve() / "optiq-0.3.3-custom"
+            self.assertEqual(
+                installation.launcher,
+                (str(final / "bin/python"), "-m", "optiq.cli", "serve"),
+            )
+            completed = subprocess.run(
+                installation.launcher,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "relocated optiq serve\n")
+
     def test_interrupted_install_removes_its_journaled_stage(self) -> None:
         class InterruptingRunner:
             def run(self, argv):

@@ -22,6 +22,7 @@ from mastic.infrastructure.host_integration import (
 )
 from mastic.infrastructure.local_backend import (
     ApplicationDiagnosticPort,
+    LocalConfigurationMutations,
     LocalOperationBackend,
 )
 from mastic.infrastructure.paths_v1 import MasticPaths
@@ -59,6 +60,7 @@ def compose_application(
     setup: OperationPort,
     applications: ApplicationPort,
     application_targets: OperationPort,
+    configuration_mutations: LocalConfigurationMutations | None = None,
     config_store: ConfigStore[MasticConfig] | None = None,
     state_store: OperationalStateStore | None = None,
     runtime_catalogue: RuntimeCatalogue | None = None,
@@ -78,6 +80,8 @@ def compose_application(
     state = (
         OperationalStateStore(paths.state_db) if state_store is None else state_store
     )
+    if configuration_mutations is not None:
+        configuration_mutations.validate_stores(config, state)
     runtimes = (
         RuntimeCatalogue.load_builtin()
         if runtime_catalogue is None
@@ -98,6 +102,7 @@ def compose_application(
         applications=applications,
         application_diagnostics=applications,
         application_targets=application_targets,
+        configuration_mutations=configuration_mutations,
         config_path=paths.config_file,
         gateway_credential_path=paths.gateway_credential,
         model_intelligence=model_intelligence,

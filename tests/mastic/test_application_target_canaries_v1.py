@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from mastic.application.application_targets import (
+    application_canary_evidence_sha256,
+)
 from mastic.application.config_schema import ApplicationTargetSettings
 from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_canaries import (
     NativeApplicationTargetCanary,
     _bounded_file_command,
-    application_canary_evidence_sha256,
 )
 from mastic.infrastructure.application_target_integrations import (
     ApplicationTargetConfiguration,
@@ -84,6 +86,7 @@ class NativeApplicationTargetCanaryTests(unittest.TestCase):
         self.assertNotIn("--ignore-user-config", command)
         self.assertNotIn("--model", command)
         self.assertEqual(kwargs["env"]["CODEX_HOME"], str(home / ".codex"))
+        self.assertEqual(kwargs["env"]["PATH"], f"/tools{os.pathsep}{os.defpath}")
         self.assertNotEqual(kwargs["env"]["HOME"], str(home))
         self.assertNotIn("MASTIC_UNRELATED_SECRET", kwargs["env"])
         self.assertNotIn("PYTHONPATH", kwargs["env"])

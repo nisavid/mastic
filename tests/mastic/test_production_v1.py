@@ -8,6 +8,8 @@ import plistlib
 import shutil
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -19,7 +21,17 @@ from unittest.mock import patch
 from mastic.application.config_schema import validate_config
 from mastic.application.catalogue import OperationKind
 from mastic.application.dispatch import ApplicationError, OperationRequest
+from mastic.application.setup_operation import (
+    ConfigureApplicationTarget,
+    InstallApplications,
+    InstallModel,
+    InstallRuntime,
+    RemoveApplications,
+    RemoveApplicationTarget,
+    TestApplicationTarget,
+)
 from mastic.application.setup import (
+    RUNTIME_OBSERVATION_PROBE_VERSION,
     SetupEvidence,
     SetupIntent,
     SetupPreflight,
@@ -37,6 +49,12 @@ from mastic.infrastructure.production import (
     _LocalSupervisorOwner,
     _LocalModelSupply,
     _SetupSupervisorOwner,
+    _SetupDesiredState,
+    _SetupApplicationConfiguration,
+    _SetupExternalApplicationLifecycle,
+    _SetupModelSupply,
+    _SetupNativeCanaries,
+    _SetupRuntimeSupply,
     _composition_transition,
     _sampling_matches_service_model,
     _removal_transition,
@@ -58,11 +76,98 @@ from mastic.infrastructure.production_host import (
     resolve_uv,
     sampling_profile,
 )
+from mastic.infrastructure.runtime_supply import (
+    RuntimeCatalogue,
+    RuntimeProbeResult,
+    SubprocessRuntimeProbe,
+    TestedRuntimeBundle,
+)
 from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.setup_port import (
     OperationalSetupEvidenceStore,
     OperationalSetupPlanStore,
 )
+
+
+def _create_stale_relocated_optiq_fixture(
+    paths: MasticPaths, bundle: TestedRuntimeBundle
+) -> tuple[Path, Path, Path]:
+    installation = (paths.runtime_dir / bundle.bundle_id).resolve()
+    subprocess.run(
+        ("uv", "venv", "--python", sys.executable, str(installation)),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    python = installation / "bin/python"
+    site_packages = Path(
+        subprocess.check_output(
+            (
+                str(python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+            ),
+            text=True,
+        ).strip()
+    )
+    optiq = site_packages / "optiq"
+    optiq.mkdir()
+    (optiq / "__init__.py").write_text("", encoding="utf-8")
+    (optiq / "cli.py").write_text(
+        "import sys\n"
+        "OPTIONS = '--model --host --port --kv-config --mtp'\n"
+        "if __name__ == '__main__':\n"
+        "    print('relocated optiq ' + ' '.join(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    optiq_metadata = site_packages / f"mlx_optiq-{bundle.version}.dist-info"
+    optiq_metadata.mkdir()
+    (optiq_metadata / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: mlx-optiq\nVersion: {bundle.version}\n",
+        encoding="utf-8",
+    )
+    mlx_lm = site_packages / "mlx_lm"
+    mlx_lm.mkdir()
+    (mlx_lm / "__init__.py").write_text("", encoding="utf-8")
+    (mlx_lm / "server.py").write_text(
+        "OPTIONS = '--model --host --port --prompt-cache-bytes'\n",
+        encoding="utf-8",
+    )
+    mlx_lm_metadata = site_packages / "mlx_lm-0.31.0.dist-info"
+    mlx_lm_metadata.mkdir()
+    (mlx_lm_metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: mlx-lm\nVersion: 0.31.0\n",
+        encoding="utf-8",
+    )
+    stale_stage_python = (
+        paths.runtime_dir / f".{bundle.bundle_id}.staging-removed/bin/python"
+    )
+    stale_launcher = installation / "bin/optiq"
+    stale_launcher.write_text(
+        f"#!{stale_stage_python}\nprint('unreachable')\n",
+        encoding="utf-8",
+    )
+    stale_launcher.chmod(0o700)
+    marker = installation / ".mastic-runtime-owner.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "bundle_id": bundle.bundle_id,
+                "capabilities": ["host", "model", "port"],
+                "capability_probe_version": RUNTIME_OBSERVATION_PROBE_VERSION - 1,
+                "installation_id": bundle.bundle_id,
+                "launcher": [str(stale_launcher), "serve"],
+                "owner": "mastic",
+                "provenance": "tested",
+                "root": str(installation),
+                "runtime": "optiq",
+                "schema_version": 3,
+                "version": bundle.version,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return python, stale_launcher, marker
 
 
 class _Port:
@@ -87,9 +192,13 @@ class _RequestDispatcher:
 class _Activator:
     def __init__(self) -> None:
         self.calls = 0
+        self.recycle_calls = 0
 
     def activate(self) -> None:
         self.calls += 1
+
+    def recycle(self) -> None:
+        self.recycle_calls += 1
 
 
 class _LaunchdStatus:
@@ -591,6 +700,106 @@ route = "coding"
             self.assertTrue(target_lock_started.is_set())
             self.assertFalse(profile.exists())
 
+    def test_codex_canary_uses_vite_plus_owner_runtime_through_public_port(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            store = ConfigStore(paths.config_file, validate_config)
+            store.import_text(
+                """\
+schema_version = 1
+
+[gateway]
+host = "127.0.0.1"
+port = 8766
+
+[runtimes."optiq@0.3.3"]
+definition = "optiq"
+version = "0.3.3"
+provenance = "tested"
+root = "/tmp/optiq"
+launcher = ["/tmp/optiq/bin/optiq", "serve"]
+capabilities = ["model"]
+
+[models.qwen]
+repository = "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit"
+revision = "70a3aa32c7feef511182bf16aa332f37e8d82014"
+
+[aliases.qwen]
+installation = "qwen"
+
+[services.coding]
+model_alias = "qwen"
+runtime = "optiq@0.3.3"
+route = "coding"
+"""
+            )
+            runtime_bin = root / "vite-plus" / "js_runtime" / "node" / "24.18.0" / "bin"
+            runtime_bin.mkdir(parents=True)
+            codex = runtime_bin / "codex"
+            codex.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            codex.chmod(0o700)
+            node = runtime_bin / "node"
+            node.write_text(
+                "#!/bin/zsh\n"
+                "set -eu\n"
+                "shift\n"
+                "if [[ ${1:-} == debug && ${2:-} == models && ${3:-} == --bundled ]]; then\n"
+                '  print -r -- \'{"models":[{"slug":"gpt-5.4","base_instructions":"test","context_window":131072}]}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "if [[ ${1:-} == debug && ${2:-} == models ]]; then\n"
+                '  print -r -- \'{"models":[{"slug":"coding","context_window":131072}]}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "while (( $# > 0 )); do\n"
+                "  if [[ $1 == --output-last-message ]]; then\n"
+                "    print -r -- 'mastic gateway contract ok' > $2\n"
+                "    exit 0\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            node.chmod(0o700)
+            shim = root / "vite-plus" / "bin" / "codex"
+            shim.parent.mkdir(parents=True)
+            shim.symlink_to(codex)
+
+            with (
+                patch(
+                    "mastic.infrastructure.production_host.shutil.which",
+                    return_value=str(shim),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"PATH": os.pathsep.join((str(runtime_bin), os.defpath))},
+                ),
+            ):
+                target = application_target_port(home, paths, store)
+                target.execute(
+                    "application-target.configure",
+                    {
+                        "application_target": "codex",
+                        "service": "coding",
+                        "context_window": 131072,
+                    },
+                )
+                result = target.execute(
+                    "application-target.test",
+                    {"application_target": "codex", "profile": "coding"},
+                )
+
+            self.assertTrue(result["response"]["exact_contract"])
+
     def test_setup_remote_owner_activates_only_at_execution_boundary(self) -> None:
         activator = _Activator()
         remote = _Port({"state": "complete"})
@@ -602,16 +811,230 @@ route = "coding"
         self.assertEqual(activator.calls, 1)
         self.assertEqual(remote.calls[0][0], "runtime.install")
 
-    def test_setup_supervisor_activation_is_visible_and_idempotently_forwarded(
+    def test_setup_runtime_supply_forwards_the_exact_physical_request(self) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupRuntimeSupply(owner).install_runtime(
+            InstallRuntime(
+                step_fingerprint="f" * 64,
+                runtime="optiq",
+                expected_version="0.3.3",
+                expected_lock_digest="a" * 64,
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "runtime.install",
+                    {
+                        "runtime": "optiq",
+                        "channel": "tested",
+                        "expected_version": "0.3.3",
+                        "expected_lock_digest": "a" * 64,
+                        "confirmed": True,
+                    },
+                )
+            ],
+        )
+
+    def test_setup_model_supply_forwards_the_exact_physical_request(self) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupModelSupply(owner).install_model(
+            InstallModel(
+                step_fingerprint="f" * 64,
+                repository="acme/model",
+                revision="a" * 40,
+                alias="coding",
+                offline=True,
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "model.install",
+                    {
+                        "repository": "acme/model",
+                        "revision": "a" * 40,
+                        "alias": "coding",
+                        "offline": True,
+                        "confirmed": True,
+                    },
+                )
+            ],
+        )
+
+    def test_setup_application_lifecycle_forwards_codex_preservation_only_when_set(
         self,
     ) -> None:
+        owner = _Port({"state": "complete"})
+        lifecycle = _SetupExternalApplicationLifecycle(owner)
+
+        lifecycle.install_applications(
+            InstallApplications(
+                step_fingerprint="f" * 64,
+                application_targets=("codex", "hindsight"),
+                preserve_outdated_codex=False,
+                offline=False,
+            )
+        )
+        lifecycle.install_applications(
+            InstallApplications(
+                step_fingerprint="e" * 64,
+                application_targets=("codex",),
+                preserve_outdated_codex=True,
+                offline=True,
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "application.install",
+                    {
+                        "application_targets": ("codex", "hindsight"),
+                        "offline": False,
+                        "confirmed": True,
+                    },
+                ),
+                (
+                    "application.install",
+                    {
+                        "application_targets": ("codex",),
+                        "preserve_outdated_codex": True,
+                        "offline": True,
+                        "confirmed": True,
+                    },
+                ),
+            ],
+        )
+
+    def test_setup_application_lifecycle_forwards_the_exact_removal_request(
+        self,
+    ) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupExternalApplicationLifecycle(owner).remove_applications(
+            RemoveApplications(
+                step_fingerprint="f" * 64,
+                applications=("codex", "hindsight"),
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "application.remove",
+                    {
+                        "applications": ("codex", "hindsight"),
+                        "confirmed": True,
+                    },
+                )
+            ],
+        )
+
+    def test_setup_application_configuration_overrides_reserved_options(self) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupApplicationConfiguration(owner).configure_application_target(
+            ConfigureApplicationTarget(
+                step_fingerprint="f" * 64,
+                application_target="codex",
+                service="coding",
+                endpoint="http://127.0.0.1:8766/v1",
+                context_window=32_768,
+                options={
+                    "application_target": "wrong",
+                    "service": "wrong",
+                    "endpoint": "wrong",
+                    "context_window": 1,
+                    "confirmed": False,
+                    "profile": "default",
+                },
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "application-target.configure",
+                    {
+                        "application_target": "codex",
+                        "service": "coding",
+                        "endpoint": "http://127.0.0.1:8766/v1",
+                        "context_window": 32_768,
+                        "confirmed": True,
+                        "profile": "default",
+                    },
+                )
+            ],
+        )
+
+    def test_setup_application_configuration_forwards_exact_target_removal(
+        self,
+    ) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupApplicationConfiguration(owner).remove_application_target(
+            RemoveApplicationTarget(
+                step_fingerprint="f" * 64,
+                application_target="hindsight",
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "application-target.remove",
+                    {
+                        "application_target": "hindsight",
+                        "confirmed": True,
+                    },
+                )
+            ],
+        )
+
+    def test_setup_native_canary_forwards_the_exact_physical_request(self) -> None:
+        owner = _Port({"state": "complete"})
+
+        _SetupNativeCanaries(owner).test_application_target(
+            TestApplicationTarget(
+                step_fingerprint="f" * 64,
+                application_target="hindsight",
+                profile="memory",
+            )
+        )
+
+        self.assertEqual(
+            owner.calls,
+            [
+                (
+                    "application-target.test",
+                    {
+                        "application_target": "hindsight",
+                        "profile": "memory",
+                    },
+                )
+            ],
+        )
+
+    def test_setup_recycles_a_stopped_supervisor_before_loading_new_code(self) -> None:
         activator = _Activator()
         remote = _Port({"state": "running"})
 
         owner = _SetupSupervisorOwner(remote, _Launchd(running=False), activator)
         result = owner.execute("supervisor.start", {})
 
-        self.assertEqual(activator.calls, 1)
+        self.assertEqual(activator.recycle_calls, 1)
+        self.assertEqual(activator.calls, 0)
         self.assertEqual(remote.calls, [("supervisor.start", {})])
         self.assertEqual(result["state"], "running")
 
@@ -623,8 +1046,9 @@ route = "coding"
         owner = _SetupSupervisorOwner(remote, launchd, activator)
         result = owner.execute("supervisor.start", {})
 
-        self.assertEqual(launchd.bootout_calls, 1)
-        self.assertEqual(activator.calls, 1)
+        self.assertEqual(launchd.bootout_calls, 0)
+        self.assertEqual(activator.recycle_calls, 1)
+        self.assertEqual(activator.calls, 0)
         self.assertEqual(remote.calls, [("supervisor.start", {})])
         self.assertEqual(result["state"], "running")
 
@@ -967,6 +1391,216 @@ route = "coding"
             self.assertEqual(credential["path"], str(paths.gateway_credential))
             self.assertEqual(set(credential), {"scheme", "path", "instructions"})
 
+    def test_confirmed_setup_crosses_nested_configuration_before_activation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            facts = SetupPreflight(
+                "darwin",
+                "arm64",
+                memory_bytes=48 * 1024**3,
+                disk_free_bytes=100 * 1024**3,
+                online=True,
+                os_version="26.5",
+            )
+            activation_boundary = RuntimeError(
+                "masticd did not close its private control socket before replacement"
+            )
+            configuration_calls = []
+            configure = _SetupDesiredState.configure_gateway
+
+            def execute_configuration(owner, operation):
+                configuration_calls.append(operation)
+                return configure(owner, operation)
+
+            with (
+                patch(
+                    "mastic.infrastructure.production.SystemSetupPreflight",
+                    return_value=lambda _offline: facts,
+                ),
+                patch.object(
+                    _SetupDesiredState,
+                    "configure_gateway",
+                    autospec=True,
+                    side_effect=execute_configuration,
+                ),
+                patch.object(
+                    _SetupSupervisorOwner,
+                    "execute",
+                    autospec=True,
+                    side_effect=activation_boundary,
+                ),
+            ):
+                production = compose_local(
+                    paths=paths,
+                    home=home,
+                    executable=Path("/usr/bin/python3"),
+                )
+                dispatcher = production.application.dispatcher
+                preview = dispatcher.preview(
+                    OperationRequest("setup", {"profile": "recommended"})
+                )
+                gateway_step = next(
+                    step
+                    for step in preview.value["preview"][0]["steps"]
+                    if step["id"] == "gateway.configure"
+                )
+
+                evidence = OperationalSetupEvidenceStore(
+                    production.application.state_store
+                )
+                self.assertFalse(production.application.config_store.exists)
+                self.assertEqual(evidence.load("setup"), ())
+
+                for _ in range(2):
+                    with self.assertRaises(ApplicationError) as raised:
+                        dispatcher.execute(
+                            OperationRequest(
+                                "setup",
+                                {
+                                    "profile": "recommended",
+                                    "confirmed": True,
+                                    "preview_fingerprint": preview.value[
+                                        "preview_fingerprint"
+                                    ],
+                                },
+                            )
+                        )
+                    self.assertEqual(raised.exception.code, "setup_interrupted")
+                    self.assertEqual(
+                        raised.exception.details["failed_step"],
+                        "supervisor.activate",
+                    )
+                    self.assertEqual(
+                        raised.exception.next_actions,
+                        (
+                            "rerun the same exact setup preview to resume",
+                            "mastic operation list",
+                        ),
+                    )
+                    failed = next(
+                        item
+                        for item in evidence.load("setup")
+                        if item.step_id == "supervisor.activate"
+                        and item.state is StepState.FAILED
+                    )
+                    self.assertIn("did not close", failed.detail)
+                    preview = dispatcher.preview(
+                        OperationRequest("setup", {"profile": "recommended"})
+                    )
+
+            self.assertEqual(
+                [
+                    item.step_id
+                    for item in evidence.load("setup")
+                    if item.step_id == "gateway.configure"
+                ],
+                ["gateway.configure"],
+            )
+            self.assertEqual(len(configuration_calls), 1)
+            self.assertEqual(
+                configuration_calls[0].step_fingerprint,
+                gateway_step["fingerprint"],
+            )
+            self.assertTrue(production.application.config_store.exists)
+
+    def test_confirmed_removal_deletes_operational_state_last_without_recreation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            events = []
+            original_remove = OwnedStateRemover.execute
+            launchd = _Launchd(running=False)
+            self.assertTrue(launchd.status().registered)
+
+            def execute_supervisor(_owner, operation, _parameters):
+                events.append(operation)
+                return {"state": "complete"}
+
+            def remove_state(owner, operation, parameters):
+                events.append(operation)
+                return original_remove(owner, operation, parameters)
+
+            with (
+                patch.object(
+                    _SetupSupervisorOwner,
+                    "execute",
+                    autospec=True,
+                    side_effect=execute_supervisor,
+                ),
+                patch.object(
+                    OwnedStateRemover,
+                    "execute",
+                    autospec=True,
+                    side_effect=remove_state,
+                ),
+                patch(
+                    "mastic.infrastructure.production.make_launchd",
+                    return_value=launchd,
+                ),
+            ):
+                production = compose_local(
+                    paths=paths,
+                    home=home,
+                    executable=Path("/usr/bin/python3"),
+                )
+                production.application.state_store.put_snapshot(
+                    {
+                        "kind": "service_run",
+                        "id": "coding/run-1",
+                        "version": 1,
+                        "service": "coding",
+                        "run_id": "run-1",
+                        "state": "ready",
+                    }
+                )
+                dispatcher = production.application.dispatcher
+                preview = dispatcher.preview(OperationRequest("remove"))
+
+                self.assertEqual(events, [])
+                self.assertTrue(paths.state_db.exists())
+                self.assertIn(
+                    "supervisor.unregister",
+                    {step["id"] for step in preview.value["preview"][0]["steps"]},
+                )
+
+                result = dispatcher.execute(
+                    OperationRequest(
+                        "remove",
+                        {
+                            "confirmed": True,
+                            "preview_fingerprint": preview.value["preview_fingerprint"],
+                        },
+                    )
+                )
+
+            self.assertTrue(result.value["resource"]["complete"])
+            self.assertEqual(
+                events,
+                [
+                    "service.drain",
+                    "service.stop",
+                    "supervisor.unregister",
+                    "state.remove",
+                ],
+            )
+            self.assertFalse(paths.config_dir.exists())
+            self.assertFalse(paths.state_dir.exists())
+            self.assertFalse(paths.data_dir.exists())
+            self.assertFalse(paths.log_dir.exists())
+
     def test_local_status_reconstructs_setup_outcome_after_fresh_composition(
         self,
     ) -> None:
@@ -1042,6 +1676,289 @@ route = "coding"
             self.assertEqual(
                 stat.S_IMODE(paths.gateway_credential.stat().st_mode), 0o600
             )
+
+    def test_daemon_runtime_install_migrates_stale_capability_observation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            bundle = next(
+                item
+                for item in RuntimeCatalogue.load_builtin().tested_bundles
+                if item.runtime == "optiq"
+            )
+            installation = paths.runtime_dir / bundle.bundle_id
+            (installation / "bin").mkdir(parents=True)
+            installation = installation.resolve()
+            python = installation / "bin/python"
+            launcher = installation / "bin/optiq"
+            python.touch()
+            launcher.touch()
+            marker = installation / ".mastic-runtime-owner.json"
+            marker.write_text(
+                json.dumps(
+                    {
+                        "bundle_id": bundle.bundle_id,
+                        "capabilities": ["host", "model", "port"],
+                        "installation_id": bundle.bundle_id,
+                        "launcher": [str(launcher), "serve"],
+                        "owner": "mastic",
+                        "provenance": "tested",
+                        "root": str(installation),
+                        "runtime": "optiq",
+                        "schema_version": 3,
+                        "version": bundle.version,
+                        "capability_probe_version": (
+                            RUNTIME_OBSERVATION_PROBE_VERSION - 1
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            probe = RuntimeProbeResult(
+                version=bundle.version,
+                launcher_relative=("bin/python", "-m", "optiq.cli", "serve"),
+                supported_flags=frozenset(
+                    {"--host", "--model", "--port", "--prompt-cache-bytes"}
+                ),
+            )
+
+            with patch.object(SubprocessRuntimeProbe, "probe", return_value=probe):
+                daemon = compose_daemon(paths=paths, home=root)
+                router = daemon._router_factory(lambda: None)
+                result = router.execute(
+                    "runtime.install",
+                    {
+                        "runtime": "optiq",
+                        "channel": "tested",
+                        "expected_version": bundle.version,
+                        "expected_lock_digest": bundle.lock_sha256,
+                        "confirmed": True,
+                    },
+                )
+
+            self.assertEqual(
+                result["capability_probe_version"],
+                RUNTIME_OBSERVATION_PROBE_VERSION,
+            )
+            self.assertEqual(
+                result["launcher"],
+                [str(python), "-m", "optiq.cli", "serve"],
+            )
+            self.assertIn("prompt_cache_bytes", result["capabilities"])
+            stored_marker = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(stored_marker["schema_version"], 3)
+            self.assertEqual(
+                stored_marker["capability_probe_version"],
+                RUNTIME_OBSERVATION_PROBE_VERSION,
+            )
+            self.assertEqual(stored_marker["launcher"], result["launcher"])
+            configured = ConfigStore(paths.config_file, validate_config).load().value
+            self.assertIn(
+                "prompt_cache_bytes",
+                configured.runtimes[bundle.bundle_id].capabilities,
+            )
+            self.assertEqual(
+                configured.runtimes[bundle.bundle_id].launcher,
+                tuple(result["launcher"]),
+            )
+
+    def test_same_preview_resume_reprobes_and_executes_relocated_runtime(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            paths = MasticPaths(
+                root / "config", root / "state", root / "data", root / "logs"
+            )
+            paths.prepare()
+            facts = SetupPreflight(
+                "darwin",
+                "arm64",
+                memory_bytes=48 * 1024**3,
+                disk_free_bytes=100 * 1024**3,
+                online=True,
+                os_version="26.5",
+            )
+            bundle = next(
+                item
+                for item in RuntimeCatalogue.load_builtin().tested_bundles
+                if item.runtime == "optiq"
+            )
+            python, stale_launcher, marker = _create_stale_relocated_optiq_fixture(
+                paths, bundle
+            )
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run((str(stale_launcher), "serve"), check=False)
+
+            daemon = compose_daemon(paths=paths, home=home)
+            router = daemon._router_factory(lambda: None)
+            runtime_calls = []
+
+            def install_runtime(_owner, operation):
+                runtime_calls.append(operation)
+                return router.execute(
+                    "runtime.install",
+                    {
+                        "runtime": operation.runtime,
+                        "channel": "tested",
+                        "expected_version": operation.expected_version,
+                        "expected_lock_digest": operation.expected_lock_digest,
+                        "confirmed": True,
+                    },
+                )
+
+            def stop_at_service_start(_owner, operation, _parameters):
+                self.assertEqual(operation, "service.start")
+                raise RuntimeError("stop after resumed runtime migration")
+
+            with (
+                patch(
+                    "mastic.infrastructure.production.SystemSetupPreflight",
+                    return_value=lambda _offline: facts,
+                ),
+                patch.object(
+                    _SetupRuntimeSupply,
+                    "install_runtime",
+                    autospec=True,
+                    side_effect=install_runtime,
+                ),
+                patch.object(
+                    _SetupModelSupply,
+                    "install_model",
+                    autospec=True,
+                ) as model_install,
+                patch.object(
+                    _SetupDesiredState,
+                    "configure_service",
+                    autospec=True,
+                ) as service_configure,
+                patch.object(
+                    _SetupExternalApplicationLifecycle,
+                    "install_applications",
+                    autospec=True,
+                ) as application_install,
+                patch.object(
+                    _SetupApplicationConfiguration,
+                    "configure_application_target",
+                    autospec=True,
+                ) as application_configure,
+                patch.object(
+                    _SetupSupervisorOwner,
+                    "execute",
+                    autospec=True,
+                    side_effect=stop_at_service_start,
+                ),
+            ):
+                production = compose_local(
+                    paths=paths,
+                    home=home,
+                    executable=Path("/usr/bin/python3"),
+                )
+                dispatcher = production.application.dispatcher
+                reviewed = dispatcher.preview(
+                    OperationRequest("setup", {"profile": "recommended"})
+                )
+                setup_preview = reviewed.value["preview"][0]
+                steps = {step["id"]: step for step in setup_preview["steps"]}
+                selection = setup_preview["selection"]
+                evidence = OperationalSetupEvidenceStore(
+                    production.application.state_store
+                )
+                completed_results = {
+                    "preflight": {},
+                    "gateway.configure": {},
+                    "supervisor.activate": {},
+                    "runtime.install": {
+                        "installation_id": bundle.bundle_id,
+                        "runtime": "optiq",
+                        "version": bundle.version,
+                        "provenance": "tested",
+                        "bundle_id": bundle.bundle_id,
+                        "lock_sha256": bundle.lock_sha256,
+                        "capability_probe_version": (
+                            RUNTIME_OBSERVATION_PROBE_VERSION - 1
+                        ),
+                    },
+                    "model.install": {
+                        "installation_id": (
+                            f"{selection['model_repository']}@"
+                            f"{selection['model_revision']}"
+                        ),
+                        "revision": selection["model_revision"],
+                    },
+                    "service.configure": {},
+                    "application.install": {},
+                    "application-target.configure": {},
+                }
+                for step_id, result in completed_results.items():
+                    evidence.record(
+                        "setup",
+                        SetupEvidence(
+                            step_id,
+                            steps[step_id]["fingerprint"],
+                            StepState.COMPLETE,
+                            json.dumps({"result": result}),
+                        ),
+                    )
+
+                resumed = dispatcher.preview(
+                    OperationRequest("setup", {"profile": "recommended"})
+                )
+                self.assertEqual(
+                    resumed.value["preview_fingerprint"],
+                    reviewed.value["preview_fingerprint"],
+                )
+                with self.assertRaises(ApplicationError) as raised:
+                    dispatcher.execute(
+                        OperationRequest(
+                            "setup",
+                            {
+                                "profile": "recommended",
+                                "confirmed": True,
+                                "preview_fingerprint": reviewed.value[
+                                    "preview_fingerprint"
+                                ],
+                            },
+                        )
+                    )
+
+            self.assertEqual(raised.exception.code, "setup_interrupted")
+            self.assertEqual(raised.exception.details["failed_step"], "service.start")
+            self.assertEqual(len(runtime_calls), 1)
+            model_install.assert_not_called()
+            service_configure.assert_not_called()
+            application_install.assert_not_called()
+            application_configure.assert_not_called()
+            stored_marker = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(
+                stored_marker["capability_probe_version"],
+                RUNTIME_OBSERVATION_PROBE_VERSION,
+            )
+            self.assertEqual(
+                stored_marker["launcher"],
+                [str(python), "-m", "optiq.cli", "serve"],
+            )
+            configured = ConfigStore(paths.config_file, validate_config).load().value
+            self.assertEqual(
+                configured.runtimes[bundle.bundle_id].launcher,
+                tuple(stored_marker["launcher"]),
+            )
+            completed = subprocess.run(
+                tuple(stored_marker["launcher"]),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "relocated optiq serve\n")
 
     def test_daemon_composition_waits_for_removal_before_recreating_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

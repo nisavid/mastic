@@ -29,6 +29,7 @@ _HINDSIGHT_API_ENTRY_POINTS = {
     "hindsight-local-mcp": "hindsight_api.mcp_local:main",
     "hindsight-worker": "hindsight_api.worker.main:main",
 }
+_MANAGED_API_DIGEST_SOURCE = "managed-tool-target"
 _OFFICIAL_DIGESTS = {
     "codex-cli": "88e72ac8bd30815f7d18e62dac333dc20ce3ad1cba94be1649a1977dd9bfdbb8",
     "hindsight-cli": "defe5d281f79098bbda54ab7c51e8c47575d15e33cdfffb1713ac48e182192df",
@@ -290,8 +291,11 @@ class ApplicationSupply:
                     installed["hindsight"] = {
                         **installed["hindsight"],
                         "api_state": "complete",
+                        "api_bin_sha256_source": _MANAGED_API_DIGEST_SOURCE,
                         "api_bin_sha256": {
-                            name: _required_regular_digest(path)
+                            name: self._required_managed_api_launcher_target_digest(
+                                name, path
+                            )
                             for name, path in api_bins.items()
                         },
                     }
@@ -321,8 +325,11 @@ class ApplicationSupply:
                     "api_bin_paths": {
                         name: str(path) for name, path in api_bins.items()
                     },
+                    "api_bin_sha256_source": _MANAGED_API_DIGEST_SOURCE,
                     "api_bin_sha256": {
-                        name: _required_regular_digest(path)
+                        name: self._required_managed_api_launcher_target_digest(
+                            name, path
+                        )
                         for name, path in api_bins.items()
                     },
                 }
@@ -501,10 +508,16 @@ class ApplicationSupply:
         root = Path(str(value.get("api_tool_root", "")))
         raw_paths = value.get("api_bin_paths")
         raw_digests = value.get("api_bin_sha256")
+        digest_source = value.get("api_bin_sha256_source")
         if not isinstance(raw_paths, Mapping) or not isinstance(raw_digests, Mapping):
             raise ApplicationError(
                 "application_ownership_invalid",
                 "Hindsight API launcher ownership is incomplete",
+            )
+        if digest_source not in (None, _MANAGED_API_DIGEST_SOURCE):
+            raise ApplicationError(
+                "application_ownership_invalid",
+                "Hindsight API launcher digest source is invalid",
             )
         launchers = {str(name): Path(str(path)) for name, path in raw_paths.items()}
         expected = self._api_bin_paths()
@@ -526,7 +539,12 @@ class ApplicationSupply:
             or set(raw_digests) != set(launchers)
             or any(
                 not _digest(raw_digests[name])
-                or _regular_digest(path) != raw_digests[name]
+                or (
+                    self._managed_api_launcher_target_digest(name, path)
+                    if digest_source == _MANAGED_API_DIGEST_SOURCE
+                    else _regular_digest(path)
+                )
+                != raw_digests[name]
                 for name, path in launchers.items()
             )
         ):
@@ -754,6 +772,36 @@ class ApplicationSupply:
             for name in _HINDSIGHT_API_ENTRY_POINTS
         }
 
+    def _managed_api_launcher_target_digest(
+        self, name: str, launcher: Path
+    ) -> str | None:
+        target = self._api_tool_root() / "bin" / name
+        if (
+            launcher.parent != self._application_bin_dir
+            or not _trusted_directory(self._application_bin_dir)
+            or not _trusted_directory(self._api_tool_root())
+            or not _trusted_directory(target.parent)
+            or not _trusted_regular_file(target)
+        ):
+            return None
+        try:
+            if not launcher.is_symlink() or launcher.readlink() != target:
+                return None
+        except OSError:
+            return None
+        return _regular_digest(target)
+
+    def _required_managed_api_launcher_target_digest(
+        self, name: str, launcher: Path
+    ) -> str:
+        digest = self._managed_api_launcher_target_digest(name, launcher)
+        if digest is None:
+            raise RuntimeError(
+                "installed Hindsight API launcher does not resolve to its managed "
+                f"tool executable: {launcher}"
+            )
+        return digest
+
     def _uv_environment(self) -> dict[str, str]:
         return {
             **os.environ,
@@ -816,9 +864,12 @@ class ApplicationSupply:
     def _api_launchers_match(self) -> bool:
         for name, target in _HINDSIGHT_API_ENTRY_POINTS.items():
             launcher = self._api_bin_paths()[name]
+            managed_launcher = self._api_tool_root() / "bin" / name
             module, function = target.split(":", 1)
             try:
-                text = launcher.read_text(encoding="utf-8")
+                if self._managed_api_launcher_target_digest(name, launcher) is None:
+                    return False
+                text = managed_launcher.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 return False
             expected = (
@@ -833,7 +884,7 @@ class ApplicationSupply:
                 "        sys.argv[0] = sys.argv[0][:-4]\n"
                 f"    sys.exit({function}())\n"
             )
-            if launcher.is_symlink() or text != expected:
+            if text != expected:
                 return False
         return True
 

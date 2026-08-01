@@ -301,6 +301,121 @@ class ModelCacheTests(unittest.TestCase):
 
 
 class HuggingFaceHubClientTests(unittest.TestCase):
+    def test_public_revision_resolution_disables_ambient_hub_authentication(
+        self,
+    ) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class FakeApi:
+            def model_info(self, repo_id, **kwargs):
+                calls.append((repo_id, kwargs))
+                return SimpleNamespace(sha="b" * 40)
+
+        module = ModuleType("huggingface_hub")
+        module.HfApi = FakeApi
+        with patch.dict("sys.modules", {"huggingface_hub": module}):
+            resolved = HuggingFaceHubClient().resolve_revision(
+                "mlx-community/Qwen", "main", local_files_only=False
+            )
+
+        self.assertEqual(resolved, "b" * 40)
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "mlx-community/Qwen",
+                    {
+                        "revision": "main",
+                        "files_metadata": True,
+                        "token": False,
+                    },
+                )
+            ],
+        )
+
+    def test_public_snapshot_download_disables_ambient_hub_authentication(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            calls: list[dict[str, object]] = []
+
+            def snapshot_download(**kwargs):
+                calls.append(kwargs)
+                return directory
+
+            module = ModuleType("huggingface_hub")
+            module.snapshot_download = snapshot_download
+            with patch.dict("sys.modules", {"huggingface_hub": module}):
+                snapshot = HuggingFaceHubClient().snapshot_download(
+                    "mlx-community/Qwen",
+                    "b" * 40,
+                    local_files_only=False,
+                    force_download=False,
+                )
+
+        self.assertEqual(snapshot, Path(directory))
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "repo_id": "mlx-community/Qwen",
+                    "revision": "b" * 40,
+                    "local_files_only": False,
+                    "force_download": False,
+                    "token": False,
+                }
+            ],
+        )
+
+    def test_public_manifest_verification_disables_ambient_hub_authentication(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / ("b" * 40)
+            snapshot.mkdir()
+            payload = b"exact weights"
+            (snapshot / "weights.bin").write_bytes(payload)
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            class FakeApi:
+                def model_info(self, repo_id, **kwargs):
+                    calls.append((repo_id, kwargs))
+                    return SimpleNamespace(
+                        sha="b" * 40,
+                        siblings=(
+                            SimpleNamespace(
+                                rfilename="weights.bin",
+                                size=len(payload),
+                                blob_id=None,
+                                lfs={"sha256": sha256(payload).hexdigest()},
+                            ),
+                        ),
+                    )
+
+            module = ModuleType("huggingface_hub")
+            module.HfApi = FakeApi
+            module.snapshot_download = lambda **_kwargs: str(snapshot)
+            with patch.dict("sys.modules", {"huggingface_hub": module}):
+                verification = HuggingFaceHubClient().verify_revision(
+                    "mlx-community/Qwen", "b" * 40, snapshot
+                )
+
+        self.assertEqual(verification.status, "verified")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "mlx-community/Qwen",
+                    {
+                        "revision": "b" * 40,
+                        "files_metadata": True,
+                        "timeout": 10.0,
+                        "token": False,
+                    },
+                )
+            ],
+        )
+
     def test_offline_verification_reuses_exact_manifest_and_rejects_tampering(
         self,
     ) -> None:
@@ -473,6 +588,19 @@ class HuggingFaceHubClientTests(unittest.TestCase):
             self.assertEqual(inventory.revisions[0].size_on_disk, 321)
             self.assertIsNone(inventory.revisions[0].complete)
             self.assertIs(preview, deletion)
+            self.assertIn(
+                (
+                    "list_models",
+                    {
+                        "search": "Qwen",
+                        "author": "mlx-community",
+                        "limit": 3,
+                        "full": True,
+                        "token": False,
+                    },
+                ),
+                calls,
+            )
             self.assertIn(("delete_revisions", ("b" * 40,)), calls)
 
 

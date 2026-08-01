@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from unittest.mock import patch
 
 from mastic.application.catalogue import OperationKind, build_operation_catalogue
@@ -1561,6 +1562,40 @@ class LocalOperationBackendTests(unittest.TestCase):
 
             listed = backend.prepare(OperationRequest("service.list")).execute()
             self.assertIn("assistant", [item["name"] for item in listed["items"]])
+
+    def test_service_create_persists_immutable_plan_options_as_toml(self) -> None:
+        with TemporaryDirectory() as directory:
+            backend, _ = self._backend(Path(directory))
+            options = MappingProxyType(
+                {
+                    "mtp": True,
+                    "runtime": MappingProxyType({"draft_tokens": 4}),
+                    "stop": ("</s>", 17),
+                }
+            )
+
+            backend.prepare(
+                OperationRequest(
+                    "service.create",
+                    {
+                        "service": "assistant",
+                        "model_alias": "coding",
+                        "runtime": "optiq-0.2.18",
+                        "route": "assistant",
+                        "options": options,
+                    },
+                )
+            ).execute()
+
+            shown = backend.prepare(OperationRequest("config.show")).execute()
+            self.assertEqual(
+                shown["resource"]["services"]["assistant"]["options"],
+                {
+                    "mtp": True,
+                    "runtime": {"draft_tokens": 4},
+                    "stop": ["</s>", 17],
+                },
+            )
 
     def test_live_lifecycle_calls_only_supervisor_port(self) -> None:
         with TemporaryDirectory() as directory:

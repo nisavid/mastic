@@ -28,6 +28,27 @@ from mastic.application.setup import (
     SetupIntent,
     SetupResolver,
 )
+from mastic.application.setup_operation import (
+    ActivateSupervisor,
+    ConfigureApplicationTarget,
+    ConfigureGateway,
+    ConfigureService,
+    DrainService,
+    InstallApplications,
+    InstallModel,
+    InstallRuntime,
+    RemoveApplications,
+    RemoveApplicationTarget,
+    RemoveState,
+    SetupNestedOperations,
+    SetupOperation,
+    StartService,
+    StopService,
+    TestApplicationTarget,
+    TrustModel,
+    UnregisterSupervisor,
+    VerifyGatewayRequest,
+)
 from mastic.infrastructure.composition import (
     ApplicationComposition,
     compose_application,
@@ -50,6 +71,7 @@ from mastic.infrastructure.host_integration import (
     private_socket_ready,
 )
 from mastic.infrastructure.launchd import LaunchdAdapter
+from mastic.infrastructure.local_backend import LocalConfigurationMutations
 from mastic.infrastructure.model_intelligence import (
     HuggingFaceModelRepository,
     ModelIntelligence,
@@ -98,7 +120,6 @@ from mastic.infrastructure.setup_port import (
     DurableSetupOutcomeProvider,
     OperationalSetupEvidenceStore,
     OperationalSetupPlanStore,
-    SetupOperationPort,
 )
 from mastic.infrastructure.state_store import OperationalStateStore
 from mastic.infrastructure.supply_ports import (
@@ -305,25 +326,6 @@ class _LocalModelSupply:
         return self._remote.execute(operation, parameters)
 
 
-class _DeferredOperationOwner:
-    """Break the setup/application construction cycle without hiding execution."""
-
-    def __init__(self) -> None:
-        self._owner: OperationOwner | None = None
-
-    def bind(self, owner: OperationOwner) -> None:
-        if self._owner is not None:
-            raise RuntimeError("operation owner is already bound")
-        self._owner = owner
-
-    def execute(
-        self, operation: str, parameters: Mapping[str, object]
-    ) -> Mapping[str, object]:
-        if self._owner is None:
-            raise RuntimeError("operation owner is not bound")
-        return self._owner.execute(operation, parameters)
-
-
 class _ActivatingOperationOwner:
     """Activate masticd exactly when a setup step crosses a remote mutation boundary."""
 
@@ -433,29 +435,192 @@ class _LocalSupervisorOwner:
             )
 
 
-class _DispatcherOwner:
-    def __init__(
-        self,
-        application: ApplicationComposition,
-        config_store: ConfigStore[MasticConfig],
-        state_remover: OperationOwner,
-    ) -> None:
-        self._application = application
-        self._config_store = config_store
-        self._state_remover = state_remover
+class _SetupDesiredState:
+    def __init__(self, configuration: LocalConfigurationMutations) -> None:
+        self._configuration = configuration
 
-    def execute(
-        self, operation: str, parameters: Mapping[str, object]
-    ) -> Mapping[str, object]:
-        if operation == "state.remove":
-            return self._state_remover.execute(operation, parameters)
-        if not self._config_store.exists:
-            self._config_store.import_text("schema_version = 1\n")
-        result = self._application.dispatcher.execute(
-            OperationRequest(operation, parameters)
+    def configure_gateway(self, operation: ConfigureGateway) -> Mapping[str, object]:
+        return self._configuration.execute_plan_mutation(
+            "gateway.configure",
+            {"host": operation.host, "port": operation.port, "confirmed": True},
         )
-        resource = result.value.get("resource", result.value)
-        return dict(resource) if isinstance(resource, Mapping) else {"value": resource}
+
+    def trust_model(self, operation: TrustModel) -> Mapping[str, object]:
+        return self._configuration.execute_plan_mutation(
+            "model.trust",
+            {
+                "resource": operation.resource,
+                "runtime": operation.runtime,
+                "revision": operation.revision,
+                "accepted_risks": operation.accepted_risks,
+                "confirmed": True,
+            },
+        )
+
+    def configure_service(self, operation: ConfigureService) -> Mapping[str, object]:
+        return self._configuration.execute_plan_mutation(
+            "service.create",
+            {
+                "service": operation.service,
+                "resource": operation.service,
+                "model_alias": operation.model_alias,
+                "runtime": operation.runtime,
+                "route": operation.route,
+                "activation": operation.activation,
+                "pinned": operation.pinned,
+                "options": operation.options,
+                "confirmed": True,
+            },
+        )
+
+
+class _OwnerBackedSetupAdapter:
+    def __init__(self, owner: OperationOwner) -> None:
+        self._owner = owner
+
+
+class _SetupRuntimeSupply(_OwnerBackedSetupAdapter):
+    def install_runtime(self, operation: InstallRuntime) -> Mapping[str, object]:
+        return self._owner.execute(
+            "runtime.install",
+            {
+                "runtime": operation.runtime,
+                "channel": "tested",
+                "expected_version": operation.expected_version,
+                "expected_lock_digest": operation.expected_lock_digest,
+                "confirmed": True,
+            },
+        )
+
+
+class _SetupModelSupply(_OwnerBackedSetupAdapter):
+    def install_model(self, operation: InstallModel) -> Mapping[str, object]:
+        return self._owner.execute(
+            "model.install",
+            {
+                "repository": operation.repository,
+                "revision": operation.revision,
+                "alias": operation.alias,
+                "offline": operation.offline,
+                "confirmed": True,
+            },
+        )
+
+
+class _SetupExternalApplicationLifecycle(_OwnerBackedSetupAdapter):
+    def install_applications(
+        self, operation: InstallApplications
+    ) -> Mapping[str, object]:
+        return self._owner.execute(
+            "application.install",
+            {
+                "application_targets": operation.application_targets,
+                **(
+                    {"preserve_outdated_codex": True}
+                    if operation.preserve_outdated_codex
+                    else {}
+                ),
+                "offline": operation.offline,
+                "confirmed": True,
+            },
+        )
+
+    def remove_applications(
+        self, operation: RemoveApplications
+    ) -> Mapping[str, object]:
+        return self._owner.execute(
+            "application.remove",
+            {"applications": operation.applications, "confirmed": True},
+        )
+
+
+class _SetupApplicationConfiguration(_OwnerBackedSetupAdapter):
+    def configure_application_target(
+        self, operation: ConfigureApplicationTarget
+    ) -> Mapping[str, object]:
+        return self._owner.execute(
+            "application-target.configure",
+            {
+                **operation.options,
+                "application_target": operation.application_target,
+                "service": operation.service,
+                "endpoint": operation.endpoint,
+                "context_window": operation.context_window,
+                "confirmed": True,
+            },
+        )
+
+    def remove_application_target(
+        self, operation: RemoveApplicationTarget
+    ) -> Mapping[str, object]:
+        return self._owner.execute(
+            "application-target.remove",
+            {
+                "application_target": operation.application_target,
+                "confirmed": True,
+            },
+        )
+
+
+class _SetupNativeCanaries(_OwnerBackedSetupAdapter):
+    def test_application_target(
+        self, operation: TestApplicationTarget
+    ) -> Mapping[str, object]:
+        return self._owner.execute(
+            "application-target.test",
+            {
+                "application_target": operation.application_target,
+                "profile": operation.profile,
+            },
+        )
+
+
+class _SetupServiceLifecycle(_OwnerBackedSetupAdapter):
+    def activate_supervisor(
+        self, operation: ActivateSupervisor
+    ) -> Mapping[str, object]:
+        return self._owner.execute("supervisor.start", {"confirmed": True})
+
+    def start_service(self, operation: StartService) -> Mapping[str, object]:
+        return self._owner.execute("service.start", {"resource": operation.resource})
+
+    def drain_service(self, operation: DrainService) -> Mapping[str, object]:
+        return self._owner.execute(
+            "service.drain",
+            {"resource": operation.resource, "confirmed": True},
+        )
+
+    def stop_service(self, operation: StopService) -> Mapping[str, object]:
+        return self._owner.execute(
+            "service.stop",
+            {"resource": operation.resource, "confirmed": True},
+        )
+
+    def unregister_supervisor(
+        self, operation: UnregisterSupervisor
+    ) -> Mapping[str, object]:
+        return self._owner.execute("supervisor.unregister", {"confirmed": True})
+
+
+class _SetupGatewayVerification(_OwnerBackedSetupAdapter):
+    def verify_gateway(self, operation: VerifyGatewayRequest) -> Mapping[str, object]:
+        return self._owner.execute(
+            "verify.request",
+            {
+                "endpoint": operation.endpoint,
+                "model": operation.model,
+                "request": operation.request,
+                "dependency_fingerprint": operation.dependency_fingerprint,
+            },
+        )
+
+
+class _SetupProductStateRemoval(_OwnerBackedSetupAdapter):
+    def remove_state(self, operation: RemoveState) -> Mapping[str, object]:
+        return self._owner.execute(
+            "state.remove",
+            {"paths": operation.paths, "confirmed": True},
+        )
 
 
 class _GatewayMutationGuard:
@@ -600,12 +765,10 @@ class _SetupSupervisorOwner:
                 return {"state": "stopped", "already_stopped": True}
         elif operation == "supervisor.start":
             # Setup can be the first command run after replacing the installed
-            # mastic package.  A running launchd process still has the old
-            # Python code loaded, so recycle it before asking the freshly
-            # started daemon to reconcile its configured services.
-            if self._launchd.status().running:
-                self._launchd.bootout()
-            self._activator.activate()
+            # mastic package.  The previous launchd process can still accept
+            # socket connections after launchd reports it stopped, so always
+            # prove that the socket is quiescent before starting its replacement.
+            self._activator.recycle()
         elif operation == "service.start":
             self._activator.activate()
         return self._remote.execute(operation, parameters)
@@ -671,6 +834,7 @@ def _compose_local_locked(
     hub_supply = ModelSupply(HuggingFaceHubClient())
     config_store = ConfigStore(paths.config_file, validate_config)
     state_store = OperationalStateStore(paths.state_db)
+    configuration_mutations = LocalConfigurationMutations(config_store, state_store)
     reconciliation_store = OwnerReconciliationStore(
         state_store, staging_root=paths.owner_upgrade_stage_dir
     )
@@ -710,16 +874,17 @@ def _compose_local_locked(
         HuggingFaceModelRepository(), PsutilMachineInventory()
     )
     security = ExactRevisionModelSecurity(intelligence, state_store)
+    owned_roots = (
+        paths.config_dir,
+        paths.state_dir,
+        paths.data_dir,
+        paths.log_dir,
+    )
     model = _LocalModelSupply(
         hub_supply,
         remote,
         security,
-        adoption_forbidden_roots=(
-            paths.config_dir,
-            paths.state_dir,
-            paths.data_dir,
-            paths.log_dir,
-        ),
+        adoption_forbidden_roots=owned_roots,
     )
     application_targets = application_target_port(
         resolved_home,
@@ -728,7 +893,6 @@ def _compose_local_locked(
         credential=credential,
         transition=setup_transition,
     )
-    config_owner = _DeferredOperationOwner()
     setup_supervisor = _SetupSupervisorOwner(remote, launchd, activator)
     legacy_applications = ApplicationSupply(
         resolved_home,
@@ -743,6 +907,17 @@ def _compose_local_locked(
     applications = SetupApplicationReconciliation(
         legacy_applications, codex_reconciliation
     )
+    desired_state = _SetupDesiredState(configuration_mutations)
+    setup_runtime_supply = _SetupRuntimeSupply(activating_remote)
+    setup_model_supply = _SetupModelSupply(activating_remote)
+    application_lifecycle = _SetupExternalApplicationLifecycle(applications)
+    application_configuration = _SetupApplicationConfiguration(application_targets)
+    native_canaries = _SetupNativeCanaries(application_targets)
+    service_lifecycle = _SetupServiceLifecycle(setup_supervisor)
+    gateway_verification = _SetupGatewayVerification(
+        GatewayVerificationPort(credential)
+    )
+    state_removal = _SetupProductStateRemoval(OwnedStateRemover(owned_roots))
     setup_evidence = OperationalSetupEvidenceStore(state_store)
     setup_plans = OperationalSetupPlanStore(state_store)
     setup_outcomes = DurableSetupOutcomeProvider(
@@ -750,16 +925,20 @@ def _compose_local_locked(
         setup_evidence,
         application_targets=application_targets,
     )
-    setup = SetupOperationPort(
+    setup = SetupOperation(
         _setup_resolver(),
         preflight=SystemSetupPreflight(paths),
-        runtime=activating_remote,
-        model=activating_remote,
-        config=config_owner,
-        applications=applications,
-        application_targets=application_targets,
-        supervisor=setup_supervisor,
-        verifier=GatewayVerificationPort(credential),
+        nested_operations=SetupNestedOperations(
+            desired_state=desired_state,
+            runtime_supply=setup_runtime_supply,
+            model_supply=setup_model_supply,
+            application_lifecycle=application_lifecycle,
+            application_configuration=application_configuration,
+            native_canaries=native_canaries,
+            service_lifecycle=service_lifecycle,
+            gateway_verification=gateway_verification,
+            state_removal=state_removal,
+        ),
         evidence=setup_evidence,
         removal_inventory=lambda: removal_inventory(
             paths,
@@ -784,19 +963,11 @@ def _compose_local_locked(
         setup=setup,
         applications=codex_reconciliation,
         application_targets=application_targets,
+        configuration_mutations=configuration_mutations,
         config_store=config_store,
         state_store=state_store,
         model_intelligence=intelligence,
         setup_outcomes=setup_outcomes,
-    )
-    config_owner.bind(
-        _DispatcherOwner(
-            application,
-            config_store,
-            OwnedStateRemover(
-                (paths.config_dir, paths.state_dir, paths.data_dir, paths.log_dir)
-            ),
-        )
     )
     guarded = _GatewayMutationGuard(
         application.dispatcher,

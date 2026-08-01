@@ -82,10 +82,9 @@ class ApplicationSupplyTests(unittest.TestCase):
             api_root = tool_dir / "hindsight-api"
             api_root.mkdir(parents=True)
             bin_dir = root / "data/application-bin"
-            bin_dir.mkdir(parents=True)
-            api_launchers = {name: bin_dir / name for name in HINDSIGHT_API_LAUNCHERS}
-            for name, path in api_launchers.items():
-                path.write_bytes(f"owned {name}".encode())
+            api_launchers, api_digests = _write_uv_managed_api_launchers(
+                api_root, bin_dir
+            )
             state = root / "state"
             state.mkdir()
             (state / "application-installations.json").write_text(
@@ -113,11 +112,9 @@ class ApplicationSupplyTests(unittest.TestCase):
                                     name: str(path)
                                     for name, path in api_launchers.items()
                                 },
+                                "api_bin_sha256_source": "managed-tool-target",
                                 "api_bin_sha256": {
-                                    name: hashlib.sha256(
-                                        f"owned {name}".encode()
-                                    ).hexdigest()
-                                    for name in api_launchers
+                                    name: api_digests[name] for name in api_launchers
                                 },
                             },
                         },
@@ -196,21 +193,8 @@ class ApplicationSupplyTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(payload)
             python = api_root / "bin/python"
-            for name, target in application_supply._HINDSIGHT_API_ENTRY_POINTS.items():
-                module, function = target.split(":", 1)
-                (bin_dir / name).write_text(
-                    f"#!{python}\n"
-                    "# -*- coding: utf-8 -*-\n"
-                    "import sys\n"
-                    f"from {module} import {function}\n"
-                    'if __name__ == "__main__":\n'
-                    '    if sys.argv[0].endswith("-script.pyw"):\n'
-                    "        sys.argv[0] = sys.argv[0][:-11]\n"
-                    '    elif sys.argv[0].endswith(".exe"):\n'
-                    "        sys.argv[0] = sys.argv[0][:-4]\n"
-                    f"    sys.exit({function}())\n",
-                    encoding="utf-8",
-                )
+            python.parent.mkdir(parents=True)
+            _write_uv_api_entry_point_launchers(api_root, bin_dir)
             wheel_bytes = io.BytesIO()
             with zipfile.ZipFile(wheel_bytes, "w") as wheel:
                 for name, payload in expected.items():
@@ -268,6 +252,21 @@ class ApplicationSupplyTests(unittest.TestCase):
         calls = []
         fail_api_install = [True]
 
+        def install_uv_tool_launchers() -> None:
+            api_root = application_tool_dir / "hindsight-api"
+            shutil.rmtree(api_root, ignore_errors=True)
+            api_bin = api_root / "bin"
+            api_bin.mkdir(parents=True)
+            application_bin_dir.mkdir(parents=True, exist_ok=True)
+            for existing in application_bin_dir.iterdir():
+                existing.unlink()
+            python = api_bin / "python"
+            python.write_bytes(b"managed python")
+            python.chmod(0o755)
+            _write_uv_api_entry_point_launchers(
+                api_root, application_bin_dir, executable=True
+            )
+
         def run(command, **kwargs):
             calls.append((tuple(str(item) for item in command), kwargs))
             if tuple(command[1:3]) == ("tool", "install") and fail_api_install[0]:
@@ -279,12 +278,7 @@ class ApplicationSupplyTests(unittest.TestCase):
                 )
                 raise subprocess.CalledProcessError(1, command)
             if tuple(command[1:3]) == ("tool", "install"):
-                (application_tool_dir / "hindsight-api").mkdir(
-                    parents=True, exist_ok=True
-                )
-                application_bin_dir.mkdir(parents=True, exist_ok=True)
-                for name in HINDSIGHT_API_LAUNCHERS:
-                    (application_bin_dir / name).write_bytes(f"owned {name}".encode())
+                install_uv_tool_launchers()
             if tuple(command[1:3]) == ("tool", "uninstall"):
                 shutil.rmtree(application_tool_dir / "hindsight-api")
                 for name in HINDSIGHT_API_LAUNCHERS:
@@ -735,10 +729,9 @@ class ApplicationSupplyTests(unittest.TestCase):
             api_root = tool_dir / "hindsight-api"
             api_root.mkdir(parents=True)
             bin_dir = root / "data/application-bin"
-            bin_dir.mkdir(parents=True)
-            api_launchers = {name: bin_dir / name for name in HINDSIGHT_API_LAUNCHERS}
-            for name, path in api_launchers.items():
-                path.write_bytes(f"owned {name}".encode())
+            api_launchers, api_digests = _write_uv_managed_api_launchers(
+                api_root, bin_dir
+            )
             state = root / "state"
             state.mkdir()
             journal_path = state / "application-installations.json"
@@ -770,11 +763,9 @@ class ApplicationSupplyTests(unittest.TestCase):
                                     name: str(path)
                                     for name, path in api_launchers.items()
                                 },
+                                "api_bin_sha256_source": "managed-tool-target",
                                 "api_bin_sha256": {
-                                    name: hashlib.sha256(
-                                        f"owned {name}".encode()
-                                    ).hexdigest()
-                                    for name in api_launchers
+                                    name: api_digests[name] for name in api_launchers
                                 },
                             },
                         },
@@ -844,6 +835,185 @@ class ApplicationSupplyTests(unittest.TestCase):
                 {"removed": ["codex", "hindsight"], "retained": []},
             )
             self.assertEqual(len(calls), 1)
+
+    def test_hindsight_removal_rejects_launcher_retargeted_outside_tool_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            tool_dir = root / "data/application-tools"
+            api_root = tool_dir / "hindsight-api"
+            bin_dir = root / "data/application-bin"
+            api_launchers, api_digests = _write_uv_managed_api_launchers(
+                api_root, bin_dir
+            )
+            external = root / "external/hindsight-admin"
+            external.parent.mkdir()
+            external.write_bytes(b"owned hindsight-admin")
+            api_launchers["hindsight-admin"].unlink()
+            api_launchers["hindsight-admin"].symlink_to(external)
+            state = root / "state"
+            state.mkdir()
+            (state / "application-installations.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "complete",
+                        "applications": {
+                            "hindsight": {
+                                "version": "0.8.4",
+                                "provenance": "installed",
+                                "ownership": "mixed",
+                                "cli_path": str(home / ".local/bin/hindsight"),
+                                "cli_ownership": "third-party",
+                                "api_ownership": "mastic",
+                                "api_tool_root": str(api_root),
+                                "api_bin_paths": {
+                                    name: str(path)
+                                    for name, path in api_launchers.items()
+                                },
+                                "api_bin_sha256_source": "managed-tool-target",
+                                "api_bin_sha256": api_digests,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            supply = ApplicationSupply(
+                home,
+                root / "data/bootstrap-artifacts/application-targets-v1",
+                state,
+                uv_executable=root / "data/bootstrap-uv/uv",
+                application_tool_dir=tool_dir,
+                application_bin_dir=bin_dir,
+                run_command=lambda *_args, **_kwargs: self.fail(
+                    "drifted launcher must block uv uninstall"
+                ),
+            )
+
+            with self.assertRaises(ApplicationError) as raised:
+                supply.execute(
+                    "application.remove",
+                    {"applications": ("hindsight",), "confirmed": True},
+                )
+
+            self.assertEqual(raised.exception.code, "application_ownership_drift")
+            self.assertEqual(api_launchers["hindsight-admin"].readlink(), external)
+            self.assertEqual(external.read_bytes(), b"owned hindsight-admin")
+
+    def test_hindsight_removal_accepts_legacy_regular_launcher_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            tool_dir = root / "data/application-tools"
+            api_root = tool_dir / "hindsight-api"
+            api_root.mkdir(parents=True)
+            bin_dir = root / "data/application-bin"
+            bin_dir.mkdir(parents=True)
+            api_launchers = {name: bin_dir / name for name in HINDSIGHT_API_LAUNCHERS}
+            api_digests = {}
+            for name, path in api_launchers.items():
+                payload = f"legacy owned {name}".encode()
+                path.write_bytes(payload)
+                api_digests[name] = hashlib.sha256(payload).hexdigest()
+            state = root / "state"
+            state.mkdir()
+            (state / "application-installations.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "complete",
+                        "applications": {
+                            "hindsight": {
+                                "version": "0.8.4",
+                                "provenance": "installed",
+                                "ownership": "mixed",
+                                "cli_path": str(home / ".local/bin/hindsight"),
+                                "cli_ownership": "third-party",
+                                "api_ownership": "mastic",
+                                "api_tool_root": str(api_root),
+                                "api_bin_paths": {
+                                    name: str(path)
+                                    for name, path in api_launchers.items()
+                                },
+                                "api_bin_sha256": api_digests,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def uninstall(_command, **_kwargs):
+                shutil.rmtree(api_root)
+                for path in api_launchers.values():
+                    path.unlink()
+                return subprocess.CompletedProcess((), 0)
+
+            supply = ApplicationSupply(
+                home,
+                root / "data/bootstrap-artifacts/application-targets-v1",
+                state,
+                uv_executable=root / "data/bootstrap-uv/uv",
+                application_tool_dir=tool_dir,
+                application_bin_dir=bin_dir,
+                run_command=uninstall,
+            )
+
+            removed = supply.execute(
+                "application.remove",
+                {"applications": ("hindsight",), "confirmed": True},
+            )
+
+            self.assertEqual(removed["removed"], ["hindsight"])
+            self.assertEqual(removed["retained"], [str(home / ".local/bin/hindsight")])
+            self.assertFalse(api_root.exists())
+            self.assertTrue(all(not path.exists() for path in api_launchers.values()))
+
+
+def _write_uv_managed_api_launchers(
+    api_root: Path, bin_dir: Path
+) -> tuple[dict[str, Path], dict[str, str]]:
+    managed_bin = api_root / "bin"
+    managed_bin.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    launchers = {name: bin_dir / name for name in HINDSIGHT_API_LAUNCHERS}
+    digests = {}
+    for name, launcher in launchers.items():
+        payload = f"owned {name}".encode()
+        target = managed_bin / name
+        target.write_bytes(payload)
+        launcher.symlink_to(target)
+        digests[name] = hashlib.sha256(payload).hexdigest()
+    return launchers, digests
+
+
+def _write_uv_api_entry_point_launchers(
+    api_root: Path, bin_dir: Path, *, executable: bool = False
+) -> None:
+    python = api_root / "bin/python"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name, target in application_supply._HINDSIGHT_API_ENTRY_POINTS.items():
+        module, function = target.split(":", 1)
+        launcher = api_root / "bin" / name
+        launcher.write_text(
+            f"#!{python}\n"
+            "# -*- coding: utf-8 -*-\n"
+            "import sys\n"
+            f"from {module} import {function}\n"
+            'if __name__ == "__main__":\n'
+            '    if sys.argv[0].endswith("-script.pyw"):\n'
+            "        sys.argv[0] = sys.argv[0][:-11]\n"
+            '    elif sys.argv[0].endswith(".exe"):\n'
+            "        sys.argv[0] = sys.argv[0][:-4]\n"
+            f"    sys.exit({function}())\n",
+            encoding="utf-8",
+        )
+        if executable:
+            launcher.chmod(0o755)
+        (bin_dir / name).symlink_to(launcher)
 
 
 def _artifact(identity: str, version: str, path: Path) -> dict[str, object]:

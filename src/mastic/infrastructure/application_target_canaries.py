@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -16,7 +15,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from mastic.application.application_targets import APPLICATION_CANARY_CONTRACTS
+from mastic.application.application_targets import (
+    APPLICATION_CANARY_CONTRACTS,
+    application_canary_evidence_sha256,
+)
 from mastic.application.config_schema import ApplicationTargetSettings
 from mastic.application.dispatch import ApplicationError
 from mastic.infrastructure.application_target_integrations import (
@@ -141,7 +143,10 @@ class NativeApplicationTargetCanary:
                     cwd=work,
                     env=_isolated_environment(
                         root,
-                        {"CODEX_HOME": str(self._home / ".codex")},
+                        {
+                            "CODEX_HOME": str(self._home / ".codex"),
+                            "PATH": os.pathsep.join((str(codex.parent), os.defpath)),
+                        },
                     ),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -473,28 +478,3 @@ def _plain_result(result: ApplicationCanaryResult) -> Mapping[str, object]:
         "duration_seconds": result.duration_seconds,
         "evidence_sha256": result.evidence_sha256,
     }
-
-
-def application_canary_evidence_sha256(
-    *,
-    target: str,
-    profile: str,
-    service: str,
-    phases: Sequence[str],
-    exact_contract: bool,
-) -> str:
-    """Digest the content-free native canary contract."""
-
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "target": target,
-                "profile": profile,
-                "service": service,
-                "phases": list(phases),
-                "exact_contract": exact_contract,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
