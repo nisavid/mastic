@@ -58,6 +58,10 @@ class SetupOutcomeProvider(Protocol):
     def outcome(self) -> Mapping[str, object]: ...
 
 
+class ApplicationDiagnosticPort(Protocol):
+    def diagnose(self, application: str) -> Mapping[str, object]: ...
+
+
 _SUPERVISOR_MUTATIONS = frozenset(
     {
         "supervisor.start",
@@ -126,6 +130,7 @@ class LocalOperationBackend:
         setup: OperationPort,
         applications: OperationPort,
         application_targets: OperationPort,
+        application_diagnostics: ApplicationDiagnosticPort | None = None,
         config_path: str | Path,
         gateway_credential_path: str | Path | None = None,
         model_intelligence=None,
@@ -142,6 +147,7 @@ class LocalOperationBackend:
         self._metrics = metrics
         self._setup = setup
         self._applications = applications
+        self._application_diagnostics = application_diagnostics
         self._application_targets = application_targets
         self._config_path = Path(config_path)
         self._gateway_credential_path = (
@@ -525,6 +531,28 @@ class LocalOperationBackend:
                 *target_issues,
                 *self._diagnostic_issues(config, supervisor, gateway, services),
             ]
+            if self._application_diagnostics is not None:
+                try:
+                    diagnostic = self._application_diagnostics.diagnose("codex")
+                    details["application_diagnostics"] = {"codex": _plain(diagnostic)}
+                except ApplicationError as error:
+                    issues.append(
+                        {
+                            "code": error.code,
+                            "message": error.message,
+                            "details": dict(error.details),
+                            "next_actions": list(error.next_actions)
+                            or ["mastic app inspect codex"],
+                        }
+                    )
+                except Exception:
+                    issues.append(
+                        {
+                            "code": "codex_owner_diagnostic_unknown",
+                            "message": "The Codex installation owner could not be inspected.",
+                            "next_actions": ["mastic app inspect codex"],
+                        }
+                    )
             if "codex" in config.application_targets:
                 try:
                     codex = config.application_targets["codex"]

@@ -21,6 +21,9 @@ capabilities and ownership, not implementation class names or process topology.
 | Managed Process | One OS process MASTIC may control | Service Run or resource identity |
 | External Application | Stable externally maintained product identity | Installation or configuration |
 | External Application Installation | One owner-controlled lifecycle unit | Product-wide version state |
+| Installation Owner | External lifecycle authority for one installation | Application vendor or current runtime |
+| Owner Runtime Identity | Exact runtime containing and executing one owner installation | Owner's current or default runtime |
+| Owner Installation Identity | Exact owner-native package instance bound to one Owner Runtime | Package name or External Application |
 | Application Configuration Target | One independently selected configuration scope | Executable or account |
 | Application Provider Binding | Application-native provider entry | Inference Provider or Installation Owner |
 | Client Protocol | Exact application-visible behavioral contract | HTTP transport or compatibility slogan |
@@ -71,6 +74,10 @@ Application Provider Binding must equal its route's protocol. A route selecting
 an Inference Service must use the same Workload Profile fingerprint as the
 service. The binding's declared scope must equal the route's declared scope.
 These equality checks are identity invariants, not adapter inference.
+
+An Installation Owner's current or default runtime is operational context, not
+an installation identity. Discovery and mutation of an owner-native package use
+the exact Owner Runtime Identity retained by its Installation Observation.
 
 ## Capability ports
 

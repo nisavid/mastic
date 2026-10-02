@@ -20,7 +20,10 @@ from mastic.infrastructure.host_integration import (
     PrivateLogReader,
     StateMetricsSource,
 )
-from mastic.infrastructure.local_backend import LocalOperationBackend
+from mastic.infrastructure.local_backend import (
+    ApplicationDiagnosticPort,
+    LocalOperationBackend,
+)
 from mastic.infrastructure.paths_v1 import MasticPaths
 from mastic.infrastructure.runtime_supply import RuntimeCatalogue
 from mastic.infrastructure.state_store import OperationalStateStore
@@ -28,6 +31,10 @@ from mastic.infrastructure.state_store import OperationalStateStore
 
 class OperationPort(Protocol):
     def execute(self, operation, parameters): ...
+
+
+class ApplicationPort(OperationPort, ApplicationDiagnosticPort, Protocol):
+    """Execute application operations and diagnose the live owner."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +57,7 @@ def compose_application(
     model_supply,
     supervisor: OperationPort,
     setup: OperationPort,
-    applications: OperationPort,
+    applications: ApplicationPort,
     application_targets: OperationPort,
     config_store: ConfigStore[MasticConfig] | None = None,
     state_store: OperationalStateStore | None = None,
@@ -89,6 +96,7 @@ def compose_application(
         metrics=StateMetricsSource(state) if metrics is None else metrics,
         setup=setup,
         applications=applications,
+        application_diagnostics=applications,
         application_targets=application_targets,
         config_path=paths.config_file,
         gateway_credential_path=paths.gateway_credential,

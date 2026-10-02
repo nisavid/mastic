@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -141,12 +142,19 @@ class ViteFixture:
             )
         )
 
-        node_bin = self.vp_home / "js_runtime" / "node" / self.node_version / "bin"
-        node_bin.mkdir(parents=True)
-        node = node_bin / "node"
+        self.node_root = self.vp_home / "js_runtime" / "node" / self.node_version
+        self.node_bin = self.node_root / "bin"
+        self.node_bin.mkdir(parents=True)
+        node = self.node_bin / "node"
         node.write_text("#!/bin/sh\nexit 0\n")
         node.chmod(0o755)
-        node_codex = node_bin / "codex"
+        owner_npm_cli = self.node_root / "lib" / "node_modules" / "npm" / "bin"
+        owner_npm_cli.mkdir(parents=True)
+        (owner_npm_cli / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+        (owner_npm_cli / "npm-cli.js").chmod(0o755)
+        self.owner_npm = self.node_bin / "npm"
+        self.owner_npm.symlink_to("../lib/node_modules/npm/bin/npm-cli.js")
+        node_codex = self.node_bin / "codex"
         node_codex.symlink_to(self.package_bin)
         self.active = self.vp_bin / "codex"
         self.active.symlink_to(node_codex if source == "npm" else self.package_bin)
@@ -217,6 +225,9 @@ class ViteFixture:
                 0, json.dumps(doctor), ""
             ),
             (str(self.vp_bin / "npm"), "root", "-g"): CommandResult(
+                0, str(self.npm_root) + "\n", ""
+            ),
+            (str(self.owner_npm), "root", "-g"): CommandResult(
                 0, str(self.npm_root) + "\n", ""
             ),
         }
@@ -297,6 +308,47 @@ class CodexViteDiscoveryTests(unittest.TestCase):
             self.assertEqual(observed.reachable_invocations, (str(fixture.active),))
             self.assertTrue(observed.installed_artifact_digest.startswith("sha256:"))
             self.assertTrue(observed.owner_installation_identity.startswith("sha256:"))
+
+    def test_default_vite_node_does_not_replace_the_exact_npm_owner_runtime(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            current_npm_root = (
+                fixture.vp_home
+                / "js_runtime"
+                / "node"
+                / "24.18.1"
+                / "lib"
+                / "node_modules"
+            )
+            current_npm_root.mkdir(parents=True)
+            fixture.runner.results[(str(fixture.vp_bin / "npm"), "root", "-g")] = (
+                CommandResult(0, str(current_npm_root) + "\n", "")
+            )
+
+            observed = fixture.discover()
+
+            self.assertEqual(observed.owner_identity, "vite-plus/npm-global")
+            self.assertEqual(observed.owner_runtime_identity, "node:24.18.0")
+            self.assertEqual(observed.installed_release, "0.144.5")
+
+    def test_owner_runtime_rejects_an_external_npm_global_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            external_root = fixture.root / "external" / "lib" / "node_modules"
+            shutil.copytree(
+                fixture.package_root,
+                external_root / "@openai" / "codex",
+            )
+            fixture.runner.results[(str(fixture.owner_npm), "root", "-g")] = (
+                CommandResult(0, str(external_root) + "\n", "")
+            )
+
+            with self.assertRaisesRegex(
+                CodexViteDiscoveryError, "owner_runtime_unavailable"
+            ):
+                fixture.discover()
 
     def test_owner_runtime_path_reaches_vite_plus_env_node_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -394,6 +446,20 @@ else:
             external_node.chmod(0o755)
             node.unlink()
             node.symlink_to(external_node)
+
+            with self.assertRaisesRegex(
+                CodexViteDiscoveryError, "owner_runtime_unavailable"
+            ):
+                fixture.discover()
+
+    def test_owner_runtime_rejects_npm_symlink_to_external_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="npm")
+            external_npm = fixture.root / "external-npm"
+            external_npm.write_text("#!/bin/sh\nexit 0\n")
+            external_npm.chmod(0o755)
+            fixture.owner_npm.unlink()
+            fixture.owner_npm.symlink_to(external_npm)
 
             with self.assertRaisesRegex(
                 CodexViteDiscoveryError, "owner_runtime_unavailable"
@@ -544,6 +610,15 @@ else:
                 (str(fixture.vp_bin / "npm"), "root", "-g"),
                 fixture.runner.calls,
             )
+
+    def test_vite_native_owner_does_not_require_an_npm_owner_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ViteFixture(Path(temporary), source="vp")
+            fixture.owner_npm.unlink()
+
+            observed = fixture.discover()
+
+            self.assertEqual(observed.owner_identity, "vite-plus/global-package")
 
     def test_vite_package_root_rejects_symlinked_install_components(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

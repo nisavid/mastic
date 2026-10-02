@@ -44,6 +44,13 @@ resolution, but completion requires the installed wrapper and platform payload
 fingerprints to equal the authority-selected retained archives. Extra,
 symlinked, or relocated dependency roots are rejected.
 
+For a Vite+-managed npm-global Codex installation, the exact observed Node
+runtime owns its npm launcher and global package root. Vite+'s current or
+default Node runtime may change independently and is not an installation
+identity. Discovery and mutation therefore invoke the npm launcher inside the
+Owner Runtime; they never substitute Vite+'s current npm shim merely because
+Vite+ still resolves the same application command.
+
 The owner executor returns valid execution evidence only after rediscovery,
 owner/runtime/release/invocation preservation, installed topology verification,
 and installed payload verification on the same post-command observation.

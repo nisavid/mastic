@@ -204,6 +204,10 @@ class CodexViteOwnerLifecycleTests(unittest.TestCase):
             action.argv[:6],
             ("/Users/test/.vite-plus/bin/vp", "env", "exec", "--node", "24.18.0", "--"),
         )
+        self.assertEqual(
+            action.argv[6],
+            "/Users/test/.vite-plus/js_runtime/node/24.18.0/bin/npm",
+        )
         self.assertEqual(action.argv[-1], "./codex-0.144.6.tgz")
         self.assertEqual(action.cwd, artifacts.staging_directory)
         environment = dict(action.environment)

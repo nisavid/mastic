@@ -28,6 +28,7 @@ from mastic.domain.external_applications import (
     InstallationObservation,
 )
 from mastic.infrastructure.owner_command_tracker import OwnerCommandTracker
+from mastic.infrastructure.codex_vite_owner_runtime import vite_node_npm_path
 
 
 _NODE_RUNTIME = re.compile(r"node:([0-9]+\.[0-9]+\.[0-9]+)\Z")
@@ -443,7 +444,7 @@ class CodexViteOwnerLifecycle:
                 "--node",
                 runtime,
                 "--",
-                str(self._vp_home / "bin" / "npm"),
+                str(vite_node_npm_path(self._vp_home, runtime)),
                 "install",
                 "--global",
                 "--ignore-scripts",
